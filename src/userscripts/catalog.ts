@@ -200,8 +200,8 @@ export const seededNamesItem = storage.defineItem<string[]>('local:userscripts.s
  * made from the offer record rather than from the catalog's contents.
  *
  * Bundled installs carry pinned ids (see `UserscriptSeed`), so two fresh profiles
- * seed byte-identical catalogs and a cassette recorded in one replays in another.
- * Unedited pre-stable-id installs are migrated to the pinned id in place.
+ * seed byte-identical catalogs. Unedited pre-stable-id installs are migrated to
+ * the pinned id in place.
  */
 export async function seedDefaults(now: () => number = Date.now): Promise<Userscript[]> {
   const current = await listUserscripts();
@@ -217,7 +217,7 @@ export async function seedDefaults(now: () => number = Date.now): Promise<Usersc
   // carries a random UUID; when the stored copy is byte-identical to the seed it is
   // the bundled script, not user work, so rewrite its id to the pinned one. Edited
   // copies, agent-written scripts, and user scripts that happen to share a name keep
-  // their ids — their catalogs genuinely differ, and a cassette miss there is correct.
+  // their ids — their catalogs genuinely differ from the bundle.
   const seedByName = new Map(BUNDLED_USERSCRIPTS.map((seed) => [seed.name, seed]));
   const stableIds = new Set(BUNDLED_USERSCRIPTS.map((seed) => seed.id));
   const takenStable = new Set(current.filter((s) => stableIds.has(s.id)).map((s) => s.id));

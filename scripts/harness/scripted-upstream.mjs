@@ -1,14 +1,11 @@
 /**
  * Preloaded into the HARNESS's own host process only (`node --import` in the wrapper the
  * harness writes into its temp dir; host/bin/nanobrowser-host is never touched). Replaces
- * `globalThis.fetch`, which is the host's only way out to a model:
+ * `globalThis.fetch`, which is the host's only way out to a model.
  *
- * - NANOBROWSER_CASSETTE=record: OpenRouter-shaped requests are answered by a scripted
- *   Leader and Follower defined below, and the host's own cassette code records every
- *   reply. Nothing leaves the machine; the fake key the harness's `doppler` shim hands
- *   the host is only ever seen by this function.
- * - NANOBROWSER_CASSETTE=replay: every fetch throws. The run can only succeed if the
- *   host's cassette replay serves every model call from disk.
+ * OpenRouter-shaped requests are answered by a scripted Leader and Follower defined
+ * below. Nothing leaves the machine; the fake key the harness's `doppler` shim hands
+ * the host is only ever seen by this function.
  *
  * The script is a policy, not a transcript. Each reply is derived from what the
  * extension actually sent -- the Follower's page snapshot, the text its extract_text
@@ -21,7 +18,6 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 
-const mode = process.env.NANOBROWSER_CASSETTE ?? 'off';
 const logPath = process.env.NB_HARNESS_UPSTREAM_LOG;
 
 const ROW_RE = /\b([A-Z]{2}-\d{4})\s*·\s*([^·\n]+?)\s*·\s*(\d+) in stock/g;
@@ -177,11 +173,6 @@ globalThis.fetch = async (input, init = {}) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
   const method = (init.method ?? 'GET').toUpperCase();
 
-  if (mode === 'replay') {
-    record({ sealed: true, method, url });
-    throw new Error(`harness: network is sealed in cassette replay mode (${method} ${url})`);
-  }
-
   const u = new URL(url);
   if (u.origin !== 'https://openrouter.ai' && u.origin !== 'https://api.kilo.ai') {
     record({ refused: true, method, url });
@@ -213,44 +204,4 @@ globalThis.fetch = async (input, init = {}) => {
   return json(404, { error: { code: 404, message: `harness: no scripted route for ${method} ${u.pathname}` } });
 };
 
-/**
- * NB_HARNESS_REQUEST_LOG: every inbound `llm.request` frame, with the cassette key the
- * host will compute for it, so a replay miss can be diffed against what was recorded.
- * The tap is attached in the same call that registers main.ts's own stdin listener --
- * attaching earlier would switch stdin to flowing mode before the host is listening.
- */
-const requestLog = process.env.NB_HARNESS_REQUEST_LOG;
-if (requestLog) {
-  const { cassetteKey } = await import(new URL('../../host/src/cassette.ts', import.meta.url).href);
-  let pending = Buffer.alloc(0);
-  const tap = (chunk) => {
-    pending = Buffer.concat([pending, chunk]);
-    while (pending.length >= 4) {
-      const len = pending.readUInt32LE(0);
-      if (pending.length < 4 + len) break;
-      const frame = pending.subarray(4, 4 + len).toString('utf8');
-      pending = pending.subarray(4 + len);
-      try {
-        const msg = JSON.parse(frame);
-        if (msg?.type !== 'llm.request') continue;
-        fs.appendFileSync(
-          requestLog,
-          JSON.stringify({ at: Date.now(), key: cassetteKey(msg), url: msg.url, model: msg.body?.model ?? null, messages: msg.body?.messages ?? null }) + '\n',
-        );
-      } catch {
-        /* diagnostics only */
-      }
-    }
-  };
-  const on = process.stdin.on.bind(process.stdin);
-  let tapped = false;
-  process.stdin.on = (event, listener) => {
-    if (event === 'data' && !tapped) {
-      tapped = true;
-      on('data', tap);
-    }
-    return on(event, listener);
-  };
-}
-
-record({ preload: true, mode, pid: process.pid });
+record({ preload: true, pid: process.pid });

@@ -318,7 +318,7 @@ describe('reconnect with backoff', () => {
   it('resets the backoff to the initial delay once hello proves the new port is live', () => {
     const { client, ports } = makeClient();
     client.connect();
-    ports[0]!.emit({ type: 'hello', hostVersion: '0.0.1', dev: false, cassette: 'off' });
+    ports[0]!.emit({ type: 'hello', hostVersion: '0.0.1', dev: false });
 
     ports[0]!.disconnect();
     vi.advanceTimersByTime(INITIAL_BACKOFF_MS);
