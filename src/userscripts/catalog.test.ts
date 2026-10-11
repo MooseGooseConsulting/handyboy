@@ -205,8 +205,7 @@ describe('userscript catalog', () => {
       const first = await seedDefaults(() => 99);
       expect(first.map((s) => s.id)).toEqual(BUNDLED_USERSCRIPTS.map((s) => s.id));
 
-      // A second profile: empty storage, same bundle, same ids — this is what lets a
-      // cassette recorded in one profile replay in another.
+      // A second profile: empty storage, same bundle, same pinned ids.
       fakeBrowser.reset();
       const second = await seedDefaults(() => 100);
       expect(second.map((s) => s.id)).toEqual(first.map((s) => s.id));

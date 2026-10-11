@@ -1,6 +1,5 @@
-import { CassetteStore, cassetteKey, normalizePath, normalizeRequest, type CassetteEntry, type KnownOrigin } from './cassette.ts';
-import { log } from './log.ts';
-import { CHUNK_BYTES, KILO_BASE, OPENROUTER_BASE, type CassetteMode, type LlmRequestMsg, type OutboundMsg } from './protocol.ts';
+import { normalizeRequest, type KnownOrigin } from './origins.ts';
+import { CHUNK_BYTES, KILO_BASE, OPENROUTER_BASE, type LlmRequestMsg, type OutboundMsg } from './protocol.ts';
 import type { SecretStore } from './secrets.ts';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -9,8 +8,6 @@ export interface LlmDeps {
   fetch: FetchLike;
   secrets: SecretStore;
   send: (msg: OutboundMsg) => void;
-  cassetteMode: CassetteMode;
-  cassettes: CassetteStore;
   referer?: string;
   title?: string;
 }
@@ -175,24 +172,6 @@ export class LlmProxy {
 
   async request(msg: LlmRequestMsg): Promise<void> {
     const { send } = this.deps;
-    let key: string;
-    try {
-      key = cassetteKey(msg);
-    } catch (err) {
-      send({ type: 'llm.error', id: msg.id, code: 'bad_request', message: (err as Error).message });
-      return;
-    }
-
-    if (this.deps.cassetteMode === 'replay') {
-      const entry = await this.deps.cassettes.read(key);
-      if (!entry) {
-        send({ type: 'llm.error', id: msg.id, code: 'cassette_miss', message: `no cassette for ${key}` });
-        return;
-      }
-      for (const bytes of entry.chunks) send({ type: 'llm.chunk', id: msg.id, bytes });
-      send({ type: 'llm.end', id: msg.id, status: entry.status, headers: entry.headers });
-      return;
-    }
 
     // Which credential to attach is decided by the request's own URL origin (C-06/C-07
     // security seam), never by anything the client asserts about itself -- so this
@@ -230,7 +209,6 @@ export class LlmProxy {
 
     const controller = new AbortController();
     this.#inflight.set(msg.id, controller);
-    const recorded: string[] = [];
 
     try {
       const res = await this.deps.fetch(url, {
@@ -249,7 +227,6 @@ export class LlmProxy {
           const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
           for (let off = 0; off < buf.byteLength; off += CHUNK_BYTES) {
             const bytes = buf.subarray(off, Math.min(off + CHUNK_BYTES, buf.byteLength)).toString('base64');
-            if (this.deps.cassetteMode === 'record') recorded.push(bytes);
             send({ type: 'llm.chunk', id: msg.id, bytes });
           }
         }
@@ -257,19 +234,6 @@ export class LlmProxy {
 
       const outHeaders = headersToObject(res.headers);
       send({ type: 'llm.end', id: msg.id, status: res.status, headers: outHeaders });
-
-      if (this.deps.cassetteMode === 'record') {
-        const entry: CassetteEntry = {
-          key,
-          url: normalizePath(msg.url),
-          model: (msg.body as Record<string, unknown> | undefined)?.['model'] ?? null,
-          status: res.status,
-          headers: outHeaders,
-          chunks: recorded,
-        };
-        await this.deps.cassettes.write(entry);
-        log('info', 'cassette recorded', { key, chunks: recorded.length });
-      }
     } catch (err) {
       const aborted = controller.signal.aborted;
       send({

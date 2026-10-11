@@ -32,8 +32,9 @@ out of scope by decision (§4).
    read model; `chrome.downloads` is a worse channel than the one already open.
 8. Attaching *any* CDP client to a Chrome not launched with `--remote-debugging-port` is impossible,
    so no external driver participates (§4).
-9. Determinism comes from a **replay cassette in the native host** — the same host that proxies the
-   model records and replays completions — not from a second browser.
+9. The owned browser's model answers come from the scripted policy. The other two tiers are
+   `scripts/e2e.sh`, against the user's already-running Chrome, and `run_live` in
+   `scripts/harness.sh` (real Doppler, real OpenRouter, nine tasks).
 10. Claude-in-Chrome drives the browser with `chrome.debugger`. One debugger client per tab, and
     attaching raises a banner — never concurrent with our own R-13 escalation. Post-run inspector only.
 
@@ -305,12 +306,11 @@ derived from the load path and the registration survives rebuilds. The rest is s
 7. **Independent inspection, strictly after `done`** — only then invoke Claude-in-Chrome to read the
    page and compare against the answer. Never concurrently (§5).
 
-### Determinism without a second browser
+### Scripted policy and the live tiers
 
-Put the cassette in the host, where the model calls already flow. `{"record":"<name>"}` writes each
-completion to `cassettes/<name>.jsonl`; `{"replay":"<name>"}` serves them back in order and fails
-loudly on an unexpected prompt hash. Same extension, same real Chrome, same real page — only the
-model is pinned: a fast repeatable regression run, plus a nightly live-model run for honest signal.
+The owned-browser scripted pass is the scripted policy: the harness answers from the snapshot the
+extension sent. `scripts/e2e.sh` is the real-Chrome tier, against the user's already-running Chrome.
+`run_live` in `scripts/harness.sh` is a third tier — real Doppler, real OpenRouter, nine tasks.
 
 ### The dev-only hook, and compiling it out
 
@@ -382,8 +382,7 @@ unchanged. Both sides redact `sk-or-` shapes (R-12).
 
 ## Risks
 
-- **One tier, no safety net.** Every regression is now caught by a run against a live third-party
-  site. Cassette mode is what keeps that tolerable — build it with the harness, not after it.
+- **Three tiers.** See Scripted policy and the live tiers.
 - **The one manual click.** If the extension is ever removed, the tier needs a human before it runs
   again. Document it; do not automate around it. Pinning the ID with `key` limits how often.
 - **Model nondeterminism.** Assert on structure and control-flow events, never on model prose.

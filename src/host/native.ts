@@ -84,15 +84,12 @@ export type HostRequestMsg =
 
 /* ---------------- wire: host -> extension ---------------- */
 
-export type CassetteMode = 'off' | 'record' | 'replay';
-
 export type ErrorCode =
   | 'bad_request'
   | 'unknown_type'
   | 'no_key'
   | 'upstream'
   | 'aborted'
-  | 'cassette_miss'
   | 'io'
   | 'internal';
 
@@ -100,7 +97,6 @@ export interface HelloMsg {
   type: 'hello';
   hostVersion: string;
   dev: boolean;
-  cassette: CassetteMode;
 }
 
 export interface KeyStatusResult {
