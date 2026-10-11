@@ -97,6 +97,7 @@ function harness(options: {
   follower: (call: FakeCall) => FakeTurn;
   leaderRespond?: (call: FakeCall) => FakeTurn;
   page?: FakePageTools;
+  planningInterval?: number;
 }): Promise<{ events: RunEvent[]; ended: RunEndedEvent; follower: FakeChatModel }> {
   const events: RunEvent[] = [];
   const page = options.page ?? new FakePageTools();
@@ -110,7 +111,10 @@ function harness(options: {
 
   const handle = startRun({
     prompt: 'find the widget',
-    config: baseConfig,
+    config: {
+      ...baseConfig,
+      planningInterval: options.planningInterval ?? baseConfig.planningInterval,
+    },
     tools: page,
     models: { leader, follower },
     onEvent: (event) => events.push(event),
@@ -315,6 +319,25 @@ describe('follower history is bounded', () => {
     expect(kept).toEqual(turn2);
     expect(kept[0]).toBeInstanceOf(HumanMessage);
     expect(kept.filter((m) => m instanceof ToolMessage)).toHaveLength(1);
+  });
+
+  // The cases above call trimFollowerHistory directly, so deleting it from the
+  // Follower invoke stays green. Five tool calls is the first invoke where an
+  // untrimmed transcript would carry every observation. The cadence stays above
+  // that so a replan cannot take the fifth call.
+  it('shows the fifth follower tool call only the kept turns plus the new observation', async () => {
+    const { follower } = await harness({
+      planningInterval: 6,
+      follower: (call) =>
+        call.index < 4
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+    });
+
+    expect(follower.calls).toHaveLength(5);
+    const fifth = follower.calls[4]!;
+    const observations = fifth.messages.filter((message) => message instanceof HumanMessage);
+    expect(observations).toHaveLength(FOLLOWER_HISTORY_TURNS + 1);
   });
 });
 
