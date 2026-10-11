@@ -200,8 +200,9 @@ export const seededNamesItem = storage.defineItem<string[]>('local:userscripts.s
  * made from the offer record rather than from the catalog's contents.
  *
  * Bundled installs carry pinned ids (see `UserscriptSeed`), so two fresh profiles
- * seed byte-identical catalogs. Unedited pre-stable-id installs are migrated to
- * the pinned id in place.
+ * receive the same scripts under the same ids. Each install stamps its own
+ * `updatedAt`. Unedited pre-stable-id installs are migrated to the pinned id
+ * in place.
  */
 export async function seedDefaults(now: () => number = Date.now): Promise<Userscript[]> {
   const current = await listUserscripts();
