@@ -21,6 +21,7 @@ import type { RunEvent } from '@/src/messaging/contract';
 import type { Config } from '@/src/storage';
 import {
   actionKey,
+  compactObservations,
   decideNext,
   followerFeedback,
   trimFollowerHistory,
@@ -339,19 +340,108 @@ describe('follower history is bounded', () => {
   // Follower invoke stays green. Five tool calls is the first invoke where an
   // untrimmed transcript would carry every observation. The cadence stays above
   // that so a replan cannot take the fifth call.
-  it('shows the fifth follower tool call only the kept turns plus the new observation', async () => {
-    const { follower } = await harness({
-      planningInterval: 6,
-      follower: (call) =>
-        call.index < 4
-          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
-          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
-    });
+  const fiveClicks = (call: FakeCall): FakeTurn =>
+    call.index < 4
+      ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
+      : { kind: 'tool', name: 'done', args: { summary: 'found it' } };
+
+  /** Every text block in a call's prompt, in order. */
+  const textBlocks = (call: FakeCall): string[] =>
+    call.messages.flatMap((message) =>
+      typeof message.content === 'string'
+        ? [message.content]
+        : message.content.flatMap((block) => (block.type === 'text' ? [String(block.text)] : [])),
+    );
+
+  it('sends exactly one page snapshot on the fifth Follower call', async () => {
+    const { follower } = await harness({ planningInterval: 6, follower: fiveClicks });
 
     expect(follower.calls).toHaveLength(5);
     const fifth = follower.calls[4]!;
     const observations = fifth.messages.filter((message) => message instanceof HumanMessage);
     expect(observations).toHaveLength(FOLLOWER_HISTORY_TURNS + 1);
+    const snapshots = textBlocks(fifth).filter((text) => text.startsWith('Page snapshot:'));
+    expect(snapshots).toHaveLength(1);
+    // The one that survives is the current page, not a stale copy.
+    expect(JSON.stringify(fifth.messages.at(-1)?.content)).toContain('Page snapshot:');
+  });
+
+  it("replaces a kept turn's snapshot with a note naming its step", async () => {
+    const { follower } = await harness({ planningInterval: 6, follower: fiveClicks });
+
+    const notes = textBlocks(follower.calls[4]!).filter((text) => text.includes('omitted: superseded'));
+    expect(notes).toEqual([
+      '[page snapshot from step 2 omitted: superseded]',
+      '[page snapshot from step 3 omitted: superseded]',
+      '[page snapshot from step 4 omitted: superseded]',
+    ]);
+  });
+
+  it('drops screenshots from kept Follower turns as the Leader already does', async () => {
+    const { follower } = await harness({ planningInterval: 6, observe: 'both', follower: fiveClicks });
+
+    const fifth = follower.calls[4]!;
+    const images = fifth.messages.flatMap((message) =>
+      Array.isArray(message.content) ? message.content.filter((block) => block.type === 'image') : [],
+    );
+    expect(images).toHaveLength(1);
+    expect(JSON.stringify(fifth.messages.at(-1)?.content)).toContain('"type":"image"');
+    expect(textBlocks(fifth)).toContain('[screenshot from step 4 omitted: superseded]');
+  });
+});
+
+describe('compactObservations keeps the transcript valid', () => {
+  const observation = (step: number, snapshot = true) =>
+    new HumanMessage({
+      content: [
+        { type: 'text', text: `Objective: x\nStep ${step} of at most 10.` },
+        ...(snapshot ? [{ type: 'text' as const, text: `Page snapshot:\npage ${step} [ref=e1]` }] : []),
+      ],
+    });
+  const act = (id: string, name: string) =>
+    new AIMessage({ content: '', tool_calls: [{ id, name, args: { ref: 'e1' } }] });
+  const result = (id: string, name: string, content: string, status?: 'success' | 'error') =>
+    new ToolMessage({ tool_call_id: id, name, content, ...(status ? { status } : {}) });
+
+  it('keeps every tool call id and tool result so the transcript stays valid', () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'page 1 again [ref=e1]'),
+      observation(2), act('b', 'extract_text'), result('b', 'extract_text', 'all the listing text'),
+      observation(3), act('c', 'click'), result('c', 'click', 'clicked e1'),
+      observation(4),
+    ];
+    const compacted = compactObservations(history);
+
+    expect(compacted).toHaveLength(history.length);
+    expect(compacted.map((m) => m.type)).toEqual(history.map((m) => m.type));
+    const ids = (messages: BaseMessage[]) =>
+      messages.flatMap((m) =>
+        m instanceof AIMessage ? (m.tool_calls ?? []).map((c) => `call:${c.id}`) : m instanceof ToolMessage ? [`result:${m.tool_call_id}`] : [],
+      );
+    expect(ids(compacted)).toEqual(ids(history));
+    // Results that are not page snapshots pass through as the same objects.
+    expect(compacted[5]).toBe(history[5]);
+    expect(compacted[8]).toBe(history[8]);
+    expect(compacted[2]!.content).toBe('[page snapshot from step 1 omitted: superseded]');
+    expect(compacted.at(-1)).toBe(history.at(-1));
+  });
+
+  it('keeps the newest snapshot tool result, because the model sees a result only on the next call', () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'fresh page [ref=e9]'),
+      observation(2, false),
+    ];
+    const compacted = compactObservations(history);
+    expect(compacted[2]).toBe(history[2]);
+    expect(compacted[0]!.content).toContainEqual({ type: 'text', text: '[page snapshot from step 1 omitted: superseded]' });
+  });
+
+  it("keeps a failed snapshot call's error text", () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'tab is not scriptable', 'error'),
+      observation(2),
+    ];
+    expect(compactObservations(history)[2]).toBe(history[2]);
   });
 });
 
@@ -529,6 +619,32 @@ describe('the Leader receives actionable Follower feedback', () => {
     // The whole Leader transcript, not only the newest message: earlier reports
     // stay in the reducer unless they are compacted before the next replan.
     expect(requests[2]).not.toContain('interval-0');
+  });
+
+  it("a later replan does not resend an earlier replan's leader_snapshot text", async () => {
+    const evidence = 'page: [e1] heading "LEADER-EVIDENCE-0123"';
+    const page = new FakePageTools({ snapshots: [{ text: evidence, tokens: 10 }] });
+    const { leader } = await harness({
+      page,
+      leaderRespond: (call) =>
+        call.index === 0 ? { kind: 'tool', name: 'leader_snapshot', args: {} } : plan(),
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'RETURN_TO_LEADER' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'done' } },
+    });
+
+    expect(leader.calls).toHaveLength(3);
+    const sentText = (call: FakeCall) => call.messages.map((m) => JSON.stringify(m.content)).join('\n');
+    // The replan that pulled the evidence plans from it in full...
+    expect(sentText(leader.calls[1]!)).toContain('LEADER-EVIDENCE-0123');
+    // ...and the next replan gets a note in its place, its call id still answered.
+    const replan = leader.calls[2]!;
+    expect(sentText(replan)).not.toContain('LEADER-EVIDENCE-0123');
+    const stub = replan.messages.find((m): m is ToolMessage => m instanceof ToolMessage && m.name === 'leader_snapshot');
+    expect(stub?.content).toBe('[leader_snapshot result from the replan at step 0 omitted: superseded]');
+    const callIds = replan.messages.flatMap((m) => (m instanceof AIMessage ? (m.tool_calls ?? []).map((c) => c.id) : []));
+    expect(callIds).toContain(stub?.tool_call_id);
   });
 
   it('tells the Leader what a tool-less Follower actually said', async () => {

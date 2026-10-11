@@ -48,7 +48,8 @@ import { FollowerSignalSchema, LEADER_READ_CAP, READ_TOOL_NAMES, TERMINAL_TOOLS,
  * is ~17k tokens before any tool result. Unbounded, the history reached 285,351
  * tokens against a 262,144-token model and the run died with a 400. Older
  * observations are stale snapshots of a page that has since changed, so they are
- * not merely expensive, they are wrong to resend.
+ * not merely expensive, they are wrong to resend. {@link compactObservations} stubs
+ * the kept turns' copies; this bound still caps their tool results.
  */
 export const FOLLOWER_HISTORY_TURNS = 3;
 
@@ -78,6 +79,107 @@ export function trimFollowerHistory(
   let kept = seen >= want ? messages.slice(cut) : messages.slice();
   while (kept.length > 0 && kept[0] instanceof ToolMessage) kept = kept.slice(1);
   return kept.length > 0 ? kept : messages.slice(-1);
+}
+
+/** Opens the page snapshot block of a Follower observation. */
+const SNAPSHOT_HEADER = 'Page snapshot:\n';
+/** The step line every Follower observation carries; compaction reads turn numbers off it. */
+const STEP_LINE = /^Step (\d+) of at most /m;
+
+function supersededSnapshot(step: number | undefined): string {
+  return `[page snapshot from step ${step ?? 'unknown'} omitted: superseded]`;
+}
+
+function supersededScreenshot(step: number | undefined): string {
+  return `[screenshot from step ${step ?? 'unknown'} omitted: superseded]`;
+}
+
+function isSnapshotBlock(block: unknown): boolean {
+  if (typeof block !== 'object' || block === null) return false;
+  const { type, text } = block as { type?: unknown; text?: unknown };
+  return type === 'text' && typeof text === 'string' && text.startsWith(SNAPSHOT_HEADER);
+}
+
+function hasSnapshotBlock(message: BaseMessage): boolean {
+  return message instanceof HumanMessage && Array.isArray(message.content) && message.content.some(isSnapshotBlock);
+}
+
+/** A successful `snapshot` tool result: a failed one is an error the model should still read. */
+function isSnapshotResult(message: BaseMessage): message is ToolMessage {
+  return message instanceof ToolMessage && message.name === 'snapshot' && message.status !== 'error';
+}
+
+function stepOf(message: BaseMessage): number | undefined {
+  const match = STEP_LINE.exec(textOf(message));
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * At most one page snapshot per Follower call.
+ *
+ * Every kept turn used to carry its own full snapshot, so with three kept turns each
+ * call resent four copies of a page that had usually not changed (~72k tokens a call
+ * on eBay). Older copies are stale by definition, and resending them is how a run hit
+ * the provider's context limit. So, for the prompt only (stored history is untouched):
+ * - an earlier turn's `Page snapshot:` block becomes a note naming its step,
+ * - an earlier turn's screenshot becomes a note, as the Leader already does for its own,
+ * - a `snapshot` tool result is stubbed once a newer snapshot is in the prompt. The
+ *   newest one stays, because a tool result is only ever seen on the call after it.
+ *
+ * The last message is the current observation and is never touched. Message order,
+ * tool-call ids and every other tool result are kept, so the transcript stays valid.
+ */
+export function compactObservations(messages: BaseMessage[]): BaseMessage[] {
+  const last = messages.length - 1;
+  let newestSnapshot = -1;
+  for (let i = last; i >= 0; i--) {
+    if (hasSnapshotBlock(messages[i]!) || isSnapshotResult(messages[i]!)) {
+      newestSnapshot = i;
+      break;
+    }
+  }
+  let step: number | undefined;
+  return messages.map((message, i) => {
+    if (message instanceof HumanMessage) step = stepOf(message) ?? step;
+    if (i === last) return message;
+    if (isSnapshotResult(message) && i < newestSnapshot) {
+      return new ToolMessage({
+        tool_call_id: message.tool_call_id,
+        name: message.name,
+        status: message.status,
+        content: supersededSnapshot(step),
+      });
+    }
+    if (!(message instanceof HumanMessage) || !Array.isArray(message.content)) return message;
+    if (!message.content.some((block) => isSnapshotBlock(block) || isImageBlock(block))) return message;
+    return new HumanMessage({
+      content: message.content.map((block): ContentBlock => {
+        if (isSnapshotBlock(block)) return { type: 'text', text: supersededSnapshot(step) };
+        if (isImageBlock(block)) return { type: 'text', text: supersededScreenshot(step) };
+        return block as ContentBlock;
+      }),
+    });
+  });
+}
+
+/** Leader evidence reads whose full text belongs to the replan that pulled it. */
+const LEADER_PAGE_READS: ReadonlySet<string> = new Set(['leader_snapshot', 'leader_extract_text']);
+
+/**
+ * A Leader read is evidence for the replan that asked for it. Stored in full, every
+ * later replan resent it (up to 60,000 characters each) as if it were current. The
+ * call id and the note stay so the transcript remains valid and the Leader knows it
+ * looked; a failed read keeps its error text.
+ */
+function compactStoredRead(message: BaseMessage, step: number): BaseMessage {
+  if (!(message instanceof ToolMessage) || !message.name || !LEADER_PAGE_READS.has(message.name)) return message;
+  if (message.status === 'error') return message;
+  return new ToolMessage({
+    tool_call_id: message.tool_call_id,
+    name: message.name,
+    status: message.status,
+    content: `[${message.name} result from the replan at step ${step} omitted: superseded]`,
+  });
 }
 
 /** Consecutive tool-call-less Follower turns before a run is called stalled. */
@@ -634,7 +736,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
             result: { callId, name: call.name, ok: false, summary: summarize(result), durationMs: now() - started, chars: result.length },
             at: now(),
           });
-          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: 'error' }));
         }
         answerExtras();
         continue;
@@ -653,7 +755,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
         result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
-      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
       answerExtras();
     } else {
       // Not the plan and not a read (a Follower tool name, say): answer the call
@@ -700,7 +802,9 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   });
 
   return {
-    leaderMessages: messages.map((message) => compactStoredFeedback(stripImageBlocks(message))),
+    leaderMessages: messages.map((message) =>
+      compactStoredRead(compactStoredFeedback(stripImageBlocks(message)), state.stepCount),
+    ),
     plan,
     subgoals,
     currentSubgoal,
@@ -747,7 +851,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   if (ctx.observe === 'dom' || ctx.observe === 'both') {
     const snap = await ctx.page.snapshot();
     tokens = snap.tokens;
-    blocks.push({ type: 'text', text: `Page snapshot:\n${snap.text}` });
+    blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snap.text}` });
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
     const shot = await ctx.page.screenshot();
@@ -766,7 +870,10 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   // --- act ----------------------------------------------------------------
   const human = new HumanMessage({ content: blocks });
   const bound = ctx.followerModel.bindTools?.(ctx.toolset.all) ?? ctx.followerModel;
-  const sent = [new SystemMessage(FOLLOWER_SYSTEM), ...trimFollowerHistory(state.followerMessages), human];
+  const sent = [
+    new SystemMessage(FOLLOWER_SYSTEM),
+    ...compactObservations([...trimFollowerHistory(state.followerMessages), human]),
+  ];
   const response = (await bound.invoke(sent, config)) as AIMessage;
   emitUsage(config, role, ctx.followerModel, sent, response);
 
@@ -827,7 +934,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
       result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
       at: now(),
     });
-    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
 
     note = typeof declaredNote === 'string' ? declaredNote : '';
     const terminal = TERMINAL_TOOLS[call.name];
