@@ -19,7 +19,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 HARNESS="$ROOT/scripts/harness"
-DATA="$HOME/.local/share/nanobrowser"
+# Same rule as host/src/paths.ts dataDir(), so the verdict reads the logs the host wrote.
+if [ -n "${NB_HOME:-}" ]; then DATA="$NB_HOME/.local/share/nanobrowser"
+else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/nanobrowser"; fi
 EXT_DIR="$ROOT/.output/chrome-mv3"
 CHROME="${NB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google-chrome || true)}"
 CHROME_DIR="${NB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
@@ -27,9 +29,8 @@ LEADER="${NB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
 FOLLOWER="${NB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
 RUN_TIMEOUT="${NB_LIVE_TIMEOUT:-600}"
 CONNECT_WAIT="${NB_LIVE_CONNECT_WAIT:-300}"
-# Tasks that need nothing beyond a local page. readonly needs the panel's Setup toggle
-# (nb-run options cannot carry a boolean), and ebay hits a real site, so both are opt-in.
-DEFAULT_TASKS="inventory,userscript_debug,escalation,login,redaction,stall,download"
+# Tasks that need nothing beyond a local page. ebay hits a real site, so it is opt-in.
+DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,stall,download"
 
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
@@ -94,17 +95,19 @@ cmd_setup() {
 
   # Chrome loads from wherever "Load unpacked" pointed, which may be another checkout
   # (a worktree builds into its own .output). Copy this build there so a reload sees it.
+  # Every profile that has it gets the build: the CLI cannot tell which profile's worker
+  # answers the socket, and a reload of an unsynced profile would test stale code.
   local reg profile path us
-  reg="$(registrations | head -n1)"
-  if [ -n "$reg" ]; then
-    IFS=$'\t' read -r profile path us <<<"$reg"
+  reg="$(registrations)"
+  while IFS=$'\t' read -r profile path us; do
+    [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ "$path" != "$EXT_DIR" ]; then
       mkdir -p "$path" && rsync -a --delete "$EXT_DIR/" "$path/" || die "could not copy the build to $path"
       echo "copied this build there"
     fi
-    [ "$us" = "True" ] || echo "   NOTE: \"Allow User Scripts\" is off; userscript tasks fail until you turn it on in the extension's Details"
-  fi
+    [ "$us" = "True" ] || echo "   NOTE: \"Allow User Scripts\" is off in \"$profile\"; userscript tasks fail until you turn it on in the extension's Details"
+  done <<<"$reg"
 
   step "native host"
   # The wrapper bakes in an absolute path, so only install when it is missing or is not the
@@ -115,6 +118,13 @@ cmd_setup() {
     echo "already registered: $wrapper"
   else
     bash host/install.sh --dev | sed 's/^/   /' || die "host/install.sh failed"
+    # install.sh writes only under the default Chrome and Chromium config dirs.
+    if [ ! -f "$manifest" ]; then
+      mkdir -p "$(dirname "$manifest")" \
+        && cp "$HOME/.config/google-chrome/NativeMessagingHosts/com.nanobrowser.host.json" "$manifest" \
+        || die "could not register the host under $CHROME_DIR"
+      echo "   installed: $manifest"
+    fi
   fi
 
   step "extension"
@@ -125,18 +135,20 @@ cmd_setup() {
     # An idle MV3 worker does not run until something wakes it; one of its own pages does.
     "$CHROME" "chrome-extension://$(ext_id)/sidepanel.html" >/dev/null 2>&1 &
     if wait_for_extension 20; then
-      host/bin/nb-reload --timeout 30 >/dev/null 2>&1 || true
+      host/bin/nb-reload --timeout 30 >/dev/null 2>&1 || die "woke the extension but nb-reload failed, so it may still run the old build (host/bin/nb-logs)"
       echo "woke the extension through its own page and reloaded it"
     else
       die "the extension is registered but did not start; it may be disabled or in an error state at chrome://extensions"
     fi
   else
-    printf '%s' "$EXT_DIR" | wl-copy 2>/dev/null && echo "copied to clipboard: $EXT_DIR"
+    local copied=""
+    printf '%s' "$EXT_DIR" | wl-copy 2>/dev/null && copied=" (also on your clipboard)"
     "$CHROME" chrome://extensions >/dev/null 2>&1 &
     cat <<MSG
    This Chrome profile has never loaded nanobrowser, and Chrome only allows that by hand:
      1. In the chrome://extensions tab that just opened, turn Developer mode ON.
-     2. Click "Load unpacked" and paste the path from your clipboard.
+     2. Click "Load unpacked" and choose this folder${copied}:
+          $EXT_DIR
      3. Open nanobrowser's Details and turn on "Allow User Scripts".
    This is needed once per profile, ever.
 MSG
@@ -158,17 +170,40 @@ MSG
   fi
 }
 
+FIXTURE_PID=""
+ACTIVE_STDERR=""
+
+run_id_in() { grep -o 'runId=[A-Za-z0-9_-]*' "$1" 2>/dev/null | head -n1 | cut -d= -f2; }
+
+cleanup_test() {
+  local id
+  if [ -n "$ACTIVE_STDERR" ]; then
+    id="$(run_id_in "$ACTIVE_STDERR")"
+    [ -n "$id" ] && { echo "cancelling in-flight run $id"; host/bin/nb-cancel "$id" >/dev/null 2>&1 || true; }
+  fi
+  [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null
+  return 0
+}
+
 cmd_test() {
   local tasks="${1:-$DEFAULT_TASKS}"
+  # The eBay verdict compares against listings scraped independently of the agent, which
+  # needs a second reader of the page. The harness-owned Chrome has one (CDP); this one
+  # deliberately does not, so the task could only ever fail here.
+  [[ ",$tasks," == *,ebay,* ]] && die "ebay needs independent page ground truth; run it with: just harness --live-only --live-tasks ebay"
   host_up || die "the extension is not connected; run scripts/live.sh setup first"
   host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
 
-  local out="$ROOT/runs/live-$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$ROOT/runs"
+  local out; out="$(mktemp -d "$ROOT/runs/live-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")" || die "could not create a results dir"
   mkdir -p "$out/fixture"
   step "fixture server"
   node "$HARNESS/live-fixture-server.mjs" --seed "$RANDOM" --out "$out/fixture" >"$out/fixture.log" 2>&1 &
-  local fixture_pid=$!
-  trap 'kill '"$fixture_pid"' 2>/dev/null' EXIT
+  FIXTURE_PID=$!
+  # Closing nb-run does not stop the run in the extension, so an interrupted test would
+  # leave the agent acting in your browser. Cancel whatever run is in flight on the way out.
+  trap cleanup_test EXIT
+  trap 'exit 130' INT TERM
   for _ in $(seq 50); do [ -f "$out/fixture/ready.json" ] && break; sleep 0.1; done
   [ -f "$out/fixture/ready.json" ] || die "fixture server did not start (see $out/fixture.log)"
   local base; base="$(jq -r .baseUrl "$out/fixture/ready.json")"
@@ -187,9 +222,12 @@ cmd_test() {
     local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
     echo "$(jq -r .title "$tj")  ($url)"
 
-    local opt_args=()
+    # Pin everything the panel also stores, or its last choice leaks in: a Kilo source
+    # would route the Nemotron ids to the wrong gateway, a read-only toggle would block
+    # the writes a task's verdict requires.
+    local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter)
     while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
-      < <(jq -r '.options | to_entries[] | select(.key != "readOnly") | "\(.key)=\(.value)"' "$tj")
+      < <(jq -r '.options | {readOnly: false} + . | to_entries[] | "\(.key)=\(.value)"' "$tj")
 
     local hits0 host0 ext0
     hits0="$(wc -l <"$out/fixture/hits.jsonl" 2>/dev/null || echo 0)"
@@ -197,13 +235,20 @@ cmd_test() {
     ext0="$(wc -l <"$DATA/ext.log" 2>/dev/null || echo 0)"
 
     # A fresh tab, so the run never takes over the page you were reading.
-    "$CHROME" "$url" >/dev/null 2>&1 &
+    # With Chrome running, this hands the URL to it and exits; a failure here means the
+    # run would take over whatever tab is active instead, so the task is not started.
+    if ! timeout 15 "$CHROME" "$url" >/dev/null 2>&1; then
+      echo "could not open a fresh tab for $task; not starting it"
+      fail=$((fail + 1)); echo "FAIL  $task  (no fresh tab)" >>"$out/summary.txt"; continue
+    fi
     sleep 2
 
+    ACTIVE_STDERR="$out/$task-nb-run.stderr"
     timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" "${opt_args[@]}" \
-      >"$out/$task-stream.jsonl" 2>"$out/$task-nb-run.stderr"
+      >"$out/$task-stream.jsonl" 2>"$ACTIVE_STDERR"
     local rc=$? run_id
-    run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$out/$task-nb-run.stderr" | head -n1 | cut -d= -f2)"
+    ACTIVE_STDERR=""
+    run_id="$(run_id_in "$out/$task-nb-run.stderr")"
     if [ "$rc" -eq 124 ] && [ -n "$run_id" ]; then
       echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
       host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true

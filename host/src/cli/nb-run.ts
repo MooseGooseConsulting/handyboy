@@ -5,6 +5,7 @@
  * Sends a run to the extension through the host's dev unix socket and streams the
  * run-log events back until run.end.
  */
+import { parseRunOptions } from './options.ts';
 import { connect, onResponses, send } from './socket-client.ts';
 
 const argv = process.argv.slice(2);
@@ -19,14 +20,7 @@ function flag(name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-const options: Record<string, unknown> = {};
-for (let i = 0; i < argv.length; i++) {
-  if (argv[i] === '--option') {
-    const kv = argv[i + 1] ?? '';
-    const eq = kv.indexOf('=');
-    if (eq > 0) options[kv.slice(0, eq)] = kv.slice(eq + 1);
-  }
-}
+const options = parseRunOptions(argv);
 
 const sock = await connect();
 onResponses(sock, (msg) => {
