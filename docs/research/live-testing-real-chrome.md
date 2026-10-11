@@ -33,7 +33,8 @@ out of scope by decision (§4).
 8. Attaching *any* CDP client to a Chrome not launched with `--remote-debugging-port` is impossible,
    so no external driver participates (§4).
 9. The owned browser's model answers come from the scripted policy. The other two tiers are
-   under Scripted policy and the live tiers.
+   `scripts/e2e.sh`, against the user's already-running Chrome, and `run_live` in
+   `scripts/harness.sh` (real Doppler, real OpenRouter, nine tasks).
 10. Claude-in-Chrome drives the browser with `chrome.debugger`. One debugger client per tab, and
     attaching raises a banner — never concurrent with our own R-13 escalation. Post-run inspector only.
 
