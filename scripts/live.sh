@@ -114,14 +114,19 @@ cmd_setup() {
   # dev build: reinstalling from a worktree would point Chrome at a tree that may vanish.
   local manifest="$CHROME_DIR/NativeMessagingHosts/com.nanobrowser.host.json" wrapper
   wrapper="$(jq -r .path "$manifest" 2>/dev/null || true)"
-  if [ -x "$wrapper" ] && grep -q NANOBROWSER_DEV=1 "$wrapper"; then
+  if [ -z "${NB_LIVE_REINSTALL_HOST:-}" ] && [ -x "$wrapper" ] && grep -q NANOBROWSER_DEV=1 "$wrapper"; then
     echo "already registered: $wrapper"
+    # Host changes in this tree are not live until the wrapper points here; say so rather
+    # than let a run silently exercise another checkout's host.
+    grep -qF "\"$ROOT/host/src/main.ts\"" "$wrapper" \
+      || echo "   NOTE: the host runs from another checkout ($(grep -o '"[^"]*main.ts"' "$wrapper")). NB_LIVE_REINSTALL_HOST=1 points it at this one."
   else
     bash host/install.sh --dev | sed 's/^/   /' || die "host/install.sh failed"
-    # install.sh writes only under the default Chrome and Chromium config dirs.
-    if [ ! -f "$manifest" ]; then
-      mkdir -p "$(dirname "$manifest")" \
-        && cp "$HOME/.config/google-chrome/NativeMessagingHosts/com.nanobrowser.host.json" "$manifest" \
+    # install.sh writes only under ${NB_HOME:-$HOME}'s default Chrome and Chromium config
+    # dirs; a Chrome with another config dir would otherwise keep a stale registration.
+    local installed="${NB_HOME:-$HOME}/.config/google-chrome/NativeMessagingHosts/com.nanobrowser.host.json"
+    if [ "$installed" != "$manifest" ]; then
+      mkdir -p "$(dirname "$manifest")" && cp "$installed" "$manifest" \
         || die "could not register the host under $CHROME_DIR"
       echo "   installed: $manifest"
     fi
@@ -134,7 +139,9 @@ cmd_setup() {
   elif [ -n "$reg" ]; then
     # An idle MV3 worker does not run until something wakes it; one of its own pages does.
     "$CHROME" "chrome-extension://$(ext_id)/sidepanel.html" >/dev/null 2>&1 &
-    if wait_for_extension 20; then
+    # The host binds the socket only after its Doppler lookups, which may take their full
+    # 20 s timeout, so wait past that before calling the extension broken.
+    if wait_for_extension 45; then
       host/bin/nb-reload --timeout 30 >/dev/null 2>&1 || die "woke the extension but nb-reload failed, so it may still run the old build (host/bin/nb-logs)"
       echo "woke the extension through its own page and reloaded it"
     else
@@ -186,13 +193,27 @@ cleanup_test() {
 }
 
 cmd_test() {
-  local tasks="${1:-$DEFAULT_TASKS}"
+  local list=() task
+  read -ra list <<<"$(tr ',' ' ' <<<"${1:-$DEFAULT_TASKS}")"
+  [ "${#list[@]}" -gt 0 ] || die "no tasks given (default: $DEFAULT_TASKS)"
   # The eBay verdict compares against listings scraped independently of the agent, which
   # needs a second reader of the page. The harness-owned Chrome has one (CDP); this one
   # deliberately does not, so the task could only ever fail here.
-  [[ ",$tasks," == *,ebay,* ]] && die "ebay needs independent page ground truth; run it with: just harness --live-only --live-tasks ebay"
+  for task in "${list[@]}"; do
+    [ "$task" = ebay ] && die "ebay needs independent page ground truth; run it with: just harness --live-only --live-tasks ebay"
+  done
   host_up || die "the extension is not connected; run scripts/live.sh setup first"
   host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
+
+  # Chrome opens a command-line URL in its last-used profile. With one registration that
+  # is pinned; with several, the CLI cannot tell which profile's worker owns the socket.
+  local prof_args=() regs
+  regs="$(registrations)"
+  if [ "$(grep -c . <<<"$regs")" -eq 1 ]; then
+    prof_args=(--profile-directory="$(cut -f1 <<<"$regs")")
+  elif [ -n "$regs" ]; then
+    echo "NOTE: nanobrowser is in several Chrome profiles; keep the one you set up frontmost."
+  fi
 
   mkdir -p "$ROOT/runs"
   local out; out="$(mktemp -d "$ROOT/runs/live-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")" || die "could not create a results dir"
@@ -213,8 +234,8 @@ cmd_test() {
   echo "a run acts on whichever tab is active."
 
   : >"$out/summary.txt"
-  local task pass=0 fail=0
-  for task in ${tasks//,/ }; do
+  local pass=0 fail=0
+  for task in "${list[@]}"; do
     step "task $task"
     local tj="$out/$task-task.json"
     node "$HARNESS/live-tasks.mjs" --task "$task" --expected "$out/fixture/expected.json" \
@@ -237,7 +258,8 @@ cmd_test() {
     # A fresh tab, so the run never takes over the page you were reading.
     # With Chrome running, this hands the URL to it and exits; a failure here means the
     # run would take over whatever tab is active instead, so the task is not started.
-    if ! timeout 15 "$CHROME" "$url" >/dev/null 2>&1; then
+    touch "$out/$task.start"
+    if ! timeout 15 "$CHROME" "${prof_args[@]}" "$url" >/dev/null 2>&1; then
       echo "could not open a fresh tab for $task; not starting it"
       fail=$((fail + 1)); echo "FAIL  $task  (no fresh tab)" >>"$out/summary.txt"; continue
     fi
@@ -260,10 +282,21 @@ cmd_test() {
     tail -n +"$((host0 + 1))" "$DATA/host.log" >"$out/$task-host.log" 2>/dev/null || : >"$out/$task-host.log"
     tail -n +"$((ext0 + 1))" "$DATA/ext.log" >"$out/$task-ext.log" 2>/dev/null || : >"$out/$task-ext.log"
 
+    # Only files this task wrote count: Downloads may already hold a matching report from
+    # an earlier run with the same seed. Give an in-progress Chrome download time to land.
+    local dl="$out/$task-downloads"
+    mkdir -p "$dl"
+    for _ in $(seq 10); do
+      find "$HOME/Downloads" -maxdepth 1 -name '*.crdownload' -newer "$out/$task.start" 2>/dev/null | grep -q . || break
+      sleep 1
+    done
+    find "$HOME/Downloads" "$DATA/artifacts" -type f -newer "$out/$task.start" -not -name '*.crdownload' \
+      -exec cp --backup=numbered -t "$dl" {} + 2>/dev/null || true
+
     if node "$HARNESS/live-verdict.mjs" --task "$task" --stream "$runlog" \
          --expected "$out/fixture/expected.json" \
          --host-log "$out/$task-host.log" --ext-log "$out/$task-ext.log" \
-         --download-dirs "$HOME/Downloads:$DATA/artifacts" --hits "$out/$task-hits.jsonl" \
+         --download-dirs "$dl" --hits "$out/$task-hits.jsonl" \
          --json "$out/$task-verdict.json" | tee "$out/$task-verdict.txt"; then
       pass=$((pass + 1)); echo "PASS  $task  run=$run_id" >>"$out/summary.txt"
     else
@@ -281,7 +314,8 @@ case "${1:-}" in
   setup) cmd_setup ;;
   test) shift; cmd_test "${1:-}" ;;
   run) shift
-       exec scripts/e2e.sh --skip-build --leader "$LEADER" --follower "$FOLLOWER" --prompt "$@" ;;
+       exec scripts/e2e.sh --skip-build --leader "$LEADER" --follower "$FOLLOWER" \
+         --leader-source openrouter --follower-source openrouter --prompt "$@" ;;
   status) exec host/bin/nb-status ;;
   logs) exec host/bin/nb-logs ;;
   -h|--help|"") usage ;;
