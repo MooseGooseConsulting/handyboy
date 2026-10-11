@@ -355,6 +355,25 @@ function isImageBlock(block: unknown): boolean {
  * Only the human observation blocks the leader node itself appended are rebuilt;
  * tool traffic (ids matter) passes through untouched.
  */
+const FEEDBACK_HEADER = 'Recent Follower actions and results (not a fresh page observation):\n';
+const FEEDBACK_END = '\nRevise the plan and pick the subgoal to work on next.';
+
+/**
+ * The replan report is for this Leader turn only. The message reducer keeps every
+ * prior turn, and a 2,000-character preview per result across a long run would
+ * resend all of them. Later turns already receive the interval since the last plan.
+ */
+function compactStoredFeedback(message: BaseMessage): BaseMessage {
+  if (!(message instanceof HumanMessage) || typeof message.content !== 'string') return message;
+  const start = message.content.indexOf(FEEDBACK_HEADER);
+  if (start < 0) return message;
+  const end = message.content.indexOf(FEEDBACK_END, start);
+  if (end < 0) return message;
+  return new HumanMessage(
+    `${message.content.slice(0, start)}Recent Follower actions and results: omitted from later Leader turns.${message.content.slice(end)}`,
+  );
+}
+
 function stripImageBlocks(message: BaseMessage): BaseMessage {
   if (!(message instanceof HumanMessage) || !Array.isArray(message.content)) return message;
   if (!message.content.some(isImageBlock)) return message;
@@ -620,7 +639,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   });
 
   return {
-    leaderMessages: messages.map(stripImageBlocks),
+    leaderMessages: messages.map((message) => compactStoredFeedback(stripImageBlocks(message))),
     plan,
     subgoals,
     currentSubgoal,

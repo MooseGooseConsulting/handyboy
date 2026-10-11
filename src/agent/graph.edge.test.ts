@@ -426,7 +426,7 @@ describe('the Leader receives actionable Follower feedback', () => {
     const requests: string[] = [];
     await harness({
       leaderRespond: (call) => {
-        requests.push(JSON.stringify(call.messages.at(-1)?.content));
+        requests.push(call.messages.map((message) => JSON.stringify(message.content)).join('\n'));
         return plan();
       },
       follower: (call) => call.index < 2
@@ -435,6 +435,8 @@ describe('the Leader receives actionable Follower feedback', () => {
     });
     expect(requests).toHaveLength(3);
     expect(requests[2]).toContain('interval-1');
+    // The whole Leader transcript, not only the newest message: earlier reports
+    // stay in the reducer unless they are compacted before the next replan.
     expect(requests[2]).not.toContain('interval-0');
   });
 
