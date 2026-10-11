@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { Dispatcher } from '../src/dispatcher.ts';
 import { CHUNK_BYTES } from '../src/protocol.ts';
 import { setInjector, NullInjector, type InputInjector } from '../src/input/index.ts';
 import { decodeChunks, makeHarness, utf8, type Harness } from './harness.ts';
@@ -200,62 +201,6 @@ describe('llm.abort', () => {
   });
 });
 
-describe('cassettes', () => {
-  const req = {
-    type: 'llm.request' as const,
-    id: 'c1',
-    url: '/chat/completions',
-    body: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
-  };
-
-  it('record writes the stream to disk and still streams to the extension', async () => {
-    h = await makeHarness({ cassetteMode: 'record' });
-    h.fetch.enqueueStream(200, [utf8('hello '), utf8('world')], { 'content-type': 'text/event-stream' });
-    await h.dispatcher.handle(req);
-
-    expect(decodeChunks(h.sent, 'c1')).toBe('hello world');
-    const files = await fs.readdir(h.cassetteDir);
-    expect(files).toHaveLength(1);
-    const entry = JSON.parse(await fs.readFile(path.join(h.cassetteDir, files[0]!), 'utf8'));
-    expect(entry.status).toBe(200);
-    expect(entry.chunks).toHaveLength(2);
-    expect(Buffer.from(entry.chunks[0], 'base64').toString('utf8')).toBe('hello ');
-  });
-
-  it('replay serves the recorded chunks with no network call', async () => {
-    h = await makeHarness({ cassetteMode: 'record' });
-    h.fetch.enqueueStream(201, [utf8('recorded')], { 'x-provider': 'nvidia' });
-    await h.dispatcher.handle(req);
-    const recordedCalls = h.fetch.calls.length;
-
-    const replay = await makeHarness({ cassetteMode: 'replay' });
-    // point the replay harness at the recorded cassette dir
-    const files = await fs.readdir(h.cassetteDir);
-    await fs.mkdir(replay.cassetteDir, { recursive: true });
-    await fs.copyFile(path.join(h.cassetteDir, files[0]!), path.join(replay.cassetteDir, files[0]!));
-
-    await replay.dispatcher.handle(req);
-    expect(replay.fetch.calls).toHaveLength(0);
-    expect(recordedCalls).toBe(1);
-    expect(decodeChunks(replay.sent, 'c1')).toBe('recorded');
-    expect(replay.sent.at(-1)).toMatchObject({ type: 'llm.end', status: 201, headers: { 'x-provider': 'nvidia' } });
-    await replay.cleanup();
-  });
-
-  it('replay fails loudly on an unrecorded request', async () => {
-    h = await makeHarness({ cassetteMode: 'replay' });
-    await h.dispatcher.handle(req);
-    expect(h.fetch.calls).toHaveLength(0);
-    expect(h.sent[0]).toMatchObject({ type: 'llm.error', id: 'c1', code: 'cassette_miss' });
-  });
-
-  it('replay needs no secret at all', async () => {
-    h = await makeHarness({ key: null, cassetteMode: 'replay' });
-    await h.dispatcher.handle(req);
-    expect(h.sent[0]).toMatchObject({ code: 'cassette_miss' });
-  });
-});
-
 describe('runlog.append', () => {
   it('appends to <runId>.jsonl, acks, and mirrors to socket subscribers', async () => {
     h = await makeHarness();
@@ -269,6 +214,46 @@ describe('runlog.append', () => {
     ]);
     expect(h.sent[0]).toEqual({ type: 'runlog.ack', id: 'a1', runId: 'run-1', ok: true });
     expect(h.runEvents.map((e) => e.runId)).toEqual(['run-1', 'run-1']);
+  });
+
+  it('keeps arrival order when frames are handled concurrently, so run.end is never published before the events ahead of it', async () => {
+    // main.ts fires `void dispatcher.handle(m)` per frame without awaiting. The harness
+    // (scripts/harness.sh) caught run.end overtaking run.ended: the trigger closed the
+    // nb-run socket on run.end and the stream lost the run's own terminal event.
+    h = await makeHarness();
+    const events = Array.from({ length: 40 }, (_, n) => ({ kind: 'step', n }));
+    events.push({ kind: 'run.ended', n: 40 } as never, { type: 'run.end', n: 41 } as never);
+    await Promise.all(events.map((event) => h.dispatcher.handle({ type: 'runlog.append', runId: 'run-1', event })));
+
+    const text = await fs.readFile(path.join(h.runsDir, 'run-1.jsonl'), 'utf8');
+    const order = events.map((e) => (e as { n: number }).n);
+    expect(text.trimEnd().split('\n').map((l) => JSON.parse(l).n)).toEqual(order);
+    expect(h.runEvents.map((e) => (e.event as { n: number }).n)).toEqual(order);
+  });
+
+  it('keeps the chain healthy when a subscriber throws: the caller sees the error, later appends still land', async () => {
+    h = await makeHarness();
+    let calls = 0;
+    const flaky = new Dispatcher({
+      send: (m) => h.sent.push(m),
+      llm: h.llm,
+      runsDir: h.runsDir,
+      artifactsDir: h.artifactsDir,
+      onRunEvent: () => {
+        calls += 1;
+        if (calls === 1) throw new Error('subscriber blew up');
+      },
+    });
+    // The failed append surfaces to the caller (main.ts logs it); it must not
+    // poison the run's chain into silently skipping everything behind it.
+    await expect(
+      flaky.handle({ type: 'runlog.append', runId: 'run-1', event: { n: 1 } }),
+    ).rejects.toThrow('subscriber blew up');
+    await flaky.handle({ type: 'runlog.append', runId: 'run-1', event: { n: 2 } });
+
+    const text = await fs.readFile(path.join(h.runsDir, 'run-1.jsonl'), 'utf8');
+    expect(text.trimEnd().split('\n').map((l) => JSON.parse(l).n)).toEqual([1, 2]);
+    expect(h.sent.filter((m) => m.type === 'runlog.ack')).toHaveLength(1);
   });
 
   it('rejects a bad runId without writing anything', async () => {

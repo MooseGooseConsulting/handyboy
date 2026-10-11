@@ -1,10 +1,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { CassetteStore } from '../src/cassette.ts';
 import { Dispatcher } from '../src/dispatcher.ts';
 import { LlmProxy, type FetchLike } from '../src/llm.ts';
-import type { CassetteMode, OutboundMsg } from '../src/protocol.ts';
+import type { OutboundMsg } from '../src/protocol.ts';
 import { FakeSecretProvider, SecretStore } from '../src/secrets.ts';
 
 export interface FetchCall {
@@ -61,20 +60,16 @@ export interface Harness {
   sent: OutboundMsg[];
   runEvents: Array<{ runId: string; event: unknown }>;
   runsDir: string;
-  cassetteDir: string;
   artifactsDir: string;
-  cassettes: CassetteStore;
   cleanup: () => Promise<void>;
 }
 
 export async function makeHarness(
-  opts: { key?: string | null; kiloKey?: string | null; cassetteMode?: CassetteMode } = {},
+  opts: { key?: string | null; kiloKey?: string | null } = {},
 ): Promise<Harness> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-host-'));
   const runsDir = path.join(root, 'runs');
-  const cassetteDir = path.join(root, 'cassettes');
   const artifactsDir = path.join(root, 'artifacts');
-  const cassettes = new CassetteStore(cassetteDir);
 
   const secrets = new SecretStore(
     new FakeSecretProvider({
@@ -90,8 +85,6 @@ export async function makeHarness(
     fetch: fetch.fetch,
     secrets,
     send: (m) => sent.push(m),
-    cassetteMode: opts.cassetteMode ?? 'off',
-    cassettes,
   });
 
   const runEvents: Array<{ runId: string; event: unknown }> = [];
@@ -110,9 +103,7 @@ export async function makeHarness(
     sent,
     runEvents,
     runsDir,
-    cassetteDir,
     artifactsDir,
-    cassettes,
     cleanup: () => fs.rm(root, { recursive: true, force: true }),
   };
 }

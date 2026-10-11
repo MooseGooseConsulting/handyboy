@@ -100,7 +100,6 @@ export interface HelloMsg {
   type: 'hello';
   hostVersion: string;
   dev: boolean;
-  cassette: CassetteMode;
 }
 
 export interface KeyStatusResult {
@@ -225,11 +224,8 @@ export type ErrorCode =
   | 'no_key'
   | 'upstream'
   | 'aborted'
-  | 'cassette_miss'
   | 'io'
   | 'internal';
-
-export type CassetteMode = 'off' | 'record' | 'replay';
 
 /* ---------------- dev unix socket (NDJSON, not framed) ---------------- */
 

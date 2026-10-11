@@ -86,7 +86,7 @@ describe('HostClient reconnect backoff: the "hello resets backoff" claim, proven
 
     // Now prove the reset: `hello` on port 3 must bring backoff back down to
     // the initial delay for the *next* reconnect, not leave it doubled again.
-    ports[2]!.emit({ type: 'hello', hostVersion: '0.0.1', dev: false, cassette: 'off' });
+    ports[2]!.emit({ type: 'hello', hostVersion: '0.0.1', dev: false });
     ports[2]!.disconnect();
     vi.advanceTimersByTime(INITIAL_BACKOFF_MS);
     expect(ports).toHaveLength(4); // would NOT be 4 yet at this point if backoff were still doubled
