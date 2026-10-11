@@ -30,6 +30,7 @@ import {
   LEADER_SYSTEM,
   MAX_IDLE_FOLLOWER_TURNS,
   promptChars,
+  unchangedPageNote,
   type RouteInputs,
 } from './graph';
 import { FakePageTools } from './tools';
@@ -137,6 +138,15 @@ function harness(options: {
 
 function pick<K extends RunEvent['kind']>(events: RunEvent[], kind: K): Extract<RunEvent, { kind: K }>[] {
   return events.filter((e): e is Extract<RunEvent, { kind: K }> => e.kind === kind);
+}
+
+/** Every text block in a call's prompt, in order. */
+function textBlocks(call: FakeCall): string[] {
+  return call.messages.flatMap((message) =>
+    typeof message.content === 'string'
+      ? [message.content]
+      : message.content.flatMap((block) => (block.type === 'text' ? [String(block.text)] : [])),
+  );
 }
 
 describe('follower node: an unrecognised tool name from the model', () => {
@@ -345,16 +355,15 @@ describe('follower history is bounded', () => {
       ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
       : { kind: 'tool', name: 'done', args: { summary: 'found it' } };
 
-  /** Every text block in a call's prompt, in order. */
-  const textBlocks = (call: FakeCall): string[] =>
-    call.messages.flatMap((message) =>
-      typeof message.content === 'string'
-        ? [message.content]
-        : message.content.flatMap((block) => (block.type === 'text' ? [String(block.text)] : [])),
-    );
+  // Each click changes the page, so every turn really does carry a fresh snapshot
+  // and none of them is answered with the unchanged-page note instead.
+  const changingPage = () =>
+    new FakePageTools({
+      snapshots: Array.from({ length: 5 }, (_, i) => ({ text: `page: [e1] link "Example ${i + 1}"`, tokens: 8 })),
+    });
 
   it('sends exactly one page snapshot on the fifth Follower call', async () => {
-    const { follower } = await harness({ planningInterval: 6, follower: fiveClicks });
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), follower: fiveClicks });
 
     expect(follower.calls).toHaveLength(5);
     const fifth = follower.calls[4]!;
@@ -367,7 +376,7 @@ describe('follower history is bounded', () => {
   });
 
   it("replaces a kept turn's snapshot with a note naming its step", async () => {
-    const { follower } = await harness({ planningInterval: 6, follower: fiveClicks });
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), follower: fiveClicks });
 
     const notes = textBlocks(follower.calls[4]!).filter((text) => text.includes('omitted: superseded'));
     expect(notes).toEqual([
@@ -378,7 +387,7 @@ describe('follower history is bounded', () => {
   });
 
   it('drops screenshots from kept Follower turns as the Leader already does', async () => {
-    const { follower } = await harness({ planningInterval: 6, observe: 'both', follower: fiveClicks });
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), observe: 'both', follower: fiveClicks });
 
     const fifth = follower.calls[4]!;
     const images = fifth.messages.flatMap((message) =>
@@ -442,6 +451,95 @@ describe('compactObservations keeps the transcript valid', () => {
       observation(2),
     ];
     expect(compactObservations(history)[2]).toBe(history[2]);
+  });
+});
+
+describe('an unchanged page is not resent', () => {
+  const A = 'page: [e1] button "Next"';
+  const B = 'page: [e1] button "Next" [e2] text "Loaded"';
+  const pageOf = (...texts: string[]) => new FakePageTools({ snapshots: texts.map((text) => ({ text, tokens: 8 })) });
+  const read = (): FakeTurn => ({ kind: 'tool', name: 'extract_text', args: { signal: 'CONTINUE' } });
+  const done = (): FakeTurn => ({ kind: 'tool', name: 'done', args: { summary: 'ok' } });
+  const sentText = (call: FakeCall) => textBlocks(call).join('\n');
+
+  it('words the note so the model knows its refs still work and how to see them again', () => {
+    expect(unchangedPageNote(3)).toBe(
+      'Page unchanged since step 3. Refs from that snapshot still work; call snapshot to see it again.',
+    );
+  });
+
+  it('says the page is unchanged instead of resending an identical snapshot', async () => {
+    const { follower } = await harness({ page: pageOf(A), follower: (call) => (call.index < 2 ? read() : done()) });
+
+    expect(follower.calls).toHaveLength(3);
+    expect(sentText(follower.calls[0]!)).toContain(A);
+    for (const call of follower.calls.slice(1)) {
+      expect(sentText(call)).not.toContain(A);
+      expect(textBlocks(call)).toContain(unchangedPageNote(1));
+    }
+  });
+
+  it('keys on the page text, not on the tool, so an action that changed nothing is unchanged too', async () => {
+    const { follower } = await harness({
+      page: pageOf(A),
+      follower: (call) => (call.index === 0 ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } } : done()),
+    });
+    expect(textBlocks(follower.calls[1]!)).toContain(unchangedPageNote(1));
+  });
+
+  it('sends the full snapshot again as soon as the page text changes', async () => {
+    const { follower } = await harness({ page: pageOf(A, A, B), follower: (call) => (call.index < 3 ? read() : done()) });
+
+    expect(follower.calls).toHaveLength(4);
+    const [first, second, third, fourth] = follower.calls.map((call) => textBlocks(call).at(-1));
+    expect(first).toBe(`Page snapshot:\n${A}`);
+    expect(second).toBe(unchangedPageNote(1));
+    expect(third).toBe(`Page snapshot:\n${B}`);
+    // The comparison moves on to the newest snapshot sent, and so does the step it names.
+    expect(fourth).toBe(unchangedPageNote(3));
+  });
+
+  it('treats a wait that changed the page as a change', async () => {
+    const { follower } = await harness({
+      page: pageOf(A, B),
+      follower: (call) => (call.index === 0 ? { kind: 'tool', name: 'wait', args: { ms: 10, signal: 'CONTINUE' } } : done()),
+    });
+
+    const second = textBlocks(follower.calls[1]!);
+    expect(second.at(-1)).toBe(`Page snapshot:\n${B}`);
+    expect(second.some((text) => text.startsWith('Page unchanged'))).toBe(false);
+  });
+
+  it('a Follower can call snapshot after an unchanged turn and act on the refs', async () => {
+    const page = pageOf(A);
+    const { events, follower, ended } = await harness({
+      page,
+      follower: (call) => {
+        if (call.index === 0) return read();
+        if (call.index === 1) return { kind: 'tool', name: 'snapshot', args: { signal: 'CONTINUE' } };
+        if (call.index === 2) return { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } };
+        return done();
+      },
+    });
+
+    expect(textBlocks(follower.calls[1]!)).toContain(unchangedPageNote(1));
+    // The click turn is also unchanged, but the snapshot it asked for is in front of it.
+    const clickTurn = follower.calls[2]!;
+    expect(textBlocks(clickTurn)).toContain(unchangedPageNote(1));
+    const shown = clickTurn.messages.find((m): m is ToolMessage => m instanceof ToolMessage && m.name === 'snapshot');
+    expect(shown?.content).toBe(A);
+    expect(page.calls).toContainEqual({ name: 'click', args: ['e1'] });
+    expect(pick(events, 'tool.result').find((e) => e.result.name === 'click')?.result.ok).toBe(true);
+    expect(ended.status).toBe('done');
+  });
+
+  it('logs unchanged observations in the run log', async () => {
+    const { events } = await harness({ page: pageOf(A, A, B), follower: (call) => (call.index < 2 ? read() : done()) });
+
+    const observations = pick(events, 'observation');
+    expect(observations.map((e) => e.unchanged ?? false)).toEqual([false, true, false]);
+    // The size estimate is still the page's own, so a change in page size stays visible.
+    expect(observations[1]?.tokens).toBe(8);
   });
 });
 

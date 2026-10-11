@@ -55,6 +55,11 @@ export function ObservationEvent({ event }: { event: Of<'observation'> }) {
       <p className="flex flex-wrap items-center gap-1.5 py-0.5 text-xs text-muted">
         <Badge tone="neutral">observe: {event.mode}</Badge>
         {event.hasScreenshot ? <Badge tone="accent">screenshot</Badge> : null}
+        {event.unchanged ? (
+          <Badge tone="good" title="The snapshot matched the last one sent, so the model got a note instead">
+            page unchanged · not resent
+          </Badge>
+        ) : null}
         {event.tokens !== undefined ? (
           // A chars/4 guess at the snapshot alone. Labelled so nobody reads it as
           // the prompt's size; the model.usage line carries the real counts.

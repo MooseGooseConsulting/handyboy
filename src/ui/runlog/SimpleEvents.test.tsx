@@ -13,6 +13,16 @@ describe('size readouts in the run log', () => {
     expect(text).not.toMatch(/\b18,?048 tokens\b/);
   });
 
+  it('says when an unchanged page was not resent to the model', () => {
+    const { rerender } = render(
+      <ObservationEvent event={{ kind: 'observation', mode: 'dom', tokens: 8, hasScreenshot: false, at: 1 }} />,
+    );
+    expect(screen.getByTestId('log-entry').textContent).not.toContain('unchanged');
+
+    rerender(<ObservationEvent event={{ kind: 'observation', mode: 'dom', tokens: 8, hasScreenshot: false, unchanged: true, at: 1 }} />);
+    expect(screen.getByTestId('log-entry').textContent).toContain('page unchanged · not resent');
+  });
+
   it("shows one line per model call with the provider's counts and the prompt's size", () => {
     render(
       <ModelUsageEvent

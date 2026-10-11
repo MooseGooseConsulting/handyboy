@@ -55,8 +55,12 @@ export type RunEvent =
    * images excluded), so a provider without usage reporting still shows the size.
    */
   | { kind: 'model.usage'; role: Role; model: string; inputTokens?: number; outputTokens?: number; reasoningTokens?: number; cachedTokens?: number; promptChars: number; at: number }
-  /** `tokens` is the snapshot's own chars/4 estimate, not the size of the prompt it rides in. */
-  | { kind: 'observation'; mode: ObserveMode; tokens?: number; hasScreenshot: boolean; at: number }
+  /**
+   * `tokens` is the snapshot's own chars/4 estimate, not the size of the prompt it rides in.
+   * `unchanged` means the snapshot matched the last one sent, so the model got a note
+   * naming that step instead of the snapshot.
+   */
+  | { kind: 'observation'; mode: ObserveMode; tokens?: number; hasScreenshot: boolean; unchanged?: boolean; at: number }
   | { kind: 'input.fidelity'; fidelity: InputFidelity; attached: boolean; at: number }
   | { kind: 'userscript.output'; scriptId: string; level: 'log' | 'warn' | 'error'; text: string; at: number }
   | { kind: 'file.saved'; runId: RunId; filename: string; bytes: number; path: string; at: number }

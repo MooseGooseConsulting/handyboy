@@ -86,6 +86,23 @@ const SNAPSHOT_HEADER = 'Page snapshot:\n';
 /** The step line every Follower observation carries; compaction reads turn numbers off it. */
 const STEP_LINE = /^Step (\d+) of at most /m;
 
+/**
+ * Identity of a snapshot's text. The length rides along with the 32-bit hash so a
+ * collision would also need an equal length before a changed page reads as unchanged.
+ */
+function snapshotDigest(text: string): string {
+  return `${hash32(text)}:${text.length}`;
+}
+
+/**
+ * Sent in place of a snapshot identical to the one sent at `step`. Identical text means
+ * identical DOM-order ref numbering, so those refs still resolve; the snapshot tool is
+ * the way back when the model needs to see them again.
+ */
+export function unchangedPageNote(step: number): string {
+  return `Page unchanged since step ${step}. Refs from that snapshot still work; call snapshot to see it again.`;
+}
+
 function supersededSnapshot(step: number | undefined): string {
   return `[page snapshot from step ${step ?? 'unknown'} omitted: superseded]`;
 }
@@ -847,11 +864,25 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
 
   let tokens: number | undefined;
   let hasScreenshot = false;
+  let unchanged = false;
+  let lastSnapshotDigest = state.lastSnapshotDigest;
+  let lastSnapshotStep = state.lastSnapshotStep;
 
   if (ctx.observe === 'dom' || ctx.observe === 'both') {
+    // Always take the snapshot: it is a local read-only walk, and comparing content
+    // rather than trusting the last tool's name is what catches a `wait` that saw the
+    // page change, or a scroll or userscript that left it alone.
     const snap = await ctx.page.snapshot();
     tokens = snap.tokens;
-    blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snap.text}` });
+    const digest = snapshotDigest(snap.text);
+    if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
+      unchanged = true;
+      blocks.push({ type: 'text', text: unchangedPageNote(state.lastSnapshotStep) });
+    } else {
+      lastSnapshotDigest = digest;
+      lastSnapshotStep = stepN;
+      blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snap.text}` });
+    }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
     const shot = await ctx.page.screenshot();
@@ -865,7 +896,14 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
   }
 
-  emit(config, { kind: 'observation', mode: ctx.observe, tokens, hasScreenshot, at: now() });
+  emit(config, {
+    kind: 'observation',
+    mode: ctx.observe,
+    tokens,
+    hasScreenshot,
+    ...(unchanged ? { unchanged } : {}),
+    at: now(),
+  });
 
   // --- act ----------------------------------------------------------------
   const human = new HumanMessage({ content: blocks });
@@ -1045,6 +1083,8 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     idleFollowerTurns,
     repeatFailureKey,
     repeatFailureTurns,
+    lastSnapshotDigest,
+    lastSnapshotStep,
     lastSignal: signal,
     status,
     endNote,
