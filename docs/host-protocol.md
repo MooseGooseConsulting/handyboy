@@ -53,7 +53,7 @@ report `{ "type": "llm.error", "id", "code", "message" }` so a stream consumer h
 event type to watch for.
 
 `code` is one of: `bad_request`, `unknown_type`, `no_key`, `upstream`, `aborted`,
-`cassette_miss`, `io`, `internal`.
+`io`, `internal`.
 
 ## Messages
 
@@ -62,10 +62,10 @@ event type to watch for.
 Sent once, immediately after startup.
 
 ```json
-{ "type": "hello", "hostVersion": "0.0.1", "dev": false, "cassette": "off" }
+{ "type": "hello", "hostVersion": "0.0.1", "dev": false }
 ```
 
-`cassette` is `off` | `record` | `replay`. `dev` reflects `NANOBROWSER_DEV=1` / `--dev`.
+`dev` reflects `NANOBROWSER_DEV=1` / `--dev`.
 
 ### `key.status` → `key.status.result`
 
@@ -155,7 +155,6 @@ Failures emit `llm.error` instead of `llm.end`:
 | `bad_request` | missing/foreign `url` |
 | `upstream` | fetch threw (DNS, TLS, reset) |
 | `aborted` | `llm.abort` was received for this `id` |
-| `cassette_miss` | replay mode and no cassette matches |
 
 ### `llm.abort`
 
@@ -334,26 +333,6 @@ CLIs:
 `scripts/e2e.sh` chains the first four into one unattended loop; see
 `docs/research/live-testing-real-chrome.md` § Unattended testing.
 
-## Cassettes
-
-`NANOBROWSER_CASSETTE=record|replay`, off by default. Directory: `host/cassettes/`
-(`NANOBROWSER_CASSETTE_DIR` overrides).
-
-The key is `sha256` of a canonical, recursively key-sorted JSON of exactly
-`{ url, model, messages }` — the normalized API path, `body.model`, and `body.messages`. Sampling
-knobs, `stream`, and provider preferences deliberately do not participate, so an unrelated
-request-shape tweak does not invalidate a recording. File: `<key>.json`.
-
-```json
-{ "key": "<sha256>", "url": "chat/completions", "model": "…", "status": 200,
-  "headers": { … }, "chunks": ["<base64>", "…"] }
-```
-
-`record` performs the real request, streams to the extension as usual, and writes the entry when
-the stream ends. `replay` makes **no network call and needs no secret**: it emits the recorded
-chunks then `llm.end`. A request with no matching cassette fails loudly with
-`llm.error` / `cassette_miss` — it never silently falls through to the network.
-
 ## Secrets
 
 `OPENROUTER_API_KEY` and `KILO_CODE_API_KEY` are each fetched once at startup, in parallel, with
@@ -380,8 +359,6 @@ presence-only (`SecretStore.status('kilo')`), not a round trip.
 | --- | --- |
 | `NANOBROWSER_DEV=1` | bind the dev trigger socket (also `--dev`) |
 | `NANOBROWSER_SOCK` | override the socket path |
-| `NANOBROWSER_CASSETTE` | `record` \| `replay`; anything else is off |
-| `NANOBROWSER_CASSETTE_DIR` | override `host/cassettes/` |
 | `NANOBROWSER_DOPPLER_PROJECT` / `_CONFIG` | override `ai-automation` / `dev` |
 | `NANOBROWSER_LOG_STDERR=0` | log to file only |
 | `NB_RELOAD_TIMEOUT` | nb-reload's default wait in seconds (30) |

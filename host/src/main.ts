@@ -6,12 +6,11 @@
  *
  * stdout belongs to the native-messaging protocol. Diagnostics go to host.log/stderr.
  */
-import { CassetteStore, cassetteMode } from './cassette.ts';
 import { Dispatcher } from './dispatcher.ts';
 import { encodeFrame, FrameParser } from './framing.ts';
 import { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
-import { artifactsDir, cassetteDir, extLogPath, runsDir, socketPath } from './paths.ts';
+import { artifactsDir, extLogPath, runsDir, socketPath } from './paths.ts';
 import type { OutboundMsg } from './protocol.ts';
 import { DopplerSecretProvider, SecretStore } from './secrets.ts';
 import { TriggerServer } from './trigger.ts';
@@ -29,7 +28,7 @@ function send(msg: OutboundMsg): void {
 }
 
 async function main(): Promise<void> {
-  log('info', 'host starting', { dev, cassette: cassetteMode(), pid: process.pid });
+  log('info', 'host starting', { dev, pid: process.pid });
 
   const secrets = new SecretStore(new DopplerSecretProvider());
   await secrets.load();
@@ -39,8 +38,6 @@ async function main(): Promise<void> {
     fetch: globalThis.fetch,
     secrets,
     send,
-    cassetteMode: cassetteMode(),
-    cassettes: new CassetteStore(cassetteDir()),
   });
 
   // Chrome spawns this process only on `connectNative`, so an open stdin IS the
@@ -107,7 +104,7 @@ async function main(): Promise<void> {
     process.on(sig, () => void shutdown(0));
   }
 
-  send({ type: 'hello', hostVersion: HOST_VERSION, dev, cassette: cassetteMode() });
+  send({ type: 'hello', hostVersion: HOST_VERSION, dev });
 }
 
 main().catch((err: unknown) => {

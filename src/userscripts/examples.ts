@@ -15,9 +15,8 @@ import { DEFAULT_PROBE_GLOBALS, buildProbeCode } from './i03';
 /** A bundled example, before the catalog stamps `updatedAt` on it.
  *
  * The `id` is pinned, not generated: the Follower prompt names each available
- * userscript by id, and that prompt is part of the cassette key, so a random id
- * per install would make a cassette recorded in one profile miss in another.
- * Stable ids are what make "record once, replay anywhere" true. */
+ * userscript by id, so a random id per install would make that prompt name a
+ * script the catalog does not have. */
 export type UserscriptSeed = Omit<Userscript, 'updatedAt'>;
 
 /**
