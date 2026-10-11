@@ -30,8 +30,9 @@ out of scope by decision (§4).
 7. **Results leave over the same native port, streamed per event** — the host appends JSONL to disk
    and the test asserts on the file, mid-run if it wants. `chrome.storage.local` stays the panel's
    read model; `chrome.downloads` is a worse channel than the one already open.
-8. Attaching *any* CDP client to a Chrome not launched with `--remote-debugging-port` is impossible,
-   so no external driver participates (§4).
+8. No external driver participates (§4). Since Chrome 144 a CDP client *can* attach to the running
+   profile, but only after a per-connection "Allow remote debugging?" prompt, and the run then shows
+   the "controlled by automated test software" banner, so such a run is never R-02 evidence.
 9. The owned browser's model answers come from the scripted policy. The other two tiers are
    `scripts/e2e.sh`, against the user's already-running Chrome, and `run_live` in
    `scripts/harness.sh` (real Doppler, real OpenRouter, nine tasks).
@@ -214,9 +215,18 @@ disk even if the run misbehaves (R-12).
 ## 4. External drivers (Playwright, CDP) — out of scope
 
 Connecting any CDP client, Playwright included, to a Chrome not launched with
-`--remote-debugging-port` (or an inherited `--remote-debugging-pipe`) is impossible — and since
+`--remote-debugging-port` (or an inherited `--remote-debugging-pipe`) was impossible until Chrome 144 — and since
 Chrome 136 those switches are ignored on the default data directory anyway
 ([announcement](https://developer.chrome.com/blog/remote-debugging-port)).
+
+Correction (2026-10-11): Chrome 144+ lets a client attach to the live profile once the user enables
+`chrome://inspect/#remote-debugging` and clicks Allow on each connection
+([docs](https://developer.chrome.com/docs/devtools/agents/use-cases/auto-connect));
+`chrome-devtools-mcp --autoConnect` uses it. Google's
+[blog](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session) says the
+automation banner shows while attached, so this is a functional or debugging tier, never stealth
+evidence. See [live-testing-practice.md](live-testing-practice.md) for how others test, and the
+unverified spike that might replace the manual Load-unpacked click.
 
 ## 5. Claude-in-Chrome
 
