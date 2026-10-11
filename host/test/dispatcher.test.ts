@@ -201,62 +201,6 @@ describe('llm.abort', () => {
   });
 });
 
-describe('cassettes', () => {
-  const req = {
-    type: 'llm.request' as const,
-    id: 'c1',
-    url: '/chat/completions',
-    body: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
-  };
-
-  it('record writes the stream to disk and still streams to the extension', async () => {
-    h = await makeHarness({ cassetteMode: 'record' });
-    h.fetch.enqueueStream(200, [utf8('hello '), utf8('world')], { 'content-type': 'text/event-stream' });
-    await h.dispatcher.handle(req);
-
-    expect(decodeChunks(h.sent, 'c1')).toBe('hello world');
-    const files = await fs.readdir(h.cassetteDir);
-    expect(files).toHaveLength(1);
-    const entry = JSON.parse(await fs.readFile(path.join(h.cassetteDir, files[0]!), 'utf8'));
-    expect(entry.status).toBe(200);
-    expect(entry.chunks).toHaveLength(2);
-    expect(Buffer.from(entry.chunks[0], 'base64').toString('utf8')).toBe('hello ');
-  });
-
-  it('replay serves the recorded chunks with no network call', async () => {
-    h = await makeHarness({ cassetteMode: 'record' });
-    h.fetch.enqueueStream(201, [utf8('recorded')], { 'x-provider': 'nvidia' });
-    await h.dispatcher.handle(req);
-    const recordedCalls = h.fetch.calls.length;
-
-    const replay = await makeHarness({ cassetteMode: 'replay' });
-    // point the replay harness at the recorded cassette dir
-    const files = await fs.readdir(h.cassetteDir);
-    await fs.mkdir(replay.cassetteDir, { recursive: true });
-    await fs.copyFile(path.join(h.cassetteDir, files[0]!), path.join(replay.cassetteDir, files[0]!));
-
-    await replay.dispatcher.handle(req);
-    expect(replay.fetch.calls).toHaveLength(0);
-    expect(recordedCalls).toBe(1);
-    expect(decodeChunks(replay.sent, 'c1')).toBe('recorded');
-    expect(replay.sent.at(-1)).toMatchObject({ type: 'llm.end', status: 201, headers: { 'x-provider': 'nvidia' } });
-    await replay.cleanup();
-  });
-
-  it('replay fails loudly on an unrecorded request', async () => {
-    h = await makeHarness({ cassetteMode: 'replay' });
-    await h.dispatcher.handle(req);
-    expect(h.fetch.calls).toHaveLength(0);
-    expect(h.sent[0]).toMatchObject({ type: 'llm.error', id: 'c1', code: 'cassette_miss' });
-  });
-
-  it('replay needs no secret at all', async () => {
-    h = await makeHarness({ key: null, cassetteMode: 'replay' });
-    await h.dispatcher.handle(req);
-    expect(h.sent[0]).toMatchObject({ code: 'cassette_miss' });
-  });
-});
-
 describe('runlog.append', () => {
   it('appends to <runId>.jsonl, acks, and mirrors to socket subscribers', async () => {
     h = await makeHarness();

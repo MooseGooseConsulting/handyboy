@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 # Unattended end-to-end harness: a browser the harness owns, the real extension, the real
-# native host, a local fixture page, and cassette-replayed model calls. No human click,
+# native host, a local fixture page, and scripted model calls. No human click,
 # no OpenRouter, no public internet, and nothing of the user's Chrome.
 #
 #   pnpm harness                      # or: bash scripts/harness.sh
-#   bash scripts/harness.sh [--skip-build] [--keep] [--headed] [--seed N] [--no-negative]
-#                           [--cross-profile] [--run-timeout S] [--live | --live-only | --scripted-only]
+#   bash scripts/harness.sh [--skip-build] [--keep] [--headed] [--seed N]
+#                           [--run-timeout S] [--live | --live-only | --scripted-only]
 #                           [--live-tasks a,b,c] [--live-timeout S]
 #
 #   --skip-build     reuse .output/chrome-mv3 as it stands
 #   --keep           keep the /tmp dir (profiles, wrappers, sockets) for inspection
 #   --headed         show the harness's browser windows
 #   --seed N         fixture seed (env NB_HARNESS_SEED; default random, printed)
-#   --no-negative    skip the mismatch phase
-#   --cross-profile  also replay in a FRESH profile (proves cassettes replay across profiles)
 #   --run-timeout S  per-run cap on nb-run (env NB_HARNESS_RUN_TIMEOUT; default 180)
 #   --live           run the live tier after the scripted tier (real Doppler key, real
 #                    Nemotron pair on OpenRouter, real ebay.com plus local fixtures)
@@ -29,7 +27,7 @@
 #   2. Starts a local HTTP fixture (scripts/harness/fixture-server.mjs). Its three
 #      inventory rows come from the seed and only reach the DOM after a click on
 #      "Reveal inventory"; the expected answer is written to expected.json.
-#   3. For each phase, a new isolated browser process:
+#   3. One scripted phase, a new isolated browser process:
 #        - agent-browser launches its own Chrome for Testing (~/.agent-browser/browsers,
 #          through a wrapper passed as the executable path) with a temp --user-data-dir
 #          (--profile <tmpdir>) and the unpacked extension (--extension ->
@@ -43,27 +41,14 @@
 #          ~/.config/chromium are never read or written, and port 9222 is never used:
 #          the browser's CDP endpoint is its own --remote-debugging-port=0.
 #        - The manifest points at a wrapper in the temp dir that runs THIS repo's
-#          host/src/main.ts with NB_HOME, NANOBROWSER_SOCK and the cassette dir all inside
-#          the run's own directories, a `doppler` shim first on PATH (the real Doppler is
-#          never called), and `node --import scripts/harness/scripted-upstream.mjs`.
-#      Phases:
-#        record    cassette mode `record`, fresh profile. Model calls are answered by the
-#                  scripted Leader/Follower in scripted-upstream.mjs (a policy that reads
-#                  what the extension sent it, not a transcript) and recorded by the
-#                  host's own cassette code.
-#        replay    a new browser + host on a COPY of the record profile, cassette mode
-#                  `replay`, network sealed (every fetch throws). Must pass the same
-#                  verdict with every model call served from a cassette and reproduce the
-#                  record run's tool-call sequence. The copy keeps this the same-profile
-#                  case; bundled userscript ids are pinned (src/userscripts/catalog.ts),
-#                  so the cross-profile phase below proves a fresh profile matches too.
-#        mismatch  (negative control; --no-negative skips it) replay on the same profile
-#                  copy against a fixture with a different seed. The cassettes no longer
-#                  match the page, so this run MUST fail the verdict.
-#        cross-profile  (only with --cross-profile) replay in a fresh profile, expected to
-#                  pass. This is the "record once, replay anywhere" proof: every model
-#                  call must hit a cassette recorded in the record profile.
-#   4. Per phase it asserts, and the harness exits non-zero if any fails:
+#          host/src/main.ts with NB_HOME and NANOBROWSER_SOCK inside the run's own
+#          directories, a `doppler` shim first on PATH (the real Doppler is never
+#          called), and `node --import scripts/harness/scripted-upstream.mjs`.
+#      The phase is `scripted`: a fresh profile against the main fixture, expected to
+#      pass. Model calls are answered by the scripted Leader/Follower in
+#      scripted-upstream.mjs (a policy that reads what the extension sent it, not a
+#      transcript).
+#   4. The phase asserts, and the harness exits non-zero if any fails:
 #        - the browser process is agent-browser's Chrome for Testing binary with the temp
 #          --user-data-dir and --load-extension, and its crashpad database is under the
 #          temp XDG_CONFIG_HOME
@@ -82,24 +67,22 @@
 #          to expected.json in page order; the fixture saw GET / and the click handler's
 #          GET /api/inventory; ext.log has no error lines
 #        - the page shows the 3 revealed rows afterwards (agent-browser eval)
-#        - replay phases: no model call reached the network, and
-#          scripts/harness/cassette-diff.mjs finds a cassette for every request (on a miss
-#          it prints the first differing message path, record vs replay)
-#   5. Verdict self-test: a run log that passes untampered is tampered 10 ways (wrong
-#      stock, wrong SKU, [], {}, prose, reordered rows, handoffs removed, status error,
-#      click failed, page read removed); every tampered copy must FAIL the verdict.
+#   5. Verdict self-test: the scripted phase's run log, which passes untampered, is
+#      tampered 10 ways (wrong stock, wrong SKU, [], {}, prose, reordered rows, handoffs
+#      removed, status error, click failed, page read removed); every tampered copy must
+#      FAIL the verdict.
 #   6. The user's own host socket ($XDG_RUNTIME_DIR/nanobrowser.sock) is unchanged.
 #
-# Everything lands in runs/harness-<UTC stamp>/: harness.log, and per phase run.jsonl
-# (stream), runlog.jsonl (persisted), verdict.txt, host.log, ext.log, upstream.jsonl,
-# requests.jsonl, chrome-cmdline.txt, service-worker.json, page-after.txt; plus
-# cassettes/ and the fixture dirs. Profiles and sockets live in a /tmp dir removed on
-# exit unless --keep.
+# Everything lands in runs/harness-<UTC stamp>/: harness.log, and under scripted/
+# run.jsonl (stream), runlog.jsonl (persisted), verdict.txt, host.log, ext.log,
+# upstream.jsonl, chrome-cmdline.txt, service-worker.json,
+# page-after.txt; plus the fixture dir. Profiles and sockets live in a /tmp dir
+# removed on exit unless --keep.
 #
 # Live tier (--live): the same owned browser and the real extension/host, but the real
 # Doppler key and the free OpenRouter pair (nvidia/nemotron-3-ultra-550b-a55b:free
 # leader, nvidia/nemotron-3.5-lightning:free follower) -- no scripted fetch, no
-# cassette, no doppler shim. Nine tasks (scripts/harness/live-tasks.mjs): the eBay
+# doppler shim. Nine tasks (scripts/harness/live-tasks.mjs): the eBay
 # scrape on ebay.com with ebay-search-extract, the userscript write-run-revise loop,
 # and inventory/download/escalation/read-only/login/redaction/stall on a local
 # fixture (scripts/harness/live-fixture-server.mjs). Each task is scored by
@@ -110,7 +93,7 @@
 # before any task runs. `NB_E2E_*` (scripts/e2e.sh overrides) are never read here.
 #
 # Needs: node (>= 22, host runs .ts directly), jq, agent-browser with its Chrome for Testing
-# (`agent-browser install`). Exit 0 = every phase behaved as asserted; 1 = anything else;
+# (`agent-browser install`). Exit 0 = every asserted check passed; 1 = anything else;
 # 2 = bad usage or missing prerequisite.
 set -uo pipefail
 
@@ -125,8 +108,6 @@ HARNESS="$ROOT/scripts/harness"
 SKIP_BUILD=0
 HEADED=0
 KEEP=0
-NEGATIVE=1
-CROSS_PROFILE=0
 SEED="${NB_HARNESS_SEED:-$(( (RANDOM << 15 | RANDOM) % 1000000 + 1 ))}"
 RUN_TIMEOUT="${NB_HARNESS_RUN_TIMEOUT:-180}"
 LIVE=0
@@ -144,8 +125,6 @@ while [ $# -gt 0 ]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --headed) HEADED=1; shift ;;
     --keep) KEEP=1; shift ;;
-    --no-negative) NEGATIVE=0; shift ;;
-    --cross-profile) CROSS_PROFILE=1; shift ;;
     --seed) SEED="$2"; shift 2 ;;
     --run-timeout) RUN_TIMEOUT="$2"; shift 2 ;;
     --live) LIVE=1; shift ;;
@@ -175,7 +154,7 @@ unset AGENT_BROWSER_CDP AGENT_BROWSER_AUTO_CONNECT AGENT_BROWSER_PROFILE AGENT_B
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 WORK="$ROOT/runs/harness-$STAMP"
-mkdir -p "$WORK/cassettes"
+mkdir -p "$WORK"
 # Short path: unix socket paths are capped at 108 bytes.
 TMP="$(mktemp -d /tmp/nb-harness.XXXXXX)"
 exec > >(tee -a "$WORK/harness.log") 2>&1
@@ -235,18 +214,13 @@ if [ "$LIVE_ONLY" = "0" ]; then
 start_fixture main "$SEED"
 FIXTURE_URL="$(jq -r .url "$WORK/fixture-main/ready.json")"
 echo "main fixture:     $FIXTURE_URL  expected rows: $(jq -c . "$WORK/fixture-main/expected.json")"
-if [ "$NEGATIVE" = "1" ]; then
-  start_fixture mismatch "$((SEED + 1))"
-  MISMATCH_URL="$(jq -r .url "$WORK/fixture-mismatch/ready.json")"
-  echo "mismatch fixture: $MISMATCH_URL  rows: $(jq -c . "$WORK/fixture-mismatch/expected.json")"
-fi
 else
 echo "(scripted fixtures skipped: --live-only)"
 fi
 
 # The host's SecretStore shells out to `doppler`. This shim answers instead, so the real
 # Doppler (and the user's real key) is never touched; the fake key only ever reaches the
-# scripted fetch in record mode and is never used at all in replay.
+# scripted fetch.
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/doppler" <<'SHIM'
 #!/bin/sh
@@ -260,33 +234,26 @@ chmod 0755 "$TMP/bin/doppler"
 PROMPT='Reveal the inventory on this page and report every item. Call done with a summary that is only a JSON object {"inventory":[{"sku":"<sku>","name":"<name>","stock":<number>}],"count":<number of items>}, rows in page order, and no other text.'
 
 # ------------------------------------------------------------------------ 3. phases
-run_phase() { # <name> <cassette mode> <fixture url> <fixture dir> <expect: pass|fail> [<profile to copy>]
-  local name="$1" mode="$2" url="$3" fixdir="$4" expect="$5" profile_from="${6:-}"
+run_phase() { # <name> <fixture url> <fixture dir>
+  local name="$1" url="$2" fixdir="$3"
   CURRENT_PHASE="$name"
   local D="$TMP/$name" OUT="$WORK/$name"
   mkdir -p "$D" "$OUT"
-  if [ -n "$profile_from" ]; then
-    cp -a "$profile_from" "$D/profile"
-    rm -f "$D/profile"/Singleton*
-  fi
   mkdir -p "$D/profile/NativeMessagingHosts" "$D/home"
   local xdgdir
   for xdgdir in chromium google-chrome google-chrome-for-testing; do mkdir -p "$D/xdg/$xdgdir/NativeMessagingHosts"; done
 
-  step "phase $name: cassette=$mode fixture=$url profile=$([ -n "$profile_from" ] && echo "copy of $profile_from" || echo fresh) (expect verdict $expect)"
+  step "phase $name: fixture=$url"
 
   cat >"$D/nanobrowser-host" <<WRAP
 #!/bin/sh
 # Written by scripts/harness.sh for one phase. Spawned by the harness's own browser only.
 NANOBROWSER_DEV=1
-NANOBROWSER_CASSETTE=$mode
-NANOBROWSER_CASSETTE_DIR=$WORK/cassettes
 NANOBROWSER_SOCK=$D/nb.sock
 NB_HOME=$D/home
 NB_HARNESS_UPSTREAM_LOG=$OUT/upstream.jsonl
-NB_HARNESS_REQUEST_LOG=$OUT/requests.jsonl
 PATH=$TMP/bin:\$PATH
-export NANOBROWSER_DEV NANOBROWSER_CASSETTE NANOBROWSER_CASSETTE_DIR NANOBROWSER_SOCK NB_HOME NB_HARNESS_UPSTREAM_LOG NB_HARNESS_REQUEST_LOG PATH
+export NANOBROWSER_DEV NANOBROWSER_SOCK NB_HOME NB_HARNESS_UPSTREAM_LOG PATH
 exec "$NODE_BIN" --import "$HARNESS/scripted-upstream.mjs" "$ROOT/host/src/main.ts" "\$@"
 WRAP
   chmod 0755 "$D/nanobrowser-host"
@@ -441,37 +408,17 @@ CHROME
     --hits "$OUT/fixture-hits.jsonl" --ext-log "$OUT/ext.log" | tee "$OUT/verdict.txt"
   local verdict=${PIPESTATUS[0]}
 
-  if [ "$expect" = "pass" ]; then
-    [ "$verdict" -eq 0 ] && ok "verdict passed" || bad "verdict failed (see $OUT/verdict.txt)"
-    [ "$rows_on_page" = "3" ] && ok "the page now shows 3 revealed inventory rows" \
-      || bad "the page shows ${rows_on_page:-?} inventory rows after the run, want 3"
-  else
-    [ "$verdict" -ne 0 ] && ok "verdict failed, as a mismatched page must" \
-      || bad "verdict PASSED against a page the cassettes do not match: replay is not keyed to the page"
-  fi
-
-  if [ "$mode" = "replay" ]; then
-    local leaked
-    leaked="$(jq -s '[.[] | select(.sealed == true and (.url | test("chat/completions")))] | length' "$OUT/upstream.jsonl" 2>/dev/null || echo 0)"
-    [ "${leaked:-0}" = "0" ] && ok "no model call reached the network (sealed fetch saw 0 chat/completions)" \
-      || bad "$leaked model call(s) tried the network in replay mode"
-    echo "  cassette lookups (request log vs record phase):"
-    node "$HARNESS/cassette-diff.mjs" --record "$WORK/record/requests.jsonl" --replay "$OUT/requests.jsonl" \
-      --cassettes "$WORK/cassettes" | tee "$OUT/cassette-diff.txt"
-    local diffrc=${PIPESTATUS[0]}
-    if [ "$expect" = "pass" ]; then
-      [ "$diffrc" -eq 0 ] && ok "every model call was served from a recorded cassette" \
-        || bad "replay missed cassettes (see $OUT/cassette-diff.txt)"
-    fi
-  fi
+  [ "$verdict" -eq 0 ] && ok "verdict passed" || bad "verdict failed (see $OUT/verdict.txt)"
+  [ "$rows_on_page" = "3" ] && ok "the page now shows 3 revealed inventory rows" \
+    || bad "the page shows ${rows_on_page:-?} inventory rows after the run, want 3"
 
   ab close >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------------------ live tier
 # Same owned browser and real extension/host as the scripted phases, but the real
-# Doppler key and the free OpenRouter pair -- no scripted fetch, no cassette, no
-# doppler shim. Fails closed with `live blocked` when GET /key is not ready.
+# Doppler key and the free OpenRouter pair -- no scripted fetch, no doppler shim.
+# Fails closed with `live blocked` when GET /key is not ready.
 start_live_fixture() {
   local dir="$WORK/fixture-live"
   node "$HARNESS/live-fixture-server.mjs" --seed "$SEED" --out "$dir" >"$WORK/fixture-live.log" 2>&1 &
@@ -778,46 +725,14 @@ CHROME
   ab_live close >/dev/null 2>&1 || true
 }
 
-tool_sequence() { jq -sc '[.[] | select(.kind == "tool.call") | [.role, .call.name, .call.args]]' "$1"; }
-
 if [ "$LIVE_ONLY" = "0" ]; then
-run_phase record record "$FIXTURE_URL" "$WORK/fixture-main" pass
-CURRENT_PHASE=record
-CASSETTES="$(find "$WORK/cassettes" -name '*.json' | wc -l)"
-[ "$CASSETTES" -gt 0 ] && ok "record phase wrote $CASSETTES cassette(s) to $WORK/cassettes" \
-  || bad "record phase wrote no cassettes"
-
-# Replay reuses a copy of the record profile for the same-profile case. Bundled
-# userscript ids are pinned (src/userscripts/catalog.ts), so a fresh profile matches
-# too — --cross-profile runs that case and expects it to pass.
-run_phase replay replay "$FIXTURE_URL" "$WORK/fixture-main" pass "$TMP/record/profile"
-CURRENT_PHASE=replay
-if [ -s "$WORK/record/runlog.jsonl" ] && [ -s "$WORK/replay/runlog.jsonl" ]; then
-  if [ "$(tool_sequence "$WORK/record/runlog.jsonl")" = "$(tool_sequence "$WORK/replay/runlog.jsonl")" ]; then
-    ok "replay reproduced the record run's tool-call sequence ($(jq -sc '[.[] | select(.kind=="tool.call") | .call.name]' "$WORK/replay/runlog.jsonl"))"
-  else
-    bad "replay tool calls differ from record: $(tool_sequence "$WORK/record/runlog.jsonl") vs $(tool_sequence "$WORK/replay/runlog.jsonl")"
-  fi
-fi
-
-if [ "$NEGATIVE" = "1" ]; then
-  run_phase mismatch replay "$MISMATCH_URL" "$WORK/fixture-mismatch" fail "$TMP/record/profile"
-fi
-
-if [ "$CROSS_PROFILE" = "1" ]; then
-  run_phase cross-profile replay "$FIXTURE_URL" "$WORK/fixture-main" pass
-fi
+run_phase scripted "$FIXTURE_URL" "$WORK/fixture-main"
 
 # ------------------------------------------------------------ 5. verdict self-test
 CURRENT_PHASE=selftest
 step "verdict self-test: a wrong or empty result must fail"
-SELFTEST_STREAM=""
-for p in replay record; do
-  if node "$HARNESS/verdict.mjs" --stream "$WORK/$p/runlog.jsonl" --expected "$WORK/fixture-main/expected.json" >/dev/null 2>&1; then
-    SELFTEST_STREAM="$WORK/$p/runlog.jsonl"; break
-  fi
-done
-if [ -n "$SELFTEST_STREAM" ]; then
+SELFTEST_STREAM="$WORK/scripted/runlog.jsonl"
+if node "$HARNESS/verdict.mjs" --stream "$SELFTEST_STREAM" --expected "$WORK/fixture-main/expected.json" >/dev/null 2>&1; then
   ok "untampered $(basename "$(dirname "$SELFTEST_STREAM")") stream passes the verdict; tampering it:"
   for t in wrong-stock wrong-sku empty-array empty-object prose reordered no-handoff status-error click-failed no-page-read; do
     if node "$HARNESS/verdict.mjs" --stream "$SELFTEST_STREAM" --expected "$WORK/fixture-main/expected.json" \
@@ -828,7 +743,7 @@ if [ -n "$SELFTEST_STREAM" ]; then
     fi
   done
 else
-  bad "neither the record nor the replay stream passes untampered; nothing meaningful to self-test"
+  bad "the scripted stream does not pass untampered; nothing meaningful to self-test"
 fi
 fi # LIVE_ONLY=0 (scripted tier)
 
