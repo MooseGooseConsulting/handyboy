@@ -1,8 +1,8 @@
 import type { RunEvent } from '@/src/messaging';
 import { Badge, type BadgeTone } from '../components/Badge';
 import { ExpandableText } from '../components/ExpandableText';
-import { endedEvent, savedFilesFrom, startedEvent } from '../state/runlog';
-import { formatDuration } from './format';
+import { endedEvent, savedFilesFrom, startedEvent, usageTotals } from '../state/runlog';
+import { formatDuration, roleLabel, usageParts } from './format';
 
 const STATUS_TONE: Record<Extract<RunEvent, { kind: 'run.ended' }>['status'], BadgeTone> = {
   done: 'good',
@@ -33,6 +33,7 @@ export function RunResultCard({ events }: { events: RunEvent[] }) {
   const started = startedEvent(events);
   const elapsedMs = started ? ended.at - started.at : undefined;
   const files = savedFilesFrom(events);
+  const usage = usageTotals(events);
   const tone = STATUS_TONE[ended.status];
 
   return (
@@ -56,6 +57,28 @@ export function RunResultCard({ events }: { events: RunEvent[] }) {
 
       {ended.message ? (
         <ExpandableText text={ended.message} className="mt-1.5 text-sm text-ink" testId="run-result-message" />
+      ) : null}
+
+      {usage.length > 0 ? (
+        <div className="mt-2">
+          <p className="text-[11px] font-semibold tracking-wide text-muted uppercase">Model usage</p>
+          <ul data-testid="run-result-usage" className="mt-1 space-y-0.5">
+            {usage.map((total) => (
+              <li key={total.role} className="flex flex-wrap items-center gap-1.5 text-xs text-muted tabular-nums">
+                <Badge tone={total.role}>{roleLabel(total.role)}</Badge>
+                <span>
+                  {[
+                    `${total.calls} ${total.calls === 1 ? 'call' : 'calls'}`,
+                    ...usageParts(total),
+                    ...(total.unreported > 0 && total.unreported < total.calls
+                      ? [`${total.unreported} without a provider count`]
+                      : []),
+                  ].join(' · ')}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
       {files.length > 0 ? (

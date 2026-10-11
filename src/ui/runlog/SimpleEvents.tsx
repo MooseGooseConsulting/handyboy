@@ -2,7 +2,7 @@ import type { RunEvent } from '@/src/messaging';
 import { Badge, type BadgeTone } from '../components/Badge';
 import { ExpandableText } from '../components/ExpandableText';
 import { EventShell } from './EventShell';
-import { roleLabel } from './format';
+import { formatCount, roleLabel, usageParts } from './format';
 
 type Of<K extends RunEvent['kind']> = Extract<RunEvent, { kind: K }>;
 
@@ -56,8 +56,24 @@ export function ObservationEvent({ event }: { event: Of<'observation'> }) {
         <Badge tone="neutral">observe: {event.mode}</Badge>
         {event.hasScreenshot ? <Badge tone="accent">screenshot</Badge> : null}
         {event.tokens !== undefined ? (
-          <span className="tabular-nums">{event.tokens} tokens</span>
+          // A chars/4 guess at the snapshot alone. Labelled so nobody reads it as
+          // the prompt's size; the model.usage line carries the real counts.
+          <span className="tabular-nums" title="Estimated from the snapshot's length; not the prompt size">
+            ≈{formatCount(event.tokens)} snapshot tokens
+          </span>
         ) : null}
+      </p>
+    </EventShell>
+  );
+}
+
+export function ModelUsageEvent({ event }: { event: Of<'model.usage'> }) {
+  return (
+    <EventShell at={event.at}>
+      <p data-testid="model-usage" className="flex flex-wrap items-center gap-1.5 py-0.5 text-xs text-muted">
+        <Badge tone={event.role}>{roleLabel(event.role)}</Badge>
+        <span className="truncate font-mono text-[11px]">{event.model}</span>
+        <span className="tabular-nums">{usageParts(event).join(' · ')}</span>
       </p>
     </EventShell>
   );

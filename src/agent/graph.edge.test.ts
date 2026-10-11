@@ -28,10 +28,11 @@ import {
   FOLLOWER_SYSTEM,
   LEADER_SYSTEM,
   MAX_IDLE_FOLLOWER_TURNS,
+  promptChars,
   type RouteInputs,
 } from './graph';
 import { FakePageTools } from './tools';
-import { FakeChatModel, type FakeCall, type FakeTurn } from './models';
+import { FakeChatModel, type FakeCall, type FakeChatModelInit, type FakeTurn } from './models';
 import { startRun, type RunEndedEvent } from './run';
 
 const baseConfig: Config = {
@@ -101,7 +102,10 @@ function harness(options: {
   leaderRespond?: (call: FakeCall) => FakeTurn;
   page?: FakePageTools;
   planningInterval?: number;
-}): Promise<{ events: RunEvent[]; ended: RunEndedEvent; follower: FakeChatModel }> {
+  leaderUsage?: FakeChatModelInit['usage'];
+  followerUsage?: FakeChatModelInit['usage'];
+  observe?: Config['observe'];
+}): Promise<{ events: RunEvent[]; ended: RunEndedEvent; follower: FakeChatModel; leader: FakeChatModel }> {
   const events: RunEvent[] = [];
   const page = options.page ?? new FakePageTools();
   const leader = new FakeChatModel({
@@ -109,14 +113,16 @@ function harness(options: {
     respond:
       options.leaderRespond ??
       (() => ({ kind: 'tool', name: 'set_plan', args: { plan: 'do it', subgoals, currentSubgoal: 0 } })),
+    usage: options.leaderUsage,
   });
-  const follower = new FakeChatModel({ label: 'follower', respond: options.follower });
+  const follower = new FakeChatModel({ label: 'follower', respond: options.follower, usage: options.followerUsage });
 
   const handle = startRun({
     prompt: 'find the widget',
     config: {
       ...baseConfig,
       planningInterval: options.planningInterval ?? baseConfig.planningInterval,
+      observe: options.observe ?? baseConfig.observe,
     },
     tools: page,
     models: { leader, follower },
@@ -125,7 +131,7 @@ function harness(options: {
     runId: `test-${Math.random().toString(36).slice(2)}`,
   });
 
-  return handle.done.then((ended) => ({ events, ended, follower }));
+  return handle.done.then((ended) => ({ events, ended, follower, leader }));
 }
 
 function pick<K extends RunEvent['kind']>(events: RunEvent[], kind: K): Extract<RunEvent, { kind: K }>[] {
@@ -346,6 +352,91 @@ describe('follower history is bounded', () => {
     const fifth = follower.calls[4]!;
     const observations = fifth.messages.filter((message) => message instanceof HumanMessage);
     expect(observations).toHaveLength(FOLLOWER_HISTORY_TURNS + 1);
+  });
+});
+
+describe('every model call records what it cost', () => {
+  const usage = (input: number) => ({
+    input_tokens: input,
+    output_tokens: 20,
+    total_tokens: input + 20,
+    input_token_details: { cache_read: 100 },
+    output_token_details: { reasoning: 5 },
+  });
+  const usageOf = (events: RunEvent[], role: 'leader' | 'follower') =>
+    pick(events, 'model.usage').filter((e) => e.role === role);
+
+  it("records the provider's prompt and completion tokens for every Follower call", async () => {
+    const { events, follower } = await harness({
+      followerUsage: (call) => usage(1000 + call.index),
+      follower: (call) =>
+        call.index < 2
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+    });
+
+    const logged = usageOf(events, 'follower');
+    expect(logged).toHaveLength(follower.calls.length);
+    expect(logged.map((e) => e.inputTokens)).toEqual([1000, 1001, 1002]);
+    for (const [i, e] of logged.entries()) {
+      expect(e).toMatchObject({ outputTokens: 20, reasoningTokens: 5, cachedTokens: 100 });
+      expect(e.promptChars).toBe(promptChars(follower.calls[i]!.messages));
+      expect(e.model).toBeTruthy();
+    }
+  });
+
+  it('records token usage for every Leader lap, evidence reads included', async () => {
+    const { events, leader } = await harness({
+      leaderUsage: (call) => usage(500 + call.index),
+      leaderRespond: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'leader_snapshot', args: {} }
+          : { kind: 'tool', name: 'set_plan', args: { plan: 'do it', subgoals, currentSubgoal: 0 } },
+      follower: () => ({ kind: 'tool', name: 'done', args: { summary: 'found it' } }),
+    });
+
+    const logged = usageOf(events, 'leader');
+    expect(leader.calls).toHaveLength(2);
+    expect(logged.map((e) => e.inputTokens)).toEqual([500, 501]);
+    // The second lap carries the snapshot the first one read, so it is bigger.
+    expect(logged[1]!.promptChars).toBeGreaterThan(logged[0]!.promptChars);
+  });
+
+  it("still records the prompt's character count when the provider reports no usage", async () => {
+    const { events, follower } = await harness({
+      follower: () => ({ kind: 'tool', name: 'done', args: { summary: 'found it' } }),
+    });
+
+    const [logged] = usageOf(events, 'follower');
+    expect(logged).toBeDefined();
+    expect(logged).not.toHaveProperty('inputTokens');
+    expect(logged).not.toHaveProperty('outputTokens');
+    expect(logged!.promptChars).toBe(promptChars(follower.calls[0]!.messages));
+    expect(logged!.promptChars).toBeGreaterThan(FOLLOWER_SYSTEM.length);
+  });
+
+  it('records how many characters each tool result handed the model', async () => {
+    const { events } = await harness({
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'extract_text', args: { signal: 'CONTINUE' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+    });
+
+    const read = pick(events, 'tool.result').find((e) => e.result.name === 'extract_text');
+    expect(read?.result.chars).toBe('extracted text'.length);
+  });
+
+  it('counts tool-call arguments but not image bytes toward the prompt size', () => {
+    const withImage = new HumanMessage({
+      content: [
+        { type: 'text', text: 'abc' },
+        { type: 'image', url: `data:image/png;base64,${'A'.repeat(10_000)}`, mimeType: 'image/png' },
+      ],
+    });
+    const reply = new AIMessage({ content: '', tool_calls: [{ id: 'c', name: 'click', args: { ref: 'e1' } }] });
+    expect(promptChars([withImage])).toBe(3);
+    expect(promptChars([reply])).toBe('click'.length + JSON.stringify({ ref: 'e1' }).length);
   });
 });
 

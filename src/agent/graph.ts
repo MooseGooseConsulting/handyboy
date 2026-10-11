@@ -27,6 +27,7 @@ import {
   type LangGraphRunnableConfig,
 } from '@langchain/langgraph/web';
 import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
   AIMessage,
   HumanMessage,
@@ -216,6 +217,67 @@ export function followerFeedback(messages: BaseMessage[], turns: number): string
     }
   }
   return lines.join('\n');
+}
+
+/**
+ * Text characters in a prompt: every text block, plus the arguments of tool calls the
+ * assistant made earlier (they are resent too). Images are left out because their
+ * data URL length says nothing about what the provider charges for them.
+ */
+export function promptChars(messages: BaseMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    const { content } = message;
+    if (typeof content === 'string') total += content.length;
+    else {
+      for (const part of content) {
+        if (part.type === 'text' && typeof part.text === 'string') total += part.text.length;
+      }
+    }
+    if (message instanceof AIMessage) {
+      for (const call of message.tool_calls ?? []) total += call.name.length + JSON.stringify(call.args ?? {}).length;
+    }
+  }
+  return total;
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * The model id to log: the one the user picked, which is what the panel's totals
+ * are read against, falling back to whatever the provider says it served.
+ */
+function modelId(model: BaseChatModel, response: AIMessage): string {
+  const configured = (model as { model?: unknown }).model;
+  if (typeof configured === 'string' && configured) return configured;
+  const served = response.response_metadata?.model_name;
+  return typeof served === 'string' && served ? served : model._llmType();
+}
+
+/**
+ * One `model.usage` event per provider round trip. `@langchain/openai` fills
+ * `usage_metadata` from the OpenAI-style `usage` object; anything it did not
+ * report stays absent rather than becoming a zero that reads as "free".
+ */
+function emitUsage(config: Emitter, role: Role, model: BaseChatModel, sent: BaseMessage[], response: AIMessage): void {
+  const usage = response.usage_metadata;
+  const inputTokens = count(usage?.input_tokens);
+  const outputTokens = count(usage?.output_tokens);
+  const reasoningTokens = count(usage?.output_token_details?.reasoning);
+  const cachedTokens = count(usage?.input_token_details?.cache_read);
+  emit(config, {
+    kind: 'model.usage',
+    role,
+    model: modelId(model, response),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+    promptChars: promptChars(sent),
+    at: now(),
+  });
 }
 
 function parseSignal(value: unknown): FollowerSignal | undefined {
@@ -438,11 +500,9 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   // only ever reads still ends its turn instead of becoming a second Follower.
   for (let lap = 0; lap < LEADER_READ_CAP + 2 && !planned; lap++) {
     let response: AIMessage;
+    const sent = [new SystemMessage(LEADER_SYSTEM), ...state.leaderMessages, ...messages];
     try {
-      response = (await bound.invoke(
-        [new SystemMessage(LEADER_SYSTEM), ...state.leaderMessages, ...messages],
-        config,
-      )) as AIMessage;
+      response = (await bound.invoke(sent, config)) as AIMessage;
     } catch (error) {
       // A text-only Leader dies on the image block leader_screenshot appended: swap
       // the pixels for a note, bar further screenshots, and retry the lap. Only a
@@ -454,6 +514,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       messages[imgIdx] = new HumanMessage(LEADER_NO_VISION_NOTE);
       continue;
     }
+    emitUsage(config, 'leader', ctx.leaderModel, sent, response);
     messages.push(response);
 
     const text = textOf(response);
@@ -497,7 +558,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
       messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
@@ -570,7 +631,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: false, summary: summarize(result), durationMs: now() - started },
+            result: { callId, name: call.name, ok: false, summary: summarize(result), durationMs: now() - started, chars: result.length },
             at: now(),
           });
           messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
@@ -589,7 +650,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
       messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
@@ -705,10 +766,9 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   // --- act ----------------------------------------------------------------
   const human = new HumanMessage({ content: blocks });
   const bound = ctx.followerModel.bindTools?.(ctx.toolset.all) ?? ctx.followerModel;
-  const response = (await bound.invoke(
-    [new SystemMessage(FOLLOWER_SYSTEM), ...trimFollowerHistory(state.followerMessages), human],
-    config,
-  )) as AIMessage;
+  const sent = [new SystemMessage(FOLLOWER_SYSTEM), ...trimFollowerHistory(state.followerMessages), human];
+  const response = (await bound.invoke(sent, config)) as AIMessage;
+  emitUsage(config, role, ctx.followerModel, sent, response);
 
   const text = textOf(response);
   if (text) emit(config, { kind: 'model.text', role, text, at: now() });
@@ -764,7 +824,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     emit(config, {
       kind: 'tool.result',
       role,
-      result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+      result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
       at: now(),
     });
     messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));

@@ -28,6 +28,12 @@ export interface ToolResult {
   /** Short, UI-safe summary. Full payloads (snapshots, screenshots) are never echoed back here. */
   summary: string;
   durationMs: number;
+  /**
+   * Length of the text the model was given for this result. The summary is capped
+   * for the panel, so without this a 60,000-character extract_text read looks the
+   * same size in the log as a one-line click.
+   */
+  chars?: number;
 }
 
 /**
@@ -43,6 +49,13 @@ export type RunEvent =
   | { kind: 'tool.call'; role: Role; call: ToolCall; at: number }
   | { kind: 'tool.result'; role: Role; result: ToolResult; at: number }
   | { kind: 'model.text'; role: Role; text: string; at: number }
+  /**
+   * What one model call cost. Token fields are the provider's own counts, absent when
+   * it reports none. `promptChars` is measured locally (text and tool-call arguments,
+   * images excluded), so a provider without usage reporting still shows the size.
+   */
+  | { kind: 'model.usage'; role: Role; model: string; inputTokens?: number; outputTokens?: number; reasoningTokens?: number; cachedTokens?: number; promptChars: number; at: number }
+  /** `tokens` is the snapshot's own chars/4 estimate, not the size of the prompt it rides in. */
   | { kind: 'observation'; mode: ObserveMode; tokens?: number; hasScreenshot: boolean; at: number }
   | { kind: 'input.fidelity'; fidelity: InputFidelity; attached: boolean; at: number }
   | { kind: 'userscript.output'; scriptId: string; level: 'log' | 'warn' | 'error'; text: string; at: number }

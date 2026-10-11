@@ -17,6 +17,7 @@ const FILTERS: ReadonlyArray<{ kind: RunEvent['kind']; label: string }> = [
   { kind: 'tool.call', label: 'tools' },
   { kind: 'follower.signal', label: 'signals' },
   { kind: 'model.text', label: 'text' },
+  { kind: 'model.usage', label: 'usage' },
   { kind: 'observation', label: 'observations' },
   { kind: 'input.fidelity', label: 'input' },
   { kind: 'userscript.output', label: 'userscripts' },

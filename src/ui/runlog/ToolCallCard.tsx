@@ -2,7 +2,7 @@ import type { ToolEntry } from '../state/runlog';
 import { Badge } from '../components/Badge';
 import { Collapsible } from '../components/Collapsible';
 import { EventShell } from './EventShell';
-import { formatDuration, prettyJson, roleLabel, summarizeArgs } from './format';
+import { formatCount, formatDuration, prettyJson, roleLabel, summarizeArgs } from './format';
 
 /**
  * A `tool.call` and its `tool.result` as one card (R-06). Collapsed it reads
@@ -38,6 +38,11 @@ export function ToolCallCard({ entry }: { entry: ToolEntry }) {
             {result ? (
               <span className="text-[11px] text-muted tabular-nums">
                 {formatDuration(result.result.durationMs)}
+              </span>
+            ) : null}
+            {result?.result.chars !== undefined ? (
+              <span data-testid="tool-call-chars" className="text-[11px] text-muted tabular-nums">
+                {formatCount(result.result.chars)} chars
               </span>
             ) : null}
           </span>

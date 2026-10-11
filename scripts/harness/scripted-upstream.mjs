@@ -194,7 +194,10 @@ globalThis.fetch = async (input, init = {}) => {
       record({ method, url, error: err.message });
       return json(400, { error: { code: 400, message: err.message } });
     }
-    record({ method, url, role: out.role, model: body.model, tool: out.turn.name, args: out.turn.args, callId: out.callId, messages: body.messages?.length ?? 0 });
+    // The request body's length is the prompt size measured on the wire, so a size
+    // change can be checked in the harness without spending a real model call.
+    const requestChars = typeof init.body === 'string' ? init.body.length : 0;
+    record({ method, url, role: out.role, model: body.model, tool: out.turn.name, args: out.turn.args, callId: out.callId, messages: body.messages?.length ?? 0, requestChars });
     if (body.stream) {
       return new Response(sse(out.response), { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
