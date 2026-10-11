@@ -92,8 +92,23 @@ describe('RunResultCard', () => {
     const rows = [...screen.getByTestId('run-result-usage').querySelectorAll('li')].map((li) => li.textContent);
     expect(rows).toEqual([
       'Leader2 calls · 5,000 in · 20 out · 20,000 prompt chars',
-      'Follower2 calls · 70,000 in · 10 out · 570,000 prompt chars · 1 without a provider count',
+      'Follower2 calls · 70,000 in · 10 out · 570,000 prompt chars · 1 without an input token count',
     ]);
+  });
+
+  it('says a call lacked an input count, not a provider count, when it reported other counts', () => {
+    render(
+      <RunResultCard
+        events={[
+          started,
+          { kind: 'model.usage', role: 'follower', model: 'm', inputTokens: 1_000, outputTokens: 10, promptChars: 4_000, at: 1_500 },
+          { kind: 'model.usage', role: 'follower', model: 'm', outputTokens: 30, promptChars: 4_100, at: 1_600 },
+          { kind: 'run.ended', status: 'done', message: 'ok', steps: 2, at: 2_000 },
+        ]}
+      />,
+    );
+    const row = screen.getByTestId('run-result-usage').querySelector('li')?.textContent;
+    expect(row).toBe('Follower2 calls · 1,000 in · 40 out · 8,100 prompt chars · 1 without an input token count');
   });
 
   it('leaves the usage section out when no model call was recorded', () => {

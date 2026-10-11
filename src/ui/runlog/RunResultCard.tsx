@@ -70,8 +70,8 @@ export function RunResultCard({ events }: { events: RunEvent[] }) {
                   {[
                     `${total.calls} ${total.calls === 1 ? 'call' : 'calls'}`,
                     ...usageParts(total),
-                    ...(total.unreported > 0 && total.unreported < total.calls
-                      ? [`${total.unreported} without a provider count`]
+                    ...(total.withoutInputCount > 0 && total.withoutInputCount < total.calls
+                      ? [`${total.withoutInputCount} without an input token count`]
                       : []),
                   ].join(' · ')}
                 </span>

@@ -243,8 +243,11 @@ export interface RoleUsage {
   reasoningTokens?: number;
   cachedTokens?: number;
   promptChars: number;
-  /** Calls whose provider gave no input token count, so the token sums undercount. */
-  unreported: number;
+  /**
+   * Calls whose provider gave no input token count, so the input sum undercounts. A
+   * call that reported only output still counts here: its provider did report usage.
+   */
+  withoutInputCount: number;
 }
 
 /**
@@ -258,14 +261,14 @@ export function usageTotals(events: RunEvent[]): RoleUsage[] {
     value === undefined ? current : (current ?? 0) + value;
   for (const event of events) {
     if (event.kind !== 'model.usage') continue;
-    const total = byRole.get(event.role) ?? { role: event.role, calls: 0, promptChars: 0, unreported: 0 };
+    const total = byRole.get(event.role) ?? { role: event.role, calls: 0, promptChars: 0, withoutInputCount: 0 };
     total.calls += 1;
     total.promptChars += event.promptChars;
     total.inputTokens = add(total.inputTokens, event.inputTokens);
     total.outputTokens = add(total.outputTokens, event.outputTokens);
     total.reasoningTokens = add(total.reasoningTokens, event.reasoningTokens);
     total.cachedTokens = add(total.cachedTokens, event.cachedTokens);
-    if (event.inputTokens === undefined) total.unreported += 1;
+    if (event.inputTokens === undefined) total.withoutInputCount += 1;
     byRole.set(event.role, total);
   }
   return (['leader', 'follower'] as const).flatMap((role) => byRole.get(role) ?? []);
