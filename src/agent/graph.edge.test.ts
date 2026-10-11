@@ -454,6 +454,90 @@ describe('compactObservations keeps the transcript valid', () => {
   });
 });
 
+describe('a refusal keeps its text in later prompts', () => {
+  const refusalOf = (messages: BaseMessage[], name: string) =>
+    messages.filter((m): m is ToolMessage => m instanceof ToolMessage && m.name === name).map((m) => m.content);
+
+  it('a refused extra snapshot call still reads as a refusal once a fresh snapshot arrives', async () => {
+    const page = new FakePageTools({
+      snapshots: [
+        { text: 'page: [e1] link "One"', tokens: 8 },
+        { text: 'page: [e1] link "Two"', tokens: 8 },
+      ],
+    });
+    const { follower } = await harness({
+      page,
+      follower: (call) =>
+        call.index === 0
+          ? {
+              kind: 'tools',
+              calls: [
+                { name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } },
+                { name: 'snapshot', args: {} },
+              ],
+            }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    // The second call carries a fresh snapshot, so a successful snapshot result
+    // before it would be stubbed; the refusal was never a page and must stay.
+    expect(textBlocks(follower.calls[1]!).at(-1)).toBe('Page snapshot:\npage: [e1] link "Two"');
+    expect(refusalOf(follower.calls[1]!.messages, 'snapshot')).toEqual([
+      'only the first tool call per turn is answered; re-issue this call next turn if it still matters.',
+    ]);
+  });
+
+  it("a later replan still shows the Leader its read-cap refusal rather than a superseded stub", async () => {
+    const read = (): FakeTurn => ({ kind: 'tool', name: 'leader_snapshot', args: {} });
+    const { leader } = await harness({
+      leaderRespond: (call) =>
+        call.index < 3 ? read() : { kind: 'tool', name: 'set_plan', args: { plan: 'go', subgoals, currentSubgoal: 0 } },
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'RETURN_TO_LEADER' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    expect(leader.calls).toHaveLength(5);
+    const stored = refusalOf(leader.calls[4]!.messages, 'leader_snapshot');
+    expect(stored).toHaveLength(3);
+    expect(stored[2]).toContain('observation budget spent: at most 2 reads per turn.');
+  });
+});
+
+describe('every tool result the model is handed records its size', () => {
+  it('records chars on refused extras, read-cap refusals, unknown Leader tools and Leader screenshots', async () => {
+    const { events } = await harness({
+      observe: 'both',
+      leaderRespond: (call) => {
+        if (call.index === 0) return { kind: 'tool', name: 'leader_screenshot', args: {} };
+        if (call.index === 1) return { kind: 'tool', name: 'leader_snapshot', args: {} };
+        if (call.index === 2) return { kind: 'tool', name: 'leader_snapshot', args: {} };
+        if (call.index === 3) return { kind: 'tool', name: 'click', args: { ref: 'e1' } };
+        return { kind: 'tool', name: 'set_plan', args: { plan: 'go', subgoals, currentSubgoal: 0 } };
+      },
+      follower: (call) =>
+        call.index === 0
+          ? {
+              kind: 'tools',
+              calls: [
+                { name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } },
+                { name: 'snapshot', args: {} },
+              ],
+            }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    const results = pick(events, 'tool.result');
+    const unsized = results.filter((e) => e.result.chars === undefined).map((e) => `${e.role}:${e.result.name}`);
+    expect(unsized).toEqual([]);
+    const refused = results.find((e) => e.role === 'follower' && e.result.name === 'snapshot');
+    expect(refused?.result.chars).toBe(refused?.result.summary.length);
+    const shot = results.find((e) => e.result.name === 'leader_screenshot');
+    expect(shot?.result.chars).toBe(shot?.result.summary.length);
+  });
+});
+
 describe('an unchanged page is not resent', () => {
   const A = 'page: [e1] button "Next"';
   const B = 'page: [e1] button "Next" [e2] text "Loaded"';

@@ -121,7 +121,10 @@ function hasSnapshotBlock(message: BaseMessage): boolean {
   return message instanceof HumanMessage && Array.isArray(message.content) && message.content.some(isSnapshotBlock);
 }
 
-/** A successful `snapshot` tool result: a failed one is an error the model should still read. */
+/**
+ * A successful `snapshot` tool result: a failed one is an error the model should still
+ * read. Refused calls carry `status: 'error'` too, so a refusal is never mistaken for a page.
+ */
 function isSnapshotResult(message: BaseMessage): message is ToolMessage {
   return message instanceof ToolMessage && message.name === 'snapshot' && message.status !== 'error';
 }
@@ -186,7 +189,7 @@ const LEADER_PAGE_READS: ReadonlySet<string> = new Set(['leader_snapshot', 'lead
  * A Leader read is evidence for the replan that asked for it. Stored in full, every
  * later replan resent it (up to 60,000 characters each) as if it were current. The
  * call id and the note stay so the transcript remains valid and the Leader knows it
- * looked; a failed read keeps its error text.
+ * looked; a failed or refused read keeps its text, because it says what to do instead.
  */
 function compactStoredRead(message: BaseMessage, step: number): BaseMessage {
   if (!(message instanceof ToolMessage) || !message.name || !LEADER_PAGE_READS.has(message.name)) return message;
@@ -408,7 +411,8 @@ function parseSignal(value: unknown): FollowerSignal | undefined {
  * Answers every tool call past the first so the transcript stays valid:
  * OpenAI-compatible providers reject an assistant message whose call ids lack
  * results. Both roles act once per turn by design, so extras are refused with
- * an instruction to re-issue, never run.
+ * an instruction to re-issue, never run. The `error` status is what keeps prompt
+ * compaction from stubbing that instruction as if it were a superseded result.
  */
 const EXTRA_CALL_REFUSAL =
   'only the first tool call per turn is answered; re-issue this call next turn if it still matters.';
@@ -432,10 +436,10 @@ function answerExtraCalls(
     emit(config, {
       kind: 'tool.result',
       role,
-      result: { callId, name: call.name, ok: false, summary: refusal, durationMs: 0 },
+      result: { callId, name: call.name, ok: false, summary: refusal, durationMs: 0, chars: refusal.length },
       at: now(),
     });
-    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
   });
 }
 
@@ -700,10 +704,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
         emit(config, {
           kind: 'tool.result',
           role: 'leader',
-          result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+          result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
           at: now(),
         });
-        messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+        messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
         answerExtras();
         continue;
       }
@@ -717,10 +721,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+            result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
             at: now(),
           });
-          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
           answerExtras();
           continue;
         }
@@ -733,7 +737,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: true, summary, durationMs: now() - started },
+            result: { callId, name: call.name, ok: true, summary, durationMs: now() - started, chars: summary.length },
             at: now(),
           });
           messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: summary }));
@@ -791,10 +795,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+        result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
         at: now(),
       });
-      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
       answerExtras();
     }
   }
