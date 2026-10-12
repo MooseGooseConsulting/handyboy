@@ -14,6 +14,11 @@
 # `test` reuses the harness's fixture server, prompts and scorers (scripts/harness/), but
 # against this Chrome instead of a harness-owned one. Fixture pages are served on
 # 127.0.0.1, so no third-party site is touched unless you name the `ebay` task.
+#
+# Environment: NB_LIVE_CHROME, NB_LIVE_CHROME_DIR (browser and its config dir),
+# NB_LIVE_LEADER, NB_LIVE_FOLLOWER (model ids), NB_LIVE_TIMEOUT (seconds per run),
+# NB_LIVE_CONNECT_WAIT, and NB_LIVE_REINSTALL_HOST=1 to point the registered dev host at
+# this checkout when setup reports it runs from another one.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +40,7 @@ DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,st
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Same derivation as host/install.sh: the manifest key pins the id across rebuilds.
 ext_id() {
@@ -79,7 +84,7 @@ cmd_setup() {
     command -v "$bin" >/dev/null || die "$bin is not on PATH"
   done
   [ -n "$CHROME" ] || die "no google-chrome-stable on PATH (set NB_LIVE_CHROME)"
-  pgrep -x chrome >/dev/null || die "Chrome is not running; start it normally, then re-run"
+  pgrep -x 'chrome|chromium|chromium-browser' >/dev/null || die "Chrome is not running; start it normally, then re-run"
   echo "node $(node --version), chrome $("$CHROME" --version | awk '{print $NF}')"
 
   step "dependencies"
@@ -103,7 +108,13 @@ cmd_setup() {
     [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ "$path" != "$EXT_DIR" ]; then
-      mkdir -p "$path" && rsync -a --delete "$EXT_DIR/" "$path/" || die "could not copy the build to $path"
+      # rsync --delete empties whatever is there, so only overwrite a directory that still
+      # holds a nanobrowser build. A stale registration may now point at something else.
+      if [ "$(jq -r .key "$path/manifest.json" 2>/dev/null)" != "$(jq -r .key "$EXT_DIR/manifest.json")" ]; then
+        echo "   NOTE: $path no longer holds a nanobrowser build; not touching it. Load unpacked again from $EXT_DIR"
+        continue
+      fi
+      rsync -a --delete "$EXT_DIR/" "$path/" || die "could not copy the build to $path"
       echo "copied this build there"
     fi
     [ "$us" = "True" ] || echo "   NOTE: \"Allow User Scripts\" is off in \"$profile\"; userscript tasks fail until you turn it on in the extension's Details"
@@ -179,6 +190,7 @@ MSG
 
 FIXTURE_PID=""
 ACTIVE_STDERR=""
+RUN_PID=""
 
 run_id_in() { grep -o 'runId=[A-Za-z0-9_-]*' "$1" 2>/dev/null | head -n1 | cut -d= -f2; }
 
@@ -188,6 +200,7 @@ cleanup_test() {
     id="$(run_id_in "$ACTIVE_STDERR")"
     [ -n "$id" ] && { echo "cancelling in-flight run $id"; host/bin/nb-cancel "$id" >/dev/null 2>&1 || true; }
   fi
+  [ -n "$RUN_PID" ] && kill "$RUN_PID" 2>/dev/null
   [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null
   return 0
 }
@@ -266,9 +279,15 @@ cmd_test() {
     sleep 2
 
     ACTIVE_STDERR="$out/$task-nb-run.stderr"
+    # In the background and waited on: `timeout` puts itself in its own process group, so
+    # Ctrl-C never reaches it, and bash runs no trap while a foreground child is running.
+    # `wait` returns on the signal at once, so the trap cancels the run straight away.
     timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" "${opt_args[@]}" \
-      >"$out/$task-stream.jsonl" 2>"$ACTIVE_STDERR"
+      >"$out/$task-stream.jsonl" 2>"$ACTIVE_STDERR" &
+    RUN_PID=$!
+    wait "$RUN_PID"
     local rc=$? run_id
+    RUN_PID=""
     ACTIVE_STDERR=""
     run_id="$(run_id_in "$out/$task-nb-run.stderr")"
     if [ "$rc" -eq 124 ] && [ -n "$run_id" ]; then
