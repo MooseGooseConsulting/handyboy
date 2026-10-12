@@ -7,6 +7,7 @@ import {
   FollowerSignalEvent,
   InputFidelityEvent,
   ModelTextEvent,
+  ModelUsageEvent,
   ObservationEvent,
   RunEndedEvent,
   RunPausedEvent,
@@ -34,6 +35,8 @@ export function LogEntryView({ entry }: { entry: LogEntry }) {
       return <FollowerSignalEvent event={event} />;
     case 'model.text':
       return <ModelTextEvent event={event} />;
+    case 'model.usage':
+      return <ModelUsageEvent event={event} />;
     case 'observation':
       return <ObservationEvent event={event} />;
     case 'input.fidelity':

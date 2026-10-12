@@ -84,6 +84,14 @@ export const AgentState = new StateSchema({
    * action does.
    */
   repeatFailureTurns: z.number().int().min(0).default(0),
+  /**
+   * Digest of the last page snapshot the Follower was actually sent, and the step it
+   * was sent on. Read-only turns rarely change the page (86 of 90 eBay follow-ups in
+   * the logs had an identical snapshot), so an equal digest is answered with a note
+   * pointing back at that step instead of another full copy.
+   */
+  lastSnapshotDigest: z.string().nullable().default(null),
+  lastSnapshotStep: z.number().int().min(0).nullable().default(null),
   lastSignal: FollowerSignalSchema.nullable().default(null),
   status: RunStatusSchema.default('running'),
   /**

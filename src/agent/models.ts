@@ -22,7 +22,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseChatModelParams } from '@langchain/core/language_models/chat_models';
 import type { BindToolsInput } from '@langchain/core/language_models/chat_models';
 import type { BaseLanguageModelInput } from '@langchain/core/language_models/base';
-import { AIMessage, type AIMessageChunk, type BaseMessage } from '@langchain/core/messages';
+import { AIMessage, type AIMessageChunk, type BaseMessage, type UsageMetadata } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 import type { Runnable } from '@langchain/core/runnables';
 import type { ModelSource } from '@/src/storage';
@@ -154,6 +154,11 @@ export interface FakeChatModelInit extends BaseChatModelParams {
   /** Takes precedence over `turns` when present. */
   respond?: (call: FakeCall) => FakeTurn;
   label?: string;
+  /**
+   * What the fake reports as provider usage, set on the reply exactly where
+   * `@langchain/openai` puts it. Absent means the provider reported nothing.
+   */
+  usage?: UsageMetadata | ((call: FakeCall) => UsageMetadata | undefined);
 }
 
 /**
@@ -170,6 +175,7 @@ export class FakeChatModel extends BaseChatModel {
 
   #turns: FakeTurn[];
   #respond?: (call: FakeCall) => FakeTurn;
+  #usage?: FakeChatModelInit['usage'];
   #boundTools: string[] = [];
   #toolCallSeq = 0;
 
@@ -177,6 +183,7 @@ export class FakeChatModel extends BaseChatModel {
     super(init);
     this.#turns = init.turns ?? [{ kind: 'text', text: 'ok' }];
     this.#respond = init.respond;
+    this.#usage = init.usage;
     this.label = init.label ?? 'fake';
   }
 
@@ -204,6 +211,14 @@ export class FakeChatModel extends BaseChatModel {
   }
 
   async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    const result = this.#reply(messages);
+    const message = result.generations[0]?.message;
+    const usage = typeof this.#usage === 'function' ? this.#usage(this.calls.at(-1)!) : this.#usage;
+    if (message instanceof AIMessage && usage) message.usage_metadata = usage;
+    return result;
+  }
+
+  #reply(messages: BaseMessage[]): ChatResult {
     const call: FakeCall = {
       index: this.calls.length,
       messages,

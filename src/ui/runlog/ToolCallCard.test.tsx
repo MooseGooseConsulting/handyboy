@@ -76,6 +76,14 @@ describe('ToolCallCard', () => {
     expect(screen.getByRole('button').getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('shows how many characters the result handed the model when the log records it', () => {
+    const { rerender } = render(<ToolCallCard entry={entry()} />);
+    expect(screen.queryByTestId('tool-call-chars')).toBeNull();
+
+    rerender(<ToolCallCard entry={entry({ result: { ...result, result: { ...result.result, chars: 60_000 } } })} />);
+    expect(screen.getByTestId('tool-call-chars').textContent).toBe('60,000 chars');
+  });
+
   it('marks a failed call', () => {
     render(
       <ToolCallCard

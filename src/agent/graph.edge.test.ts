@@ -21,6 +21,7 @@ import type { RunEvent } from '@/src/messaging/contract';
 import type { Config } from '@/src/storage';
 import {
   actionKey,
+  compactObservations,
   decideNext,
   followerFeedback,
   trimFollowerHistory,
@@ -28,10 +29,12 @@ import {
   FOLLOWER_SYSTEM,
   LEADER_SYSTEM,
   MAX_IDLE_FOLLOWER_TURNS,
+  promptChars,
+  unchangedPageNote,
   type RouteInputs,
 } from './graph';
 import { FakePageTools } from './tools';
-import { FakeChatModel, type FakeCall, type FakeTurn } from './models';
+import { FakeChatModel, type FakeCall, type FakeChatModelInit, type FakeTurn } from './models';
 import { startRun, type RunEndedEvent } from './run';
 
 const baseConfig: Config = {
@@ -101,7 +104,10 @@ function harness(options: {
   leaderRespond?: (call: FakeCall) => FakeTurn;
   page?: FakePageTools;
   planningInterval?: number;
-}): Promise<{ events: RunEvent[]; ended: RunEndedEvent; follower: FakeChatModel }> {
+  leaderUsage?: FakeChatModelInit['usage'];
+  followerUsage?: FakeChatModelInit['usage'];
+  observe?: Config['observe'];
+}): Promise<{ events: RunEvent[]; ended: RunEndedEvent; follower: FakeChatModel; leader: FakeChatModel }> {
   const events: RunEvent[] = [];
   const page = options.page ?? new FakePageTools();
   const leader = new FakeChatModel({
@@ -109,14 +115,16 @@ function harness(options: {
     respond:
       options.leaderRespond ??
       (() => ({ kind: 'tool', name: 'set_plan', args: { plan: 'do it', subgoals, currentSubgoal: 0 } })),
+    usage: options.leaderUsage,
   });
-  const follower = new FakeChatModel({ label: 'follower', respond: options.follower });
+  const follower = new FakeChatModel({ label: 'follower', respond: options.follower, usage: options.followerUsage });
 
   const handle = startRun({
     prompt: 'find the widget',
     config: {
       ...baseConfig,
       planningInterval: options.planningInterval ?? baseConfig.planningInterval,
+      observe: options.observe ?? baseConfig.observe,
     },
     tools: page,
     models: { leader, follower },
@@ -125,11 +133,20 @@ function harness(options: {
     runId: `test-${Math.random().toString(36).slice(2)}`,
   });
 
-  return handle.done.then((ended) => ({ events, ended, follower }));
+  return handle.done.then((ended) => ({ events, ended, follower, leader }));
 }
 
 function pick<K extends RunEvent['kind']>(events: RunEvent[], kind: K): Extract<RunEvent, { kind: K }>[] {
   return events.filter((e): e is Extract<RunEvent, { kind: K }> => e.kind === kind);
+}
+
+/** Every text block in a call's prompt, in order. */
+function textBlocks(call: FakeCall): string[] {
+  return call.messages.flatMap((message) =>
+    typeof message.content === 'string'
+      ? [message.content]
+      : message.content.flatMap((block) => (block.type === 'text' ? [String(block.text)] : [])),
+  );
 }
 
 describe('follower node: an unrecognised tool name from the model', () => {
@@ -333,19 +350,365 @@ describe('follower history is bounded', () => {
   // Follower invoke stays green. Five tool calls is the first invoke where an
   // untrimmed transcript would carry every observation. The cadence stays above
   // that so a replan cannot take the fifth call.
-  it('shows the fifth follower tool call only the kept turns plus the new observation', async () => {
-    const { follower } = await harness({
-      planningInterval: 6,
-      follower: (call) =>
-        call.index < 4
-          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
-          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+  const fiveClicks = (call: FakeCall): FakeTurn =>
+    call.index < 4
+      ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
+      : { kind: 'tool', name: 'done', args: { summary: 'found it' } };
+
+  // Each click changes the page, so every turn really does carry a fresh snapshot
+  // and none of them is answered with the unchanged-page note instead.
+  const changingPage = () =>
+    new FakePageTools({
+      snapshots: Array.from({ length: 5 }, (_, i) => ({ text: `page: [e1] link "Example ${i + 1}"`, tokens: 8 })),
     });
+
+  it('sends exactly one page snapshot on the fifth Follower call', async () => {
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), follower: fiveClicks });
 
     expect(follower.calls).toHaveLength(5);
     const fifth = follower.calls[4]!;
     const observations = fifth.messages.filter((message) => message instanceof HumanMessage);
     expect(observations).toHaveLength(FOLLOWER_HISTORY_TURNS + 1);
+    const snapshots = textBlocks(fifth).filter((text) => text.startsWith('Page snapshot:'));
+    expect(snapshots).toHaveLength(1);
+    // The one that survives is the current page, not a stale copy.
+    expect(JSON.stringify(fifth.messages.at(-1)?.content)).toContain('Page snapshot:');
+  });
+
+  it("replaces a kept turn's snapshot with a note naming its step", async () => {
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), follower: fiveClicks });
+
+    const notes = textBlocks(follower.calls[4]!).filter((text) => text.includes('omitted: superseded'));
+    expect(notes).toEqual([
+      '[page snapshot from step 2 omitted: superseded]',
+      '[page snapshot from step 3 omitted: superseded]',
+      '[page snapshot from step 4 omitted: superseded]',
+    ]);
+  });
+
+  it('drops screenshots from kept Follower turns as the Leader already does', async () => {
+    const { follower } = await harness({ planningInterval: 6, page: changingPage(), observe: 'both', follower: fiveClicks });
+
+    const fifth = follower.calls[4]!;
+    const images = fifth.messages.flatMap((message) =>
+      Array.isArray(message.content) ? message.content.filter((block) => block.type === 'image') : [],
+    );
+    expect(images).toHaveLength(1);
+    expect(JSON.stringify(fifth.messages.at(-1)?.content)).toContain('"type":"image"');
+    expect(textBlocks(fifth)).toContain('[screenshot from step 4 omitted: superseded]');
+  });
+});
+
+describe('compactObservations keeps the transcript valid', () => {
+  const observation = (step: number, snapshot = true) =>
+    new HumanMessage({
+      content: [
+        { type: 'text', text: `Objective: x\nStep ${step} of at most 10.` },
+        ...(snapshot ? [{ type: 'text' as const, text: `Page snapshot:\npage ${step} [ref=e1]` }] : []),
+      ],
+    });
+  const act = (id: string, name: string) =>
+    new AIMessage({ content: '', tool_calls: [{ id, name, args: { ref: 'e1' } }] });
+  const result = (id: string, name: string, content: string, status?: 'success' | 'error') =>
+    new ToolMessage({ tool_call_id: id, name, content, ...(status ? { status } : {}) });
+
+  it('keeps every tool call id and tool result so the transcript stays valid', () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'page 1 again [ref=e1]'),
+      observation(2), act('b', 'extract_text'), result('b', 'extract_text', 'all the listing text'),
+      observation(3), act('c', 'click'), result('c', 'click', 'clicked e1'),
+      observation(4),
+    ];
+    const compacted = compactObservations(history);
+
+    expect(compacted).toHaveLength(history.length);
+    expect(compacted.map((m) => m.type)).toEqual(history.map((m) => m.type));
+    const ids = (messages: BaseMessage[]) =>
+      messages.flatMap((m) =>
+        m instanceof AIMessage ? (m.tool_calls ?? []).map((c) => `call:${c.id}`) : m instanceof ToolMessage ? [`result:${m.tool_call_id}`] : [],
+      );
+    expect(ids(compacted)).toEqual(ids(history));
+    // Results that are not page snapshots pass through as the same objects.
+    expect(compacted[5]).toBe(history[5]);
+    expect(compacted[8]).toBe(history[8]);
+    expect(compacted[2]!.content).toBe('[page snapshot from step 1 omitted: superseded]');
+    expect(compacted.at(-1)).toBe(history.at(-1));
+  });
+
+  it('keeps the newest snapshot tool result, because the model sees a result only on the next call', () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'fresh page [ref=e9]'),
+      observation(2, false),
+    ];
+    const compacted = compactObservations(history);
+    expect(compacted[2]).toBe(history[2]);
+    expect(compacted[0]!.content).toContainEqual({ type: 'text', text: '[page snapshot from step 1 omitted: superseded]' });
+  });
+
+  it("keeps a failed snapshot call's error text", () => {
+    const history: BaseMessage[] = [
+      observation(1), act('a', 'snapshot'), result('a', 'snapshot', 'tab is not scriptable', 'error'),
+      observation(2),
+    ];
+    expect(compactObservations(history)[2]).toBe(history[2]);
+  });
+});
+
+describe('a refusal keeps its text in later prompts', () => {
+  const refusalOf = (messages: BaseMessage[], name: string) =>
+    messages.filter((m): m is ToolMessage => m instanceof ToolMessage && m.name === name).map((m) => m.content);
+
+  it('a refused extra snapshot call still reads as a refusal once a fresh snapshot arrives', async () => {
+    const page = new FakePageTools({
+      snapshots: [
+        { text: 'page: [e1] link "One"', tokens: 8 },
+        { text: 'page: [e1] link "Two"', tokens: 8 },
+      ],
+    });
+    const { follower } = await harness({
+      page,
+      follower: (call) =>
+        call.index === 0
+          ? {
+              kind: 'tools',
+              calls: [
+                { name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } },
+                { name: 'snapshot', args: {} },
+              ],
+            }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    // The second call carries a fresh snapshot, so a successful snapshot result
+    // before it would be stubbed; the refusal was never a page and must stay.
+    expect(textBlocks(follower.calls[1]!).at(-1)).toBe('Page snapshot:\npage: [e1] link "Two"');
+    expect(refusalOf(follower.calls[1]!.messages, 'snapshot')).toEqual([
+      'only the first tool call per turn is answered; re-issue this call next turn if it still matters.',
+    ]);
+  });
+
+  it("a later replan still shows the Leader its read-cap refusal rather than a superseded stub", async () => {
+    const read = (): FakeTurn => ({ kind: 'tool', name: 'leader_snapshot', args: {} });
+    const { leader } = await harness({
+      leaderRespond: (call) =>
+        call.index < 3 ? read() : { kind: 'tool', name: 'set_plan', args: { plan: 'go', subgoals, currentSubgoal: 0 } },
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'RETURN_TO_LEADER' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    expect(leader.calls).toHaveLength(5);
+    const stored = refusalOf(leader.calls[4]!.messages, 'leader_snapshot');
+    expect(stored).toHaveLength(3);
+    expect(stored[2]).toContain('observation budget spent: at most 2 reads per turn.');
+  });
+});
+
+describe('every tool result the model is handed records its size', () => {
+  it('records chars on refused extras, read-cap refusals, unknown Leader tools and Leader screenshots', async () => {
+    const { events } = await harness({
+      observe: 'both',
+      leaderRespond: (call) => {
+        if (call.index === 0) return { kind: 'tool', name: 'leader_screenshot', args: {} };
+        if (call.index === 1) return { kind: 'tool', name: 'leader_snapshot', args: {} };
+        if (call.index === 2) return { kind: 'tool', name: 'leader_snapshot', args: {} };
+        if (call.index === 3) return { kind: 'tool', name: 'click', args: { ref: 'e1' } };
+        return { kind: 'tool', name: 'set_plan', args: { plan: 'go', subgoals, currentSubgoal: 0 } };
+      },
+      follower: (call) =>
+        call.index === 0
+          ? {
+              kind: 'tools',
+              calls: [
+                { name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } },
+                { name: 'snapshot', args: {} },
+              ],
+            }
+          : { kind: 'tool', name: 'done', args: { summary: 'ok' } },
+    });
+
+    const results = pick(events, 'tool.result');
+    const unsized = results.filter((e) => e.result.chars === undefined).map((e) => `${e.role}:${e.result.name}`);
+    expect(unsized).toEqual([]);
+    const refused = results.find((e) => e.role === 'follower' && e.result.name === 'snapshot');
+    expect(refused?.result.chars).toBe(refused?.result.summary.length);
+    const shot = results.find((e) => e.result.name === 'leader_screenshot');
+    expect(shot?.result.chars).toBe(shot?.result.summary.length);
+  });
+});
+
+describe('an unchanged page is not resent', () => {
+  const A = 'page: [e1] button "Next"';
+  const B = 'page: [e1] button "Next" [e2] text "Loaded"';
+  const pageOf = (...texts: string[]) => new FakePageTools({ snapshots: texts.map((text) => ({ text, tokens: 8 })) });
+  const read = (): FakeTurn => ({ kind: 'tool', name: 'extract_text', args: { signal: 'CONTINUE' } });
+  const done = (): FakeTurn => ({ kind: 'tool', name: 'done', args: { summary: 'ok' } });
+  const sentText = (call: FakeCall) => textBlocks(call).join('\n');
+
+  it('words the note so the model knows its refs still work and how to see them again', () => {
+    expect(unchangedPageNote(3)).toBe(
+      'Page unchanged since step 3. Refs from that snapshot still work; call snapshot to see it again.',
+    );
+  });
+
+  it('says the page is unchanged instead of resending an identical snapshot', async () => {
+    const { follower } = await harness({ page: pageOf(A), follower: (call) => (call.index < 2 ? read() : done()) });
+
+    expect(follower.calls).toHaveLength(3);
+    expect(sentText(follower.calls[0]!)).toContain(A);
+    for (const call of follower.calls.slice(1)) {
+      expect(sentText(call)).not.toContain(A);
+      expect(textBlocks(call)).toContain(unchangedPageNote(1));
+    }
+  });
+
+  it('keys on the page text, not on the tool, so an action that changed nothing is unchanged too', async () => {
+    const { follower } = await harness({
+      page: pageOf(A),
+      follower: (call) => (call.index === 0 ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } } : done()),
+    });
+    expect(textBlocks(follower.calls[1]!)).toContain(unchangedPageNote(1));
+  });
+
+  it('sends the full snapshot again as soon as the page text changes', async () => {
+    const { follower } = await harness({ page: pageOf(A, A, B), follower: (call) => (call.index < 3 ? read() : done()) });
+
+    expect(follower.calls).toHaveLength(4);
+    const [first, second, third, fourth] = follower.calls.map((call) => textBlocks(call).at(-1));
+    expect(first).toBe(`Page snapshot:\n${A}`);
+    expect(second).toBe(unchangedPageNote(1));
+    expect(third).toBe(`Page snapshot:\n${B}`);
+    // The comparison moves on to the newest snapshot sent, and so does the step it names.
+    expect(fourth).toBe(unchangedPageNote(3));
+  });
+
+  it('treats a wait that changed the page as a change', async () => {
+    const { follower } = await harness({
+      page: pageOf(A, B),
+      follower: (call) => (call.index === 0 ? { kind: 'tool', name: 'wait', args: { ms: 10, signal: 'CONTINUE' } } : done()),
+    });
+
+    const second = textBlocks(follower.calls[1]!);
+    expect(second.at(-1)).toBe(`Page snapshot:\n${B}`);
+    expect(second.some((text) => text.startsWith('Page unchanged'))).toBe(false);
+  });
+
+  it('a Follower can call snapshot after an unchanged turn and act on the refs', async () => {
+    const page = pageOf(A);
+    const { events, follower, ended } = await harness({
+      page,
+      follower: (call) => {
+        if (call.index === 0) return read();
+        if (call.index === 1) return { kind: 'tool', name: 'snapshot', args: { signal: 'CONTINUE' } };
+        if (call.index === 2) return { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } };
+        return done();
+      },
+    });
+
+    expect(textBlocks(follower.calls[1]!)).toContain(unchangedPageNote(1));
+    // The click turn is also unchanged, but the snapshot it asked for is in front of it.
+    const clickTurn = follower.calls[2]!;
+    expect(textBlocks(clickTurn)).toContain(unchangedPageNote(1));
+    const shown = clickTurn.messages.find((m): m is ToolMessage => m instanceof ToolMessage && m.name === 'snapshot');
+    expect(shown?.content).toBe(A);
+    expect(page.calls).toContainEqual({ name: 'click', args: ['e1'] });
+    expect(pick(events, 'tool.result').find((e) => e.result.name === 'click')?.result.ok).toBe(true);
+    expect(ended.status).toBe('done');
+  });
+
+  it('logs unchanged observations in the run log', async () => {
+    const { events } = await harness({ page: pageOf(A, A, B), follower: (call) => (call.index < 2 ? read() : done()) });
+
+    const observations = pick(events, 'observation');
+    expect(observations.map((e) => e.unchanged ?? false)).toEqual([false, true, false]);
+    // The size estimate is still the page's own, so a change in page size stays visible.
+    expect(observations[1]?.tokens).toBe(8);
+  });
+});
+
+describe('every model call records what it cost', () => {
+  const usage = (input: number) => ({
+    input_tokens: input,
+    output_tokens: 20,
+    total_tokens: input + 20,
+    input_token_details: { cache_read: 100 },
+    output_token_details: { reasoning: 5 },
+  });
+  const usageOf = (events: RunEvent[], role: 'leader' | 'follower') =>
+    pick(events, 'model.usage').filter((e) => e.role === role);
+
+  it("records the provider's prompt and completion tokens for every Follower call", async () => {
+    const { events, follower } = await harness({
+      followerUsage: (call) => usage(1000 + call.index),
+      follower: (call) =>
+        call.index < 2
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'CONTINUE' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+    });
+
+    const logged = usageOf(events, 'follower');
+    expect(logged).toHaveLength(follower.calls.length);
+    expect(logged.map((e) => e.inputTokens)).toEqual([1000, 1001, 1002]);
+    for (const [i, e] of logged.entries()) {
+      expect(e).toMatchObject({ outputTokens: 20, reasoningTokens: 5, cachedTokens: 100 });
+      expect(e.promptChars).toBe(promptChars(follower.calls[i]!.messages));
+      expect(e.model).toBeTruthy();
+    }
+  });
+
+  it('records token usage for every Leader lap, evidence reads included', async () => {
+    const { events, leader } = await harness({
+      leaderUsage: (call) => usage(500 + call.index),
+      leaderRespond: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'leader_snapshot', args: {} }
+          : { kind: 'tool', name: 'set_plan', args: { plan: 'do it', subgoals, currentSubgoal: 0 } },
+      follower: () => ({ kind: 'tool', name: 'done', args: { summary: 'found it' } }),
+    });
+
+    const logged = usageOf(events, 'leader');
+    expect(leader.calls).toHaveLength(2);
+    expect(logged.map((e) => e.inputTokens)).toEqual([500, 501]);
+    // The second lap carries the snapshot the first one read, so it is bigger.
+    expect(logged[1]!.promptChars).toBeGreaterThan(logged[0]!.promptChars);
+  });
+
+  it("still records the prompt's character count when the provider reports no usage", async () => {
+    const { events, follower } = await harness({
+      follower: () => ({ kind: 'tool', name: 'done', args: { summary: 'found it' } }),
+    });
+
+    const [logged] = usageOf(events, 'follower');
+    expect(logged).toBeDefined();
+    expect(logged).not.toHaveProperty('inputTokens');
+    expect(logged).not.toHaveProperty('outputTokens');
+    expect(logged!.promptChars).toBe(promptChars(follower.calls[0]!.messages));
+    expect(logged!.promptChars).toBeGreaterThan(FOLLOWER_SYSTEM.length);
+  });
+
+  it('records how many characters each tool result handed the model', async () => {
+    const { events } = await harness({
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'extract_text', args: { signal: 'CONTINUE' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found it' } },
+    });
+
+    const read = pick(events, 'tool.result').find((e) => e.result.name === 'extract_text');
+    expect(read?.result.chars).toBe('extracted text'.length);
+  });
+
+  it('counts tool-call arguments but not image bytes toward the prompt size', () => {
+    const withImage = new HumanMessage({
+      content: [
+        { type: 'text', text: 'abc' },
+        { type: 'image', url: `data:image/png;base64,${'A'.repeat(10_000)}`, mimeType: 'image/png' },
+      ],
+    });
+    const reply = new AIMessage({ content: '', tool_calls: [{ id: 'c', name: 'click', args: { ref: 'e1' } }] });
+    expect(promptChars([withImage])).toBe(3);
+    expect(promptChars([reply])).toBe('click'.length + JSON.stringify({ ref: 'e1' }).length);
   });
 });
 
@@ -438,6 +801,32 @@ describe('the Leader receives actionable Follower feedback', () => {
     // The whole Leader transcript, not only the newest message: earlier reports
     // stay in the reducer unless they are compacted before the next replan.
     expect(requests[2]).not.toContain('interval-0');
+  });
+
+  it("a later replan does not resend an earlier replan's leader_snapshot text", async () => {
+    const evidence = 'page: [e1] heading "LEADER-EVIDENCE-0123"';
+    const page = new FakePageTools({ snapshots: [{ text: evidence, tokens: 10 }] });
+    const { leader } = await harness({
+      page,
+      leaderRespond: (call) =>
+        call.index === 0 ? { kind: 'tool', name: 'leader_snapshot', args: {} } : plan(),
+      follower: (call) =>
+        call.index === 0
+          ? { kind: 'tool', name: 'click', args: { ref: 'e1', signal: 'RETURN_TO_LEADER' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'done' } },
+    });
+
+    expect(leader.calls).toHaveLength(3);
+    const sentText = (call: FakeCall) => call.messages.map((m) => JSON.stringify(m.content)).join('\n');
+    // The replan that pulled the evidence plans from it in full...
+    expect(sentText(leader.calls[1]!)).toContain('LEADER-EVIDENCE-0123');
+    // ...and the next replan gets a note in its place, its call id still answered.
+    const replan = leader.calls[2]!;
+    expect(sentText(replan)).not.toContain('LEADER-EVIDENCE-0123');
+    const stub = replan.messages.find((m): m is ToolMessage => m instanceof ToolMessage && m.name === 'leader_snapshot');
+    expect(stub?.content).toBe('[leader_snapshot result from the replan at step 0 omitted: superseded]');
+    const callIds = replan.messages.flatMap((m) => (m instanceof AIMessage ? (m.tool_calls ?? []).map((c) => c.id) : []));
+    expect(callIds).toContain(stub?.tool_call_id);
   });
 
   it('tells the Leader what a tool-less Follower actually said', async () => {

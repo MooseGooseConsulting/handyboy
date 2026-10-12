@@ -27,6 +27,7 @@ import {
   type LangGraphRunnableConfig,
 } from '@langchain/langgraph/web';
 import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
   AIMessage,
   HumanMessage,
@@ -47,7 +48,8 @@ import { FollowerSignalSchema, LEADER_READ_CAP, READ_TOOL_NAMES, TERMINAL_TOOLS,
  * is ~17k tokens before any tool result. Unbounded, the history reached 285,351
  * tokens against a 262,144-token model and the run died with a 400. Older
  * observations are stale snapshots of a page that has since changed, so they are
- * not merely expensive, they are wrong to resend.
+ * not merely expensive, they are wrong to resend. {@link compactObservations} stubs
+ * the kept turns' copies; this bound still caps their tool results.
  */
 export const FOLLOWER_HISTORY_TURNS = 3;
 
@@ -77,6 +79,127 @@ export function trimFollowerHistory(
   let kept = seen >= want ? messages.slice(cut) : messages.slice();
   while (kept.length > 0 && kept[0] instanceof ToolMessage) kept = kept.slice(1);
   return kept.length > 0 ? kept : messages.slice(-1);
+}
+
+/** Opens the page snapshot block of a Follower observation. */
+const SNAPSHOT_HEADER = 'Page snapshot:\n';
+/** The step line every Follower observation carries; compaction reads turn numbers off it. */
+const STEP_LINE = /^Step (\d+) of at most /m;
+
+/**
+ * Identity of a snapshot's text. The length rides along with the 32-bit hash so a
+ * collision would also need an equal length before a changed page reads as unchanged.
+ */
+function snapshotDigest(text: string): string {
+  return `${hash32(text)}:${text.length}`;
+}
+
+/**
+ * Sent in place of a snapshot identical to the one sent at `step`. Identical text means
+ * identical DOM-order ref numbering, so those refs still resolve; the snapshot tool is
+ * the way back when the model needs to see them again.
+ */
+export function unchangedPageNote(step: number): string {
+  return `Page unchanged since step ${step}. Refs from that snapshot still work; call snapshot to see it again.`;
+}
+
+function supersededSnapshot(step: number | undefined): string {
+  return `[page snapshot from step ${step ?? 'unknown'} omitted: superseded]`;
+}
+
+function supersededScreenshot(step: number | undefined): string {
+  return `[screenshot from step ${step ?? 'unknown'} omitted: superseded]`;
+}
+
+function isSnapshotBlock(block: unknown): boolean {
+  if (typeof block !== 'object' || block === null) return false;
+  const { type, text } = block as { type?: unknown; text?: unknown };
+  return type === 'text' && typeof text === 'string' && text.startsWith(SNAPSHOT_HEADER);
+}
+
+function hasSnapshotBlock(message: BaseMessage): boolean {
+  return message instanceof HumanMessage && Array.isArray(message.content) && message.content.some(isSnapshotBlock);
+}
+
+/**
+ * A successful `snapshot` tool result: a failed one is an error the model should still
+ * read. Refused calls carry `status: 'error'` too, so a refusal is never mistaken for a page.
+ */
+function isSnapshotResult(message: BaseMessage): message is ToolMessage {
+  return message instanceof ToolMessage && message.name === 'snapshot' && message.status !== 'error';
+}
+
+function stepOf(message: BaseMessage): number | undefined {
+  const match = STEP_LINE.exec(textOf(message));
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * At most one page snapshot per Follower call.
+ *
+ * Every kept turn used to carry its own full snapshot, so with three kept turns each
+ * call resent four copies of a page that had usually not changed (~72k tokens a call
+ * on eBay). Older copies are stale by definition, and resending them is how a run hit
+ * the provider's context limit. So, for the prompt only (stored history is untouched):
+ * - an earlier turn's `Page snapshot:` block becomes a note naming its step,
+ * - an earlier turn's screenshot becomes a note, as the Leader already does for its own,
+ * - a `snapshot` tool result is stubbed once a newer snapshot is in the prompt. The
+ *   newest one stays, because a tool result is only ever seen on the call after it.
+ *
+ * The last message is the current observation and is never touched. Message order,
+ * tool-call ids and every other tool result are kept, so the transcript stays valid.
+ */
+export function compactObservations(messages: BaseMessage[]): BaseMessage[] {
+  const last = messages.length - 1;
+  let newestSnapshot = -1;
+  for (let i = last; i >= 0; i--) {
+    if (hasSnapshotBlock(messages[i]!) || isSnapshotResult(messages[i]!)) {
+      newestSnapshot = i;
+      break;
+    }
+  }
+  let step: number | undefined;
+  return messages.map((message, i) => {
+    if (message instanceof HumanMessage) step = stepOf(message) ?? step;
+    if (i === last) return message;
+    if (isSnapshotResult(message) && i < newestSnapshot) {
+      return new ToolMessage({
+        tool_call_id: message.tool_call_id,
+        name: message.name,
+        status: message.status,
+        content: supersededSnapshot(step),
+      });
+    }
+    if (!(message instanceof HumanMessage) || !Array.isArray(message.content)) return message;
+    if (!message.content.some((block) => isSnapshotBlock(block) || isImageBlock(block))) return message;
+    return new HumanMessage({
+      content: message.content.map((block): ContentBlock => {
+        if (isSnapshotBlock(block)) return { type: 'text', text: supersededSnapshot(step) };
+        if (isImageBlock(block)) return { type: 'text', text: supersededScreenshot(step) };
+        return block as ContentBlock;
+      }),
+    });
+  });
+}
+
+/** Leader evidence reads whose full text belongs to the replan that pulled it. */
+const LEADER_PAGE_READS: ReadonlySet<string> = new Set(['leader_snapshot', 'leader_extract_text']);
+
+/**
+ * A Leader read is evidence for the replan that asked for it. Stored in full, every
+ * later replan resent it (up to 60,000 characters each) as if it were current. The
+ * call id and the note stay so the transcript remains valid and the Leader knows it
+ * looked; a failed or refused read keeps its text, because it says what to do instead.
+ */
+function compactStoredRead(message: BaseMessage, step: number): BaseMessage {
+  if (!(message instanceof ToolMessage) || !message.name || !LEADER_PAGE_READS.has(message.name)) return message;
+  if (message.status === 'error') return message;
+  return new ToolMessage({
+    tool_call_id: message.tool_call_id,
+    name: message.name,
+    status: message.status,
+    content: `[${message.name} result from the replan at step ${step} omitted: superseded]`,
+  });
 }
 
 /** Consecutive tool-call-less Follower turns before a run is called stalled. */
@@ -218,6 +341,67 @@ export function followerFeedback(messages: BaseMessage[], turns: number): string
   return lines.join('\n');
 }
 
+/**
+ * Text characters in a prompt: every text block, plus the arguments of tool calls the
+ * assistant made earlier (they are resent too). Images are left out because their
+ * data URL length says nothing about what the provider charges for them.
+ */
+export function promptChars(messages: BaseMessage[]): number {
+  let total = 0;
+  for (const message of messages) {
+    const { content } = message;
+    if (typeof content === 'string') total += content.length;
+    else {
+      for (const part of content) {
+        if (part.type === 'text' && typeof part.text === 'string') total += part.text.length;
+      }
+    }
+    if (message instanceof AIMessage) {
+      for (const call of message.tool_calls ?? []) total += call.name.length + JSON.stringify(call.args ?? {}).length;
+    }
+  }
+  return total;
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * The model id to log: the one the user picked, which is what the panel's totals
+ * are read against, falling back to whatever the provider says it served.
+ */
+function modelId(model: BaseChatModel, response: AIMessage): string {
+  const configured = (model as { model?: unknown }).model;
+  if (typeof configured === 'string' && configured) return configured;
+  const served = response.response_metadata?.model_name;
+  return typeof served === 'string' && served ? served : model._llmType();
+}
+
+/**
+ * One `model.usage` event per provider round trip. `@langchain/openai` fills
+ * `usage_metadata` from the OpenAI-style `usage` object; anything it did not
+ * report stays absent rather than becoming a zero that reads as "free".
+ */
+function emitUsage(config: Emitter, role: Role, model: BaseChatModel, sent: BaseMessage[], response: AIMessage): void {
+  const usage = response.usage_metadata;
+  const inputTokens = count(usage?.input_tokens);
+  const outputTokens = count(usage?.output_tokens);
+  const reasoningTokens = count(usage?.output_token_details?.reasoning);
+  const cachedTokens = count(usage?.input_token_details?.cache_read);
+  emit(config, {
+    kind: 'model.usage',
+    role,
+    model: modelId(model, response),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+    promptChars: promptChars(sent),
+    at: now(),
+  });
+}
+
 function parseSignal(value: unknown): FollowerSignal | undefined {
   const parsed = FollowerSignalSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
@@ -227,7 +411,8 @@ function parseSignal(value: unknown): FollowerSignal | undefined {
  * Answers every tool call past the first so the transcript stays valid:
  * OpenAI-compatible providers reject an assistant message whose call ids lack
  * results. Both roles act once per turn by design, so extras are refused with
- * an instruction to re-issue, never run.
+ * an instruction to re-issue, never run. The `error` status is what keeps prompt
+ * compaction from stubbing that instruction as if it were a superseded result.
  */
 const EXTRA_CALL_REFUSAL =
   'only the first tool call per turn is answered; re-issue this call next turn if it still matters.';
@@ -251,10 +436,10 @@ function answerExtraCalls(
     emit(config, {
       kind: 'tool.result',
       role,
-      result: { callId, name: call.name, ok: false, summary: refusal, durationMs: 0 },
+      result: { callId, name: call.name, ok: false, summary: refusal, durationMs: 0, chars: refusal.length },
       at: now(),
     });
-    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
   });
 }
 
@@ -438,11 +623,9 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   // only ever reads still ends its turn instead of becoming a second Follower.
   for (let lap = 0; lap < LEADER_READ_CAP + 2 && !planned; lap++) {
     let response: AIMessage;
+    const sent = [new SystemMessage(LEADER_SYSTEM), ...state.leaderMessages, ...messages];
     try {
-      response = (await bound.invoke(
-        [new SystemMessage(LEADER_SYSTEM), ...state.leaderMessages, ...messages],
-        config,
-      )) as AIMessage;
+      response = (await bound.invoke(sent, config)) as AIMessage;
     } catch (error) {
       // A text-only Leader dies on the image block leader_screenshot appended: swap
       // the pixels for a note, bar further screenshots, and retry the lap. Only a
@@ -454,6 +637,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       messages[imgIdx] = new HumanMessage(LEADER_NO_VISION_NOTE);
       continue;
     }
+    emitUsage(config, 'leader', ctx.leaderModel, sent, response);
     messages.push(response);
 
     const text = textOf(response);
@@ -497,7 +681,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
       messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
@@ -520,10 +704,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
         emit(config, {
           kind: 'tool.result',
           role: 'leader',
-          result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+          result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
           at: now(),
         });
-        messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+        messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
         answerExtras();
         continue;
       }
@@ -537,10 +721,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+            result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
             at: now(),
           });
-          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
           answerExtras();
           continue;
         }
@@ -553,7 +737,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: true, summary, durationMs: now() - started },
+            result: { callId, name: call.name, ok: true, summary, durationMs: now() - started, chars: summary.length },
             at: now(),
           });
           messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: summary }));
@@ -570,10 +754,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
           emit(config, {
             kind: 'tool.result',
             role: 'leader',
-            result: { callId, name: call.name, ok: false, summary: summarize(result), durationMs: now() - started },
+            result: { callId, name: call.name, ok: false, summary: summarize(result), durationMs: now() - started, chars: result.length },
             at: now(),
           });
-          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+          messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: 'error' }));
         }
         answerExtras();
         continue;
@@ -589,10 +773,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+        result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
-      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
       answerExtras();
     } else {
       // Not the plan and not a read (a Follower tool name, say): answer the call
@@ -611,10 +795,10 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       emit(config, {
         kind: 'tool.result',
         role: 'leader',
-        result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started },
+        result: { callId, name: call.name, ok: false, summary: refusal, durationMs: now() - started, chars: refusal.length },
         at: now(),
       });
-      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal }));
+      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: refusal, status: 'error' }));
       answerExtras();
     }
   }
@@ -639,7 +823,9 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   });
 
   return {
-    leaderMessages: messages.map((message) => compactStoredFeedback(stripImageBlocks(message))),
+    leaderMessages: messages.map((message) =>
+      compactStoredRead(compactStoredFeedback(stripImageBlocks(message)), state.stepCount),
+    ),
     plan,
     subgoals,
     currentSubgoal,
@@ -682,11 +868,25 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
 
   let tokens: number | undefined;
   let hasScreenshot = false;
+  let unchanged = false;
+  let lastSnapshotDigest = state.lastSnapshotDigest;
+  let lastSnapshotStep = state.lastSnapshotStep;
 
   if (ctx.observe === 'dom' || ctx.observe === 'both') {
+    // Always take the snapshot: it is a local read-only walk, and comparing content
+    // rather than trusting the last tool's name is what catches a `wait` that saw the
+    // page change, or a scroll or userscript that left it alone.
     const snap = await ctx.page.snapshot();
     tokens = snap.tokens;
-    blocks.push({ type: 'text', text: `Page snapshot:\n${snap.text}` });
+    const digest = snapshotDigest(snap.text);
+    if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
+      unchanged = true;
+      blocks.push({ type: 'text', text: unchangedPageNote(state.lastSnapshotStep) });
+    } else {
+      lastSnapshotDigest = digest;
+      lastSnapshotStep = stepN;
+      blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snap.text}` });
+    }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
     const shot = await ctx.page.screenshot();
@@ -700,15 +900,24 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
   }
 
-  emit(config, { kind: 'observation', mode: ctx.observe, tokens, hasScreenshot, at: now() });
+  emit(config, {
+    kind: 'observation',
+    mode: ctx.observe,
+    tokens,
+    hasScreenshot,
+    ...(unchanged ? { unchanged } : {}),
+    at: now(),
+  });
 
   // --- act ----------------------------------------------------------------
   const human = new HumanMessage({ content: blocks });
   const bound = ctx.followerModel.bindTools?.(ctx.toolset.all) ?? ctx.followerModel;
-  const response = (await bound.invoke(
-    [new SystemMessage(FOLLOWER_SYSTEM), ...trimFollowerHistory(state.followerMessages), human],
-    config,
-  )) as AIMessage;
+  const sent = [
+    new SystemMessage(FOLLOWER_SYSTEM),
+    ...compactObservations([...trimFollowerHistory(state.followerMessages), human]),
+  ];
+  const response = (await bound.invoke(sent, config)) as AIMessage;
+  emitUsage(config, role, ctx.followerModel, sent, response);
 
   const text = textOf(response);
   if (text) emit(config, { kind: 'model.text', role, text, at: now() });
@@ -764,10 +973,10 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     emit(config, {
       kind: 'tool.result',
       role,
-      result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started },
+      result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
       at: now(),
     });
-    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
+    messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
 
     note = typeof declaredNote === 'string' ? declaredNote : '';
     const terminal = TERMINAL_TOOLS[call.name];
@@ -878,6 +1087,8 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     idleFollowerTurns,
     repeatFailureKey,
     repeatFailureTurns,
+    lastSnapshotDigest,
+    lastSnapshotStep,
     lastSignal: signal,
     status,
     endNote,

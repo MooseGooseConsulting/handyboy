@@ -58,3 +58,32 @@ export function prettyJson(value: unknown): string {
     return String(value);
   }
 }
+
+/** Thousands separators, fixed to one locale so the panel and its tests agree. */
+export function formatCount(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+export interface UsageNumbers {
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cachedTokens?: number;
+  promptChars: number;
+}
+
+/**
+ * The pieces of a usage line, shared by the per-call entry and the result card's
+ * totals so the two never word the same number differently. Counts the provider did
+ * not report are left out rather than shown as zero, which would read as free.
+ */
+export function usageParts(usage: UsageNumbers): string[] {
+  const parts: string[] = [];
+  if (usage.inputTokens !== undefined) parts.push(`${formatCount(usage.inputTokens)} in`);
+  if (usage.outputTokens !== undefined) parts.push(`${formatCount(usage.outputTokens)} out`);
+  if (usage.reasoningTokens !== undefined) parts.push(`${formatCount(usage.reasoningTokens)} reasoning`);
+  if (usage.cachedTokens !== undefined) parts.push(`${formatCount(usage.cachedTokens)} cached`);
+  if (parts.length === 0) parts.push('no provider token count');
+  parts.push(`${formatCount(usage.promptChars)} prompt chars`);
+  return parts;
+}

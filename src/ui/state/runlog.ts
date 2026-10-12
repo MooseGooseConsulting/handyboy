@@ -234,6 +234,46 @@ export function endedEvent(events: RunEvent[]): Extract<RunEvent, { kind: 'run.e
   return found;
 }
 
+/** Everything one role's model calls cost over a run. */
+export interface RoleUsage {
+  role: import('@/src/messaging').Role;
+  calls: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cachedTokens?: number;
+  promptChars: number;
+  /**
+   * Calls whose provider gave no input token count, so the input sum undercounts. A
+   * call that reported only output still counts here: its provider did report usage.
+   */
+  withoutInputCount: number;
+}
+
+/**
+ * Per-role sums of `model.usage`, Leader first. A token field stays absent until at
+ * least one call reported it: a provider that never sends usage must not total to a
+ * reassuring zero.
+ */
+export function usageTotals(events: RunEvent[]): RoleUsage[] {
+  const byRole = new Map<RoleUsage['role'], RoleUsage>();
+  const add = (current: number | undefined, value: number | undefined) =>
+    value === undefined ? current : (current ?? 0) + value;
+  for (const event of events) {
+    if (event.kind !== 'model.usage') continue;
+    const total = byRole.get(event.role) ?? { role: event.role, calls: 0, promptChars: 0, withoutInputCount: 0 };
+    total.calls += 1;
+    total.promptChars += event.promptChars;
+    total.inputTokens = add(total.inputTokens, event.inputTokens);
+    total.outputTokens = add(total.outputTokens, event.outputTokens);
+    total.reasoningTokens = add(total.reasoningTokens, event.reasoningTokens);
+    total.cachedTokens = add(total.cachedTokens, event.cachedTokens);
+    if (event.inputTokens === undefined) total.withoutInputCount += 1;
+    byRole.set(event.role, total);
+  }
+  return (['leader', 'follower'] as const).flatMap((role) => byRole.get(role) ?? []);
+}
+
 /** A saved file as the result card renders it, independent of who produced the event. */
 export interface SavedFileInfo {
   name: string;
