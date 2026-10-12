@@ -264,20 +264,24 @@ export const familyOf = (host) => {
   const tail = parts.length >= 3 && /^(co|com|org|net|gov|ac)$/.test(parts.at(-2)) ? 2 : 1;
   return parts.at(-1 - tail) ?? parts[0];
 };
-const familyOfRun = (h) => (h.activity === 'browse' ? familyOf(h.params?.host ?? '') : h.activity?.startsWith('ebay_') ? 'ebay' : null);
+/** The operators a past run tested: one for most activities, several for compare_sites. */
+const familiesOfRun = (h) => {
+  if (h.activity?.startsWith('ebay_')) return ['ebay'];
+  const hosts = h.params?.hosts ?? (h.params?.host ? [h.params.host] : []);
+  return hosts.map(familyOf);
+};
 
 /**
  * The next site to browse: an operator never tested before first, then the least
  * recently tested, so a long series spreads across the whole list instead of
  * returning to the same few operators. `offset` picks the Nth best, for a batch.
  */
-export function nextBrowse(sites, history, offset = 0) {
+export function rankSites(sites, history, { filter = () => true } = {}) {
   const lastUsed = new Map();
   history.forEach((h, i) => {
-    const f = familyOfRun(h);
-    if (f) lastUsed.set(f, i);
+    for (const f of familiesOfRun(h)) lastUsed.set(f, i);
   });
-  const usable = sites.filter((s) => !s.loginToBrowse && s.url);
+  const usable = sites.filter((s) => !s.loginToBrowse && s.url && filter(s));
   const ranked = usable
     .map((s, i) => {
       const f = familyOf(hostOf(s.url));
@@ -286,13 +290,193 @@ export function nextBrowse(sites, history, offset = 0) {
     .sort((a, b) => a.order - b.order);
   // One site per operator per batch.
   const seen = new Set();
-  const distinct = ranked.filter(({ f }) => !seen.has(f) && seen.add(f));
-  const browses = history.filter((h) => h.activity === 'browse').length;
-  const site = distinct[offset % Math.max(1, distinct.length)]?.s;
-  return site ? browseTask(site, QUERIES[(browses + offset) % QUERIES.length]) : null;
+  return ranked.filter(({ f }) => !seen.has(f) && seen.add(f)).map(({ s }) => s);
+}
+
+const queryFor = (history, offset) => QUERIES[(history.filter((h) => h.params?.query).length + offset) % QUERIES.length];
+
+export function nextBrowse(sites, history, offset = 0) {
+  const ranked = rankSites(sites, history);
+  const site = ranked[offset % Math.max(1, ranked.length)];
+  return site ? browseTask(site, queryFor(history, offset)) : null;
 }
 
 export const SITES_FILE = new URL('./sites.json', import.meta.url);
+
+function findSite(sites, host) {
+  const h = String(host).replace(/^www\./, '');
+  return sites.find((s) => hostOf(s.url) === h) ?? { name: h, url: `https://${h}` };
+}
+
+/* ---------------------------------------------- multi-step: filter, median, compare */
+
+// Query parameters that sorting or filtering a results list sets, across common sites.
+const FILTER_PARAM = /sort|order|price|min|max|cond|filter|facet|refine|_sop|_udhi|_udlo|^s$|^o$|^f$/i;
+const FILTER_PATH = /\/(sort|price|filter|condition|used|refurbished)[-_/]|[-_/](lowest|low-to-high|price-asc|price-low)/i;
+const PAGE_PARAM = /^(page|pg|p|_pgn|pagenum|pageno|paged|pagenumber)$/i;
+
+/**
+ * Whether a sort or filter shows up in the URL after the results page: a parameter that
+ * sorts or filters whose value differs from the results page's, or such a path segment.
+ * Sites that filter in the page without touching the URL show nothing here, and the
+ * detail says so rather than guessing.
+ */
+export function filterEvidence(urls, query) {
+  const at = urls.findIndex((u) => !productShaped(u) && carriesQuery(u, query));
+  if (at < 0) return null;
+  const base = parseUrl(urls[at]);
+  for (const u of urls.slice(at + 1)) {
+    const p = parseUrl(u);
+    if (!p || productShaped(u)) continue;
+    for (const [k, v] of p.searchParams) {
+      if (FILTER_PARAM.test(k) && !PAGE_PARAM.test(k) && base.searchParams.get(k) !== v) return `${k}=${v}`;
+    }
+    if (p.pathname !== base.pathname && FILTER_PATH.test(p.pathname)) return p.pathname;
+  }
+  return null;
+}
+
+/** Highest results page number the URLs show for the query: 2 means page two was reached. */
+export function highestPage(urls, query) {
+  let top = 1;
+  for (const u of urls) {
+    const p = parseUrl(u);
+    if (!p || productShaped(u) || !carriesQuery(u, query)) continue;
+    for (const [k, v] of p.searchParams) if (PAGE_PARAM.test(k)) top = Math.max(top, Number(v) || 1);
+    const inPath = p.pathname.match(/\/(?:page|p|seite)[-/](\d{1,3})(?:\/|$)/i);
+    if (inPath) top = Math.max(top, Number(inPath[1]));
+  }
+  return top;
+}
+
+const rowsOf = (events, key) => {
+  const parsed = parseSummary(doneSummary(events));
+  const v = parsed.ok ? parsed.value : null;
+  const rows = Array.isArray(v) ? v : Array.isArray(v?.[key]) ? v[key] : [];
+  return { parsed, value: v, rows };
+};
+
+/**
+ * Sites where sorting and price medians mean something: shops and marketplaces that list
+ * priced items, in US dollars. A forum thread list or a bid-only
+ * auction would make the test about the site, not the agent.
+ */
+const SHOP_KINDS = new Set(['marketplace', 'refurbisher', 'retailer-used-section', 'classifieds']);
+const isShop = (x) => x.country === 'US' && SHOP_KINDS.has(x.kind);
+
+const siteParams = (site, extra = {}) => ({ host: hostOf(site.url) || site.host, url: site.url, site: site.name, ...extra });
+
+export function filterTask(site, query) {
+  return {
+    title: `Filter and sort on ${site.name}: ${query}`,
+    url: site.url,
+    params: siteParams(site, { query }),
+    maxSteps: 30,
+    prompt: [
+      `This is ${site.name}. Use the site's own search to look for: ${query}.`,
+      "Then use the site's own controls to sort the results by price, lowest first,",
+      'or if it has no sort, filter them to the lowest price range or to used condition. Do not sort the list yourself.',
+      'Read the first three results after that.',
+      'Call done with only JSON: {"applied": "<which control you used, in words>",',
+      '"results": [{"title": "...", "price": "$12.34"}, {...}, {...}]}.',
+    ].join(' '),
+  };
+}
+
+export function filterChecks(events, { host, query, url: home }) {
+  const urls = urlsVisited(events).filter((u) => sameSite(u, host));
+  const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
+  const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+  const evidence = filterEvidence(urls, query);
+  const { parsed, value, rows } = rowsOf(events, 'results');
+  const prices = rows.map((r) => money(r?.price));
+  const ascending = prices.length >= 3 && prices.every(Number.isFinite) && prices.every((p, i) => i === 0 || p >= prices[i - 1]);
+  const sorted = /low|asc|cheap|price/i.test(String(value?.applied ?? ''));
+  return [
+    check('reached the site', urls.length > 0, urls[0] ?? `no page on ${host}`),
+    check("searched with the site's own search", searchIdx >= 0 || typed, searchIdx >= 0 ? urls[searchIdx] : typed ? 'typed the query' : 'no results page for the query'),
+    check('a sort or filter shows in the URL after the results', Boolean(evidence), evidence ?? 'no sort or filter parameter appeared after the results page', 3),
+    check('reported what it applied and three results as JSON', rows.length >= 3 && Boolean(value?.applied) && rows.every((r) => r?.title), parsed.ok ? `${rows.length} row(s); applied: ${String(value?.applied ?? '').slice(0, 60)}` : parsed.error, 2),
+    check('the three prices are numbers', prices.length >= 3 && prices.every((p) => Number.isFinite(p) && p > 0), prices.join(', ')),
+    check('the prices run lowest first, as a price sort would give', ascending || (!sorted && prices.length >= 3), prices.join(' <= ') || 'no prices', 2),
+    check('the results are for what was searched', rows.length >= 3 && rows.filter((r) => titleMatches(r?.title, query)).length >= 2, rows.map((r) => String(r?.title ?? '').slice(0, 40)).join(' | ')),
+    check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended'),
+  ];
+}
+
+export function medianTask(site, query) {
+  return {
+    title: `Median price on ${site.name}: ${query}`,
+    url: site.url,
+    params: siteParams(site, { query }),
+    maxSteps: 40,
+    prompt: [
+      `This is ${site.name}. Use the site's own search to look for: ${query}.`,
+      'Read the prices of the listings on the first two pages of results (go to the second page with the site\'s own next-page control),',
+      'and work out the median price.',
+      'Call done with only JSON: {"median": 123.45, "count": <number of prices you used>, "low": <lowest>, "high": <highest>}.',
+    ].join(' '),
+  };
+}
+
+export function medianChecks(events, { host, query }) {
+  const urls = urlsVisited(events).filter((u) => sameSite(u, host));
+  const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
+  const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+  const page = highestPage(urls, query);
+  const parsed = parseSummary(doneSummary(events));
+  const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : {};
+  const [median, count, low, high] = ['median', 'count', 'low', 'high'].map((k) => money(v[k]));
+  const sane = [median, count, low, high].every(Number.isFinite) && low <= median && median <= high && low > 0;
+  return [
+    check('reached the site', urls.length > 0, urls[0] ?? `no page on ${host}`),
+    check("searched with the site's own search", searchIdx >= 0 || typed, searchIdx >= 0 ? urls[searchIdx] : typed ? 'typed the query' : 'no results page for the query'),
+    check('reached the second page of results', page >= 2, page >= 2 ? `page ${page}` : 'no results URL with a page number of 2 or more', 3),
+    check('reported median, count, low and high as numbers', [median, count, low, high].every(Number.isFinite), parsed.ok ? JSON.stringify(v).slice(0, 160) : parsed.error),
+    check('low <= median <= high, all above 0', sane, `${low} <= ${median} <= ${high}`, 2),
+    check('used at least 10 prices', count >= 10, `count=${count}`),
+    check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended'),
+  ];
+}
+
+export function compareTask(sites, query) {
+  const [a, b, c] = sites;
+  const list = sites.map((s) => `${s.name} (${s.url})`).join(', ');
+  return {
+    title: `Compare ${sites.map((s) => s.name).join(' / ')}: ${query}`,
+    url: a.url,
+    params: { hosts: sites.map((s) => hostOf(s.url)), host: hostOf(a.url), query, url: a.url, site: sites.map((s) => s.name).join(' / ') },
+    maxSteps: 50,
+    prompt: [
+      `Find ${query} on three sites: ${list}.`,
+      "On each, use the site's own search, open the cheapest listing you can see on the first page of results, and read its title and price.",
+      'You start on the first one; go to the others with navigate.',
+      'Call done with only JSON: {"offers": [{"site": "<site name>", "title": "...", "price": "$12.34", "url": "<listing page url>"}, {...}, {...}],',
+      '"cheapest": "<site name of the lowest price>"}.',
+    ].join(' '),
+  };
+}
+
+export function compareChecks(events, { hosts, query }) {
+  const visited = urlsVisited(events);
+  const reached = hosts.filter((h) => visited.some((u) => sameSite(u, h)));
+  const { parsed, value, rows } = rowsOf(events, 'offers');
+  const prices = rows.map((r) => money(r?.price));
+  const grounded = rows.filter((r) => r?.url && visited.some((u) => listingKey(u) === listingKey(r.url)));
+  const sitesNamed = new Set(rows.map((r) => String(r?.site ?? '').toLowerCase()).filter(Boolean));
+  const min = prices.every(Number.isFinite) && prices.length ? Math.min(...prices) : NaN;
+  const cheapestRow = rows.find((r) => String(r?.site ?? '').toLowerCase() === String(value?.cheapest ?? '').toLowerCase());
+  return [
+    check('reached all three sites', reached.length === hosts.length, `${reached.length}/${hosts.length}: ${reached.join(', ')}`, 2),
+    check('searched on each site', hosts.every((h) => visited.some((u) => sameSite(u, h) && carriesQuery(u, query))) || calls(events, 'type').length >= hosts.length, `${calls(events, 'type').length} typed search(es)`),
+    check('reported three offers from three different sites', rows.length >= 3 && sitesNamed.size >= 3, parsed.ok ? `${rows.length} offer(s), ${sitesNamed.size} site name(s)` : parsed.error, 2),
+    check('every reported listing is a page it actually visited', rows.length >= 3 && grounded.length === rows.length, `${grounded.length}/${rows.length} reported urls were visited`, 3),
+    check('every price is a number above 0', rows.length >= 3 && prices.every((p) => Number.isFinite(p) && p > 0), prices.join(', ')),
+    check('the cheapest it names is the lowest price it reported', Boolean(cheapestRow) && money(cheapestRow.price) === min, `cheapest=${value?.cheapest}; lowest reported=${min}`, 2),
+    check('the listings are for what was searched', rows.length >= 3 && rows.filter((r) => titleMatches(r?.title, query)).length >= 2, rows.map((r) => String(r?.title ?? '').slice(0, 36)).join(' | ')),
+    check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended'),
+  ];
+}
 
 export const ACTIVITIES = {
   browse: {
@@ -300,6 +484,44 @@ export const ACTIVITIES = {
     dynamic: true,
     score: (events, ctx) => browseChecks(events, ctx.params),
     invalid: (events, ctx) => browseInvalid(events, ctx.params),
+  },
+
+  filter_sort: {
+    title: "Search a site, then sort or filter by price with the site's own controls",
+    dynamic: true,
+    build: ({ sites, history, offset, site, query }) => {
+      const pool = rankSites(sites, history, { filter: isShop });
+      const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)];
+      return s ? filterTask(s, query ?? queryFor(history, offset)) : null;
+    },
+    score: (events, ctx) => filterChecks(events, ctx.params),
+    invalid: (events, ctx) => browseInvalid(events, ctx.params),
+  },
+
+  site_median: {
+    title: 'Median price across the first two pages of a site\'s results',
+    dynamic: true,
+    build: ({ sites, history, offset, site, query }) => {
+      const pool = rankSites(sites, history, { filter: isShop });
+      const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)];
+      return s ? medianTask(s, query ?? queryFor(history, offset)) : null;
+    },
+    score: (events, ctx) => medianChecks(events, ctx.params),
+    invalid: (events, ctx) => browseInvalid(events, ctx.params),
+  },
+
+  compare_sites: {
+    title: 'Find the same part on three sites and say which is cheapest',
+    dynamic: true,
+    build: ({ sites, history, offset, query }) => {
+      // Same currency, sites with a known search URL: a comparison of dollars with euros
+      // would be a different test.
+      const pool = rankSites(sites, history, { filter: isShop });
+      const three = pool.slice(offset * 3, offset * 3 + 3);
+      return three.length === 3 ? compareTask(three, query ?? queryFor(history, offset)) : null;
+    },
+    score: (events, ctx) => compareChecks(events, ctx.params),
+    invalid: (events, ctx) => browseInvalid(events, { host: ctx.params.host }),
   },
 
   ebay_compare: {
@@ -648,7 +870,7 @@ export function scoreboard(history, { activity = 'browse' } = {}) {
     const p = pairOf(h);
     const s = pairs.get(p) ?? { runs: 0, valid: 0, pass: 0, score: 0, calls: 0, seconds: 0, tokensIn: 0, sites: new Map() };
     s.runs += 1;
-    const site = h.params?.host ?? '?';
+    const site = h.params?.hosts?.map((x) => x.replace(/^www\./, '')).join('+') ?? h.params?.host ?? '?';
     const cell = s.sites.get(site) ?? [];
     cell.push(h.verdict === 'pass' ? 'P' : h.verdict === 'invalid' ? 'i' : `${Math.round((h.score ?? 0) * 100)}`);
     s.sites.set(site, cell);
@@ -718,9 +940,13 @@ async function main(argv) {
       const historyFile = flag(argv, 'history');
       const history = historyFile && fs.existsSync(historyFile) ? readJsonl(fs.readFileSync(historyFile, 'utf8')) : [];
       const site = flag(argv, 'site');
-      a = site
-        ? browseTask(sites.find((s) => hostOf(s.url) === site.replace(/^www\./, '')) ?? { name: site, url: `https://${site}` }, flag(argv, 'query') ?? QUERIES[0])
-        : nextBrowse(sites, history, Number(flag(argv, 'offset') ?? 0));
+      const query = flag(argv, 'query');
+      const offset = Number(flag(argv, 'offset') ?? 0);
+      a = a.build
+        ? a.build({ sites, history, offset, site, query })
+        : site
+          ? browseTask(findSite(sites, site), query ?? QUERIES[0])
+          : nextBrowse(sites, history, offset);
       if (!a) return console.error('no usable site in sites.json'), 2;
     }
     // observe=dom pins the panel's stored mode: the free pair is text-only, and a screenshot

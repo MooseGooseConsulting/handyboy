@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 // The scorer is a plain Node script so live.sh can run it without a build step.
 // @ts-ignore -- untyped .mjs
-import { familyOf, listingKey, nextBrowse, scoreboard, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
+import { familyOf, filterEvidence, highestPage, listingKey, nextBrowse, scoreboard, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
 
 type Ev = Record<string, unknown>;
 
@@ -237,5 +237,99 @@ describe('scoreboard', () => {
     expect(lines[3]).toMatch(/^a \+ b\s+1\/1\s+1\s+100%/);
     expect(lines[4]).toContain('mercari.com P   kleinanzeigen.de i');
     expect(lines[5]).toMatch(/^g \+ h\s+0\/1\s+1\s+50%/);
+  });
+});
+
+describe('multi-step activities', () => {
+  const query = 'DDR4 32GB 3200 RAM';
+  const results = 'https://shop.test/search?q=ddr4+32gb+3200+ram';
+  const ok = (price: string) => ({ title: `Crucial 32GB DDR4 3200 RAM kit ${price}`, price });
+  const failed = (r: { checks: Array<{ ok: boolean; name: string }> }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
+
+  describe('filter_sort', () => {
+    const params = { host: 'shop.test', url: 'https://shop.test/', query, site: 'Shop' };
+
+    it('passes when the sort shows in the URL and the three prices run lowest first', () => {
+      const events = log(params.url, [
+        obs(results),
+        obs(`${results}&sort=price_asc`),
+        ['done', { summary: JSON.stringify({ applied: 'sort by price, low to high', results: [ok('$20.00'), ok('$25.50'), ok('$31.00')] }) }],
+      ]);
+      expect(scoreActivity('filter_sort', events, { params }).verdict).toBe('pass');
+    });
+
+    it('fails an agent that sorted the list itself: no sort in the URL and prices not ascending', () => {
+      const events = log(params.url, [
+        obs(results),
+        ['done', { summary: JSON.stringify({ applied: 'sorted by price low to high', results: [ok('$40.00'), ok('$25.50'), ok('$31.00')] }) }],
+      ]);
+      const r = scoreActivity('filter_sort', events, { params });
+      expect(r.verdict).toBe('fail');
+      expect(failed(r)).toEqual([
+        'a sort or filter shows in the URL after the results',
+        'the prices run lowest first, as a price sort would give',
+      ]);
+    });
+
+    it('finds a filter in the path as well as in the query string', () => {
+      expect(filterEvidence([results, 'https://shop.test/search/price-low-to-high?q=ddr4+32gb+3200+ram'], query)).toBe('/search/price-low-to-high');
+      expect(filterEvidence([results, `${results}&page=2`], query)).toBeNull();
+    });
+  });
+
+  describe('site_median', () => {
+    const params = { host: 'shop.test', url: 'https://shop.test/', query, site: 'Shop' };
+
+    it('passes with a page-two results URL and a consistent median', () => {
+      const events = log(params.url, [
+        obs(results),
+        obs(`${results}&page=2`),
+        ['done', { summary: '{"median": 42.5, "count": 24, "low": 9.99, "high": 120}' }],
+      ]);
+      expect(scoreActivity('site_median', events, { params }).verdict).toBe('pass');
+      expect(highestPage([results, `${results}&_pgn=3`], query)).toBe(3);
+    });
+
+    it('fails a median reported after reading one page', () => {
+      const events = log(params.url, [obs(results), ['done', { summary: '{"median": 42.5, "count": 12, "low": 9.99, "high": 120}' }]]);
+      expect(failed(scoreActivity('site_median', events, { params }))).toEqual(['reached the second page of results']);
+    });
+  });
+
+  describe('compare_sites', () => {
+    const hosts = ['a-parts.com', 'b-surplus.com', 'c-shop.com'];
+    const params = { hosts, host: hosts[0], url: 'https://a-parts.com/', query, site: 'A / B / C' };
+    const listing = (h: string, id: number) => `https://${h}/products/ddr4-32gb-${id}`;
+    const visit = hosts.flatMap((h, i) => [obs(`https://${h}/search?q=ddr4+32gb+3200+ram`), obs(listing(h, 111111 + i))]);
+    const offers = (prices: string[], cheapest: string, urls = hosts.map((h, i) => listing(h, 111111 + i))) =>
+      JSON.stringify({
+        offers: hosts.map((h, i) => ({ site: ['A', 'B', 'C'][i], title: `32GB DDR4 3200 RAM ${i}`, price: prices[i], url: urls[i] })),
+        cheapest,
+      });
+
+    it('passes when all three sites were searched, every listing was opened and the cheapest is named right', () => {
+      const events = log(params.url, [...visit, ['done', { summary: offers(['$60', '$48', '$55'], 'B') }]]);
+      expect(scoreActivity('compare_sites', events, { params }).verdict).toBe('pass');
+    });
+
+    it('fails a wrong cheapest and a listing that was never opened', () => {
+      const urls = [listing(hosts[0], 111111), listing(hosts[1], 111112), listing(hosts[2], 999999)];
+      const events = log(params.url, [...visit, ['done', { summary: offers(['$60', '$48', '$55'], 'A', urls) }]]);
+      expect(failed(scoreActivity('compare_sites', events, { params }))).toEqual([
+        'every reported listing is a page it actually visited',
+        'the cheapest it names is the lowest price it reported',
+      ]);
+    });
+
+    it('fails a run that never left the first site', () => {
+      const events = log(params.url, [visit[0]!, visit[1]!, ['done', { summary: offers(['$60', '$48', '$55'], 'B') }]]);
+      expect(failed(scoreActivity('compare_sites', events, { params }))).toContain('reached all three sites');
+    });
+
+    it('counts all three operators as tested for the rotation', () => {
+      const sites = ['a-parts.com', 'b-surplus.com', 'c-shop.com', 'd-ram.com'].map((h) => ({ name: h, url: `https://${h}`, country: 'US', kind: 'refurbisher' }));
+      const history = [{ activity: 'compare_sites', params }];
+      expect(nextBrowse(sites, history, 0)!.params.host).toBe('d-ram.com');
+    });
   });
 });
