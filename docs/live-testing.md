@@ -11,6 +11,7 @@ scripts/live.sh setup                      # build, load the extension, check th
 scripts/live.sh activities                 # one browse run on the next site in the rotation
 scripts/live.sh activities --repeat 6      # six runs on six sites, on the batch's model pair
 scripts/live.sh activities filter_sort,site_median --repeat 4   # deep jobs, rotating across shop sites
+scripts/live.sh activities browse filter_sort   # positional ids accumulate: both rungs, in that order
 scripts/live.sh activities --site mercari.com --query "Ryzen 5 5600X"   # pin a site and part
 NB_LIVE_LEADER=poolside/laguna-s-2.1:free NB_LIVE_FOLLOWER=poolside/laguna-s-2.1:free \
   scripts/live.sh activities               # pin the model pair; unset, the pair rotates too
@@ -18,7 +19,7 @@ node scripts/harness/activities.mjs list   # every activity id
 node scripts/harness/activities.mjs board  # model pair by site for one activity (default browse), from every saved run
 ```
 
-Each run opens a fresh tab and closes it when the run ends. Results go to `runs/activities-<time>/`: the task, the live stream, the run log, and the scored report. Every run is also appended to `runs/history.jsonl`.
+Each run opens a fresh tab and closes it when the run ends. Results go to `runs/activities-<time>/`: the task, the live stream, the run log, and the scored report. Every run is also appended to `runs/history.jsonl`. A run that outlives `NB_LIVE_TIMEOUT` (600 s per run by default) is cancelled in the extension, not merely abandoned by the CLI — the CLI prints `timed out after <N>s; cancelling <run-id>`. To see that path work, `NB_LIVE_TIMEOUT=15 scripts/live.sh activities browse` should print that line within a minute, and the run log should end in a cancelled/interrupted status rather than the tab acting on for the full step budget.
 
 **Rotation.** Sites and models both rotate, off `runs/history.jsonl`. Each run goes to the site tested least recently — for the deep rungs, the priced shop sites — where every country domain of one operator counts as one site, so eBay.com, eBay UK and eBay.de are one. A long series spreads across the whole list instead of returning to the same few sites, and no single account or site sees a pattern of repeated automated visits. The query rotates too. The model pair rotates the same way while `NB_LIVE_LEADER` and `NB_LIVE_FOLLOWER` are unset: one invocation runs one pair, and the next picks the pair tested least recently, so no pair owns the default by inertia. Setting either variable pins the pair, which is how two pairs are compared on the same task.
 
