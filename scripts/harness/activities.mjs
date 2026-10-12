@@ -542,7 +542,9 @@ export function scoreActivity(id, events, ctx = {}) {
   const a = ACTIVITIES[id];
   if (!a) throw new Error(`unknown activity ${id}`);
   const t = telemetry(events);
-  const invalid = a.invalid?.(events, ctx) ?? null;
+  // The model provider, not the model, ended the run: no verdict on the pair.
+  const providerFailed = ended(events)?.status === 'error' && /\b429\b|rate.?limit|MODEL_RATE_LIMIT/i.test(ended(events)?.message ?? '');
+  const invalid = providerFailed ? 'the model provider rate-limited the run (429)' : a.invalid?.(events, ctx) ?? null;
   const checks = a.score(events, ctx);
   const total = checks.reduce((s, c) => s + c.weight, 0);
   const got = checks.filter((c) => c.ok).reduce((s, c) => s + c.weight, 0);
