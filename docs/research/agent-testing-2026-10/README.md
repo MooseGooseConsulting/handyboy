@@ -10,14 +10,14 @@ file path, and says whether it comes from code or from docs.
 | [frameworks.md](frameworks.md) | Framework evals: browser-use, Stagehand, Skyvern, Agent-E, LaVague, Notte, Magnitude, Steel |
 | [benchmarks.md](benchmarks.md) | Live-web benchmarks and judges: WebVoyager, Online-Mind2Web/WebJudge, BrowserGym/AgentLab, WebArena(-Verified), WebCanvas, REAL, tau-bench |
 | [mechanics.md](mechanics.md) | Tab ownership, storage reset, loading extensions in Chrome 137+, attaching to a real Chrome, telemetry out of a service worker |
-| [ci-model.md](ci-model.md) | A CI to copy: Stagehand v4, with additions from webbrain, lightpanda, page-agent, BrowserOS, browser-use |
+| [ci-model.md](ci-model.md) | A CI to copy, from repos created since 2026-06-01 only: agent-labs-dev/fastbrowse (evals), Tencent/BrowserSkill (extension in real Chrome) |
 
 ## What the field does
 
 1. **Tiers.**
    - A deterministic suite gates every PR: fixture pages, owned mirrors of real sites, or a scripted LLM endpoint.
    - A small live-site sample (15–30 tasks) runs on a schedule or on demand.
-   - Nobody uses single-skill fixtures as their only live test (frameworks.md §1, ci-model.md §3.4).
+   - Nobody uses single-skill fixtures as their only live test (frameworks.md §1).
 2. **Tasks are data.** Each task has a start URL, a prompt, an output schema, weighted checks and budgets (browser-use `tests/agent_tasks/*.yaml`, webbrain `ci/catalog/scenarios.json`).
 3. **Score evidence, not the agent's claim.**
    - Use checks on URLs, text and site state wherever possible, plus key-node checkpoints, which hold up when the site changes (WebCanvas).
