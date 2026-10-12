@@ -303,7 +303,7 @@ describe('multi-step activities', () => {
     const visit = hosts.flatMap((h, i) => [obs(`https://${h}/search?q=ddr4+32gb+3200+ram`), obs(listing(h, 111111 + i))]);
     const offers = (prices: string[], cheapest: string, urls = hosts.map((h, i) => listing(h, 111111 + i))) =>
       JSON.stringify({
-        offers: hosts.map((h, i) => ({ site: ['A', 'B', 'C'][i], title: `32GB DDR4 3200 RAM ${i}`, price: prices[i], url: urls[i] })),
+        offers: hosts.map((_h, i) => ({ site: ['A', 'B', 'C'][i], title: `32GB DDR4 3200 RAM ${i}`, price: prices[i], url: urls[i] })),
         cheapest,
       });
 
@@ -313,7 +313,7 @@ describe('multi-step activities', () => {
     });
 
     it('fails a wrong cheapest and a listing that was never opened', () => {
-      const urls = [listing(hosts[0], 111111), listing(hosts[1], 111112), listing(hosts[2], 999999)];
+      const urls = [listing(hosts[0]!, 111111), listing(hosts[1]!, 111112), listing(hosts[2]!, 999999)];
       const events = log(params.url, [...visit, ['done', { summary: offers(['$60', '$48', '$55'], 'A', urls) }]]);
       expect(failed(scoreActivity('compare_sites', events, { params }))).toEqual([
         'every reported listing is a page it actually visited',

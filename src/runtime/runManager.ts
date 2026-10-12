@@ -608,6 +608,11 @@ export function chromeTabsPort(): TabsPort {
       }
     },
     async remove(tabId) {
+      // Never close a window's last tab: with it goes the window, and with the last
+      // window goes the browser, taking the user's whole session with it.
+      const tab = await chrome.tabs.get(tabId);
+      const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+      if (siblings.length <= 1) return;
       await chrome.tabs.remove(tabId);
     },
   };
