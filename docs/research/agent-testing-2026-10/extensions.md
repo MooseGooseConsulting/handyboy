@@ -9,33 +9,12 @@ scored by hand-written checks.
 
 ---
 
-## 1. nanobrowser/nanobrowser (upstream, 14k stars, master pushed 2026-10-02)
-
-**No end-to-end or eval tests, now or in the past.**
-
-- [code] `vitest.config.mts` only includes `src/**/__tests__/**/*.test.ts`. The whole tree has 10 unit-test
-  files, e.g. `src/background/agent/agents/__tests__/navigatorSchema.test.ts`,
-  `src/background/services/guardrails/__tests__/guardrails.test.ts`.
-- [code] The LLM is mocked through `MockLanguageModelV4` from `ai/test` (`src/background/llm/__tests__/mockModel.ts`:
-  `textResult`, `toolCallResult`, `mockChatModel`).
-- [code] The pre-WXT monorepo tree (commit `c4957526`, 2025-11) had a single test file:
-  `chrome-extension/src/background/services/guardrails/__tests__/guardrails.test.ts`.
-- [code] CI: there is no `.github/workflows` on master. Commit history shows one being added and deleted
-  15 minutes later (`2520dd8a` "add github workflow script", then `1f54c95a` "remove github workflow", 2025-03-04).
-- [docs] `CLAUDE.md` § "Testing Extension" says load `dist/` via `chrome://extensions` by hand.
-  It also says "Prefer fast, deterministic tests; mock network/browser APIs".
-- [docs] The README links a "Latest test results from community" gist, which is manual community testing.
-- Telemetry [code] `src/background/services/analytics.ts`: PostHog with `autocapture: false`. Events are
-  `task_started`, `task_completed`, `task_failed` (with an error category from a regex table:
-  `element_not_found`, `debugger_error`, `max_steps_reached`, …), `task_cancelled`, and `domain_visited`.
-  It records product analytics, not per-step traces.
-
-## 2. BrowserOS (browseros-ai/BrowserOS): the most serious harness found, and it was **unshipped**
+## 1. BrowserOS (browseros-ai/BrowserOS): the most serious harness found, and it was **unshipped**
 
 BrowserOS is a Chromium fork. The agent runs in a local Bun server (`packages/browseros-agent/apps/server`)
 that the browser and extension talk to over MCP and CDP.
 
-### 2a. The eval app, `packages/browseros-agent/apps/eval` (deleted 2026-07-13)
+### 1a. The eval app, `packages/browseros-agent/apps/eval` (deleted 2026-07-13)
 
 - [code] It was deleted in commit `a28fe086a1` "chore: unship eval app (#1796)". I read it at the parent
   `86c31d799b`. The weekly CI job had been removed four days earlier (`242f1a2679` "chore: disable weekly
@@ -93,7 +72,7 @@ that the browser and extension talk to over MCP and CDP.
   another LLM or the "Clado" visual action model), and `claude-code` (an external `claude -p` given the BrowserOS MCP).
   The same suite can run against many "variants" (`EVAL_VARIANT`).
 
-### 2b. What BrowserOS tests today (current HEAD)
+### 1b. What BrowserOS tests today (current HEAD)
 
 - [code] **Tool contract suite** `packages/browseros-agent/contracts/claw-mcp/`: 21 local fixture pages
   (`fixtures/pages/{form,iframe,overlay,injection,dialog,upload,scroll,snapshot-frame-*,…}.html`), served by
@@ -115,13 +94,13 @@ that the browser and extension talk to over MCP and CDP.
   `tools/dogfood/profile/import.go` and `cmd/refresh_profile.go` (not read in detail). This is their answer to
   "real sessions without touching the real profile".
 
-## 3. Taxy AI (TaxyAI/browser-extension, 1.3k stars, last push 2025-01-15)
+## 2. Taxy AI (TaxyAI/browser-extension, 1.3k stars, last push 2025-01-15)
 
 **No e2e, no evals.** [code] There are two Jest unit tests (`src/helpers/parseResponse.test.ts`,
 `src/helpers/shrinkHTML/templatize.test.ts`). `.github/workflows/main.yml` only builds, packages, signs and releases.
 [docs] The README calls it a "research preview. Many workflows fail or confuse the agent."
 
-## 4. alibaba/page-agent (29k stars, active)
+## 3. alibaba/page-agent (29k stars, active)
 
 **No automated agent e2e. It uses a manual "agentic testing" checklist against real public sites.**
 
@@ -141,7 +120,7 @@ that the browser and extension talk to over MCP and CDP.
   `add_tab_to_group`), and `closeTab` refuses the initial user tab ("Cannot close the initial tab").
 - CI [code] `.github/workflows/ci.yml` runs `node scripts/ci.js` (lint/unit).
 
-## 5. Browser Use
+## 4. Browser Use
 
 - There is **no official open-source Chrome extension**. [docs] browser-use is a Python library plus CLI. Third-party wrappers
   exist (e.g. `AgenticA5/A5-Browser-Use`).
@@ -162,16 +141,16 @@ that the browser and extension talk to over MCP and CDP.
   versions every task change and says historical scores are not comparable across revisions. Browsers are pluggable
   (`browsers/local_headful.py`, `browserbase.py`, `steel.py`, …).
 
-## 6. Closed source (skipped)
+## 5. Closed source (skipped)
 
 HARPA, MultiOn, Jace, Fellou (the product), Perplexity Comet, OpenAI Atlas, and Claude in Chrome publish no extension
 source. Fellou's open framework **FellouAI/eko** [code] has `packages/eko-core/test/**`. The "tests" are
 demo scripts that call a real LLM and `console.log` the result, with no assertions (e.g.
 `test/core/eko.test.ts`, `run()` → `eko.run("Read the desktop file list")`).
 
-## 7. Other open-source agentic extensions with real e2e or evals
+## 6. Other open-source agentic extensions with real e2e or evals
 
-### 7a. microsoft/playwright: the Playwright MCP Chrome extension (the closest analogue for tab ownership)
+### 6a. microsoft/playwright: the Playwright MCP Chrome extension (the closest analogue for tab ownership)
 - [code] `tests/extension/extension-fixtures.ts`: `chromium.launchPersistentContext(testInfo.outputPath(
   'extension-user-data-dir'), { channel, headless: false, … })` loads the built extension. It skips when the
   channel is official Chrome: "--load-extension is not supported for official builds of Chromium". It also pre-creates
@@ -183,7 +162,7 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   auto-attaches new tab", "pending attach is released when the connection closes".
 - Pages come from a local test server (`server.HELLO_WORLD`, `server.setContent`). There is no LLM: these are protocol and tool tests.
 
-### 7b. web-infra-dev/midscene (15k stars): Chrome extension plus SDK, with **real-model e2e on every PR**
+### 6b. web-infra-dev/midscene (15k stars): Chrome extension plus SDK, with **real-model e2e on every PR**
 - [code] `.github/workflows/ai.yml` "AI - Playwright e2e": on push and PR, with `MIDSCENE_MODEL_*` secrets and
   `MIDSCENE_MODEL_RETRY_COUNT: "2"`, it runs `playwright test --config=tests/playwright.config.ts`.
 - [code] `packages/web-integration/tests/playwright.config.ts`: `retries: CI ? 1 : 0`, `workers: 3` ("limited by API
@@ -198,7 +177,7 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   `connectNewTabWithUrl('https://www.bing.com')`, `connectCurrentTab()`, then `agent.destroy()`. It is manual-only.
 - Reports: Midscene's own HTML replay report (`MIDSCENE_REPORT`, `apps/report/e2e`).
 
-### 7c. uiuing/browser-agent (48 stars, 2026-07): small but has the cleanest layered design
+### 6c. uiuing/browser-agent (48 stars, 2026-07): small but has the cleanest layered design
 - [code] `packages/e2e/src/ext-launch.ts`: `buildTestExtension()` builds with `VITE_USE_MOCK=1`, so the
   planner resolves a **deterministic MockProvider** and the full chat and tool loop runs with no key.
   `buildProdExtension()` exists because "a leftover test build silently routes to the MockProvider … and the real
@@ -216,7 +195,7 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   success toast but persists nothing"), injected flakiness, a below-the-fold field, and batch "reported == actually
   persisted". Ground truth is the DOM, not the agent's report.
 
-### 7d. softpudding/OpenBrowser (189 stars): instrumented mock sites, scored by events, with cost and time budgets
+### 6d. softpudding/OpenBrowser (189 stars): instrumented mock sites, scored by events, with cost and time budgets
 - [docs] `eval/README.md`: 11+ hand-built mock sites (Amazon, Booking, Airbnb "StayBnB", Trello "TaskFlow", Google Maps
   "MapQuest", an Aliyun-style console with **timed spam popups**, a Finviz screener, a Xiaohongshu feed, and others). Every site loads a
   shared `tracker.js` that POSTs semantic events (`filter_modal_open`, `price_slider_change{handle:"min"}`, …) to
@@ -231,7 +210,7 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   to 3 times (`detect_api_stalls`, `API_STALL_MAX_RETRIES`), so provider stalls don't count as agent failures.
   The server boots on `--port=0`. Comparison runs across `--model-alias` values.
 
-### 7e. browserbase/stagehand (library, not an extension; included because it is the reference eval harness)
+### 6e. browserbase/stagehand (library, not an extension; included because it is the reference eval harness)
 - [code] `packages/evals/evals.config.json`: `"trials": 3` by default, concurrency 10, and benchmark limits of 25 tasks each for
   webvoyager, onlineMind2Web, webtailbench and odysseysbench. `-t, --trials <n>` [docs README].
 - [code] `scoring.ts`: `exactMatch` / `passRate` for deterministic tasks. `framework/verifierAdapter.ts`: a rubric-based
@@ -239,7 +218,7 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   verdict and the raw `judge` verdict, plus `processScoreStrict` / `processScoreLenient`.
 - [docs] Traces stream to **Braintrust** when `BRAINTRUST_API_KEY` is set. `evals experiments` diffs runs.
 
-### 7f. Checked and found nothing agent-level
+### 6f. Checked and found nothing agent-level
 - hangwin/mcp-chrome (12k stars) [code]: `app/chrome-extension/tests/record-replay-v3/*.test.ts`. Its
   "e2e.integration" test is service-level with `fake-indexeddb` (file header), with no browser and no LLM.
 - AIPexStudio/AIPex [code]: `packages/browser-runtime/src/automation/__tests__/puppeteer-test-utils.ts` is a
@@ -252,7 +231,6 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
 
 | | Real sites or fixtures | Browser | Tabs | Scoring | Trials | Traces | CI? |
 |---|---|---|---|---|---|---|---|
-| nanobrowser | none | — | — | unit only | — | PostHog events | no CI |
 | BrowserOS eval (dead) | clone sites (REAL/agisdk), WebArena-Infinity local apps, live WebVoyager/Mind2Web | own binary, fresh tmp profile per task | fresh browser, single page, `about:blank` after | site `/finish` state diff + Python checker; agentic Claude judge over JSONL + screenshots | 1 | messages.jsonl + per-step PNG + metadata → R2 viewer | weekly cron, then removed |
 | BrowserOS contracts | 21 fixture pages, 2 origins | real binary, tmp profile, xvfb | track opened pages, close per case | assertions | 1 | JUnit | every PR |
 | page-agent | real public widget sites | whatever a computer-use agent has | n/a | human/vision checklist | 1 | manual report | manual |

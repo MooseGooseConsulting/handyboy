@@ -6,7 +6,7 @@ file path, and says whether it comes from code or from docs.
 
 | Report | Covers |
 |---|---|
-| [extensions.md](extensions.md) | Agent Chrome extensions: upstream nanobrowser, BrowserOS, Taxy, page-agent, OpenBrowser, Midscene, uiuing, Eko |
+| [extensions.md](extensions.md) | Agent Chrome extensions: BrowserOS, Taxy, page-agent, OpenBrowser, Midscene, uiuing, Eko |
 | [frameworks.md](frameworks.md) | Framework evals: browser-use, Stagehand, Skyvern, Agent-E, LaVague, Notte, Magnitude, Steel |
 | [benchmarks.md](benchmarks.md) | Live-web benchmarks and judges: WebVoyager, Online-Mind2Web/WebJudge, BrowserGym/AgentLab, WebArena(-Verified), WebCanvas, REAL, tau-bench |
 | [mechanics.md](mechanics.md) | Tab ownership, storage reset, loading extensions in Chrome 137+, attaching to a real Chrome, telemetry out of a service worker |
@@ -30,6 +30,6 @@ file path, and says whether it comes from code or from docs.
    - Unknown cost is recorded as unknown, never $0.
    - The usual format is JSONL plus screenshots. No extension uses OpenTelemetry or LangSmith.
 6. **The harness owns its tabs and cleans up.** It opens tabs inactive, puts them in a tab group, tracks their ids, and closes exactly those (agent-tab-bridge, Playwright MCP, BrowserOS `cleanupCase`).
-7. **Nobody evaluates in the user's real logged-in profile.** BrowserOS used a fresh temp profile per task, and Midscene's real-Chrome bridge tests are unscored. Upstream nanobrowser has no end-to-end tests or CI at all.
+7. **Nobody evaluates in the user's real logged-in profile.** BrowserOS used a fresh temp profile per task, and Midscene's real-Chrome bridge tests are unscored.
 
 The design built on this is #47.

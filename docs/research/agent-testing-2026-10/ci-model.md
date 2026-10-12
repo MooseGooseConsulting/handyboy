@@ -34,7 +34,6 @@ Stars and dates come from `gh api repos/<r>`.
 | lightpanda-io/browser | 36,298 | 2023-02-07 | 2026-10-12 | `agent-regression.yml` (nightly cron, live LLM, Slack) |
 | alibaba/page-agent | 29,392 | 2025-09-23 | 2026-10-05 | `ci.yml` (PR, hosted runner), `main-ci.yml` (push to main, self-hosted `page-agent-trusted`) |
 | **browserbase/stagehand** | 25,631 | 2024-03-24 (**v4 rewrite with an MV3 extension runtime: 2026-08-10**) | 2026-10-10 | `ci.yml` (722 lines): path filters, real Chrome, extension, integration matrix, gated regression evals |
-| nanobrowser/nanobrowser | 14,070 | 2024-12-31 | 2026-10-02 | no workflows |
 | browseros-ai/BrowserOS | 13,875 | 2025-05-18 | 2026-10-11 | `test.yml` (affected-suite matrix, retry once, JUnit, sticky PR comment) |
 
 Why most of the new repos are out:
