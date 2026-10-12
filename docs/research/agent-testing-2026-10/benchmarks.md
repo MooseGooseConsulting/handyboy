@@ -47,7 +47,7 @@ So calls per trajectory = 1 + N_screenshots + 1. The README tells submitters to 
 - Cost caveat stated by the authors: "number of API calls scales proportionally with the number of screenshots", which is why they built the 7B model.
 - Human eval is now outsourced at $3,500 for all 300 trajectories, $10/trajectory after (`data/schema_v2/HUMAN_EVALUATION_PRICING.md`).
 
-**Out-of-domain check** (README "AgentRewardBench" table, 1302 trajectories): precision WebJudge(o4-mini) 82.0, WebJudge-7B 75.7, WebJudge(GPT-4o) 73.7, Autonomous Eval 67.6, rule-based 83.8 (rule-based precision is high but recall is low, see Sec. 9).
+**Out-of-domain check** (README "AgentRewardBench" table, 1302 trajectories): precision WebJudge(o4-mini) 82.0, WebJudge-7B 75.7, WebJudge(GPT-4o) 73.7, Autonomous Eval 67.6, rule-based 83.8 (rule-based precision is high but recall is low, see Sec. 10).
 
 ---------------------------------------------------------------------------------------------------
 
