@@ -162,8 +162,15 @@ const carriesQuery = (u, query) => {
     const w = words(query);
     return w.length > 0 && w.filter((x) => s.includes(x)).length >= Math.ceil(w.length * 0.6);
   };
-  return hits(norm(p.search)) || (/\/(search|s|sch|find|results?|suche|recherche|zoeken|buscar|cerca)(\/|$)/i.test(p.pathname) && hits(norm(p.pathname)));
+  return hits(norm(p.search)) || (SEARCH_PATH.test(p.pathname) && hits(norm(p.pathname)));
 };
+
+// /search/ddr4, /s/ddr4, and Kleinanzeigen's /s-ddr4-ecc/k0.
+const SEARCH_PATH = /\/(search|s|sch|find|results?|suche|recherche|zoeken|buscar|cerca)(\/|$)|^\/s-[^/]+\/k\d+/i;
+// Listing pages across the common shapes: Amazon /dp/, eBay /itm/, Mercari /item/,
+// Shopify /products/, Kleinanzeigen /s-anzeige/, forum /threads/.
+const PRODUCT_PATH = /\/(dp|gp\/product|itm|item|items|product|products|p|listing|listings|anzeige|s-anzeige|offer|angebot|threads|ad|annonce|lot|lots)\/[^/]+/i;
+const productShaped = (u) => PRODUCT_PATH.test(parseUrl(u)?.pathname ?? '');
 
 // Generic bot walls: Cloudflare, DataDome, PerimeterX, Akamai, plain captcha pages.
 const WALL = /captcha|cf_chl|challenge-platform|\/challenge|datadome|perimeterx|px-captcha|_incapsula|access.denied|are.you.a.robot|verify.you.are.human/i;
@@ -180,15 +187,27 @@ export function browseInvalid(events, { host }) {
   return null;
 }
 
+/** Most of the query's distinctive words (model numbers, sizes) appear in the title. */
+export function titleMatches(title, query) {
+  const t = String(title ?? '').toLowerCase().replace(/[\s\-_]+/g, ' ');
+  const key = words(query).filter((w) => /\d/.test(w) || w.length >= 4);
+  const need = key.length ? key : words(query);
+  return need.length > 0 && need.filter((w) => t.includes(w)).length >= Math.ceil(need.length * 0.6);
+}
+
 export function browseChecks(events, { host, query, url: home }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const homeKey = pageKey(home);
   const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
   const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
-  // A listing: a page on the site, reached after the search, that is neither the home
-  // page nor a results page for the query.
+  // A listing: a page on the site, reached after the search, that is product-shaped, or
+  // else not a results page and not a path already seen as one. Product shape wins over
+  // the query check: Amazon's product URLs carry the search keywords in their query string.
   const after = searchIdx >= 0 ? urls.slice(searchIdx + 1) : typed ? urls.slice(1) : [];
-  const listings = after.filter((u) => pageKey(u) !== homeKey && !carriesQuery(u, query));
+  const resultPaths = new Set(urls.filter((u) => !productShaped(u) && carriesQuery(u, query)).map(pageKey));
+  const listings = after.filter(
+    (u) => pageKey(u) !== homeKey && (productShaped(u) || (!carriesQuery(u, query) && !resultPaths.has(pageKey(u)))),
+  );
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : Array.isArray(parsed.value) ? parsed.value[0] ?? {} : {};
   const reported = typeof v?.url === 'string' ? v.url : '';
@@ -201,6 +220,8 @@ export function browseChecks(events, { host, query, url: home }) {
     check('reported title, price and url as JSON', Boolean(v?.title && v?.price !== undefined && reported), parsed.ok ? JSON.stringify(v).slice(0, 160) : parsed.error),
     check('the reported listing is a page it actually visited', grounded, reported || 'no url reported', 2),
     check('the price is a number above $0', Number.isFinite(price) && price > 0, String(v?.price ?? '')),
+    // Searched "Ryzen 5 5600X", opened a Ryzen 7 5800X: a listing, but not the one asked for.
+    check('the listing is for what was searched', titleMatches(v?.title, query), String(v?.title ?? '').slice(0, 100)),
     check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended'),
   ];
 }
@@ -415,8 +436,9 @@ export function telemetry(events) {
   const usage = of(events, 'model.usage');
   const byRole = {};
   for (const u of usage) {
-    const r = (byRole[u.role] ??= { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, promptChars: 0, maxPromptChars: 0, unknownTokens: 0 });
+    const r = (byRole[u.role] ??= { models: [], calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, promptChars: 0, maxPromptChars: 0, unknownTokens: 0 });
     r.calls += 1;
+    if (u.model && !r.models.includes(u.model)) r.models.push(u.model);
     if (typeof u.inputTokens === 'number') r.inputTokens += u.inputTokens;
     else r.unknownTokens += 1;
     r.outputTokens += u.outputTokens ?? 0;
@@ -537,7 +559,7 @@ export function formatReport(r, previous) {
   lines.push('telemetry');
   lines.push(`  ended ${t.status} after ${t.steps} steps, ${t.seconds ?? '?'} s; ${t.modelCalls} model calls, ${t.toolCalls} tool calls, ${t.handoffs} handoffs, ${t.replans} replans`);
   for (const [role, u] of Object.entries(t.byRole)) {
-    lines.push(`  ${role.padEnd(8)} ${u.calls} calls  in ${k(u.inputTokens)} (${pct(u.cacheShare)} cached)  out ${k(u.outputTokens)}  largest prompt ${k(u.maxPromptChars)} chars${u.unknownTokens ? `  ${u.unknownTokens} call(s) without token counts` : ''}`);
+    lines.push(`  ${role.padEnd(8)} ${u.calls} calls  in ${k(u.inputTokens)} (${pct(u.cacheShare)} cached)  out ${k(u.outputTokens)}  largest prompt ${k(u.maxPromptChars)} chars  [${u.models.join(', ') || 'model unknown'}]${u.unknownTokens ? `  ${u.unknownTokens} call(s) without token counts` : ''}`);
   }
   lines.push(`  tools: ${t.toolsUsed || 'none'}`);
   lines.push(`  observations ${t.observations} (${t.unchangedObservations} unchanged, sent as a note)`);

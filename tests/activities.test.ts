@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 // The scorer is a plain Node script so live.sh can run it without a build step.
 // @ts-ignore -- untyped .mjs
-import { familyOf, nextBrowse, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
+import { familyOf, nextBrowse, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
 
 type Ev = Record<string, unknown>;
 
@@ -161,6 +161,23 @@ describe('browse: any site, rotating', () => {
       'opened a listing from the results': false,
       'the reported listing is a page it actually visited': false,
     });
+  });
+
+  it('counts a product page as a listing even when its URL carries the search keywords', () => {
+    const amazon = { host: 'amazon.co.uk', query: 'RX 6700 XT', url: 'https://www.amazon.co.uk/', site: 'Amazon' };
+    const product = 'https://www.amazon.co.uk/Sapphire-Radeon-Renewed/dp/B098XXF99T/ref=sr_1_1?crid=2K&keywords=RX+6700+XT';
+    const events = log(amazon.url, [
+      obs('https://www.amazon.co.uk/s?k=RX+6700+XT&ref=nb_sb_noss_1'),
+      obs(product),
+      ['done', { summary: JSON.stringify({ title: 'Sapphire Radeon RX 6700 XT (Renewed)', price: '£229.99', url: product }) }],
+    ]);
+    expect(scoreActivity('browse', events, { params: amazon }).verdict).toBe('pass');
+  });
+
+  it('fails a listing for a different part than the one searched', () => {
+    expect(titleMatches('AMD Ryzen 7 5800x', 'Ryzen 5 5600X')).toBe(false);
+    expect(titleMatches('AMD Ryzen 5 5600X 6-Core Processor', 'Ryzen 5 5600X')).toBe(true);
+    expect(titleMatches('Crucial 32GB DDR4-3200 UDIMM', 'DDR4 32GB 3200 RAM')).toBe(true);
   });
 
   it('marks a run invalid when it ended on a Cloudflare challenge', () => {
