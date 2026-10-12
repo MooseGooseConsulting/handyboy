@@ -22,6 +22,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /* ------------------------------------------------------------------ run-log reading */
 
@@ -115,10 +116,12 @@ export const QUERIES = [
 ];
 
 const hostOf = (u) => (parseUrl(u)?.hostname ?? '').toLowerCase().replace(/^www\./, '');
-/** Same site: the host or any subdomain of it (shop.example.com counts for example.com). */
+/** Same site: the host or any subdomain of it (shop.example.com counts for example.com).
+ *  Not the other way round: a visit to the bare example.com is not evidence of reaching
+ *  the site whose host is shop.example.com. */
 const sameSite = (u, host) => {
   const h = hostOf(u);
-  return Boolean(h) && (h === host || h.endsWith(`.${host}`) || host.endsWith(`.${h}`));
+  return Boolean(h) && (h === host || h.endsWith(`.${host}`));
 };
 const pageKey = (u) => {
   const p = parseUrl(u);
@@ -157,12 +160,23 @@ const productShaped = (u) => PRODUCT_PATH.test(parseUrl(u)?.pathname ?? '');
 // Generic bot walls: Cloudflare, DataDome, PerimeterX, Akamai, plain captcha pages.
 const WALL = /captcha|cf_chl|challenge-platform|\/challenge|datadome|perimeterx|px-captcha|_incapsula|access.denied|are.you.a.robot|verify.you.are.human/i;
 
+/**
+ * The type fallback for "searched with the site's own search": a type call that really
+ * typed the query — the result was ok, and the text carried query words. A failed call,
+ * or one that typed something else, proves no search happened. (A results URL carrying
+ * the query covers itself through the URL check; it does not rehabilitate a failed call.)
+ */
+const typedQuery = (events, query) =>
+  okCalls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+
 export function browseInvalid(events, { host }) {
   const ends = ended(events);
   const lastUrl = of(events, 'observation').map((o) => o.url).filter(Boolean).at(-1) ?? '';
   if (WALL.test(lastUrl) || (ends && WALL.test(ends.message ?? ''))) return 'stopped by a bot wall or CAPTCHA';
-  // Never got onto the site at all and the failure is the network, not the agent.
-  const onSite = urlsVisited(events).some((u) => sameSite(u, host));
+  // Never got onto the site at all and the failure is the network, not the agent. The
+  // requested start URL is not reachability evidence: it is what was asked for, not what
+  // was reached — an unreachable site's log shows no observation and no ok navigate.
+  const onSite = urlsVisited(events.filter((e) => e.kind !== 'run.started')).some((u) => sameSite(u, host));
   if (!onSite && /net::ERR|ERR_NAME|ERR_CONNECTION|timed out|did not load|404|5\d\d/i.test(ends?.message ?? '')) {
     return `site unreachable: ${String(ends.message).slice(0, 100)}`;
   }
@@ -186,19 +200,20 @@ export function listingKey(u) {
   return pageKey(u);
 }
 
-/** Most of the query's distinctive words (model numbers, sizes) appear in the title. */
+/** Most of the query's distinctive words (model numbers, sizes) appear in the title, as
+ *  complete tokens: "Ryzen 5 5600XT" is not a match for "Ryzen 5 5600X". */
 export function titleMatches(title, query) {
-  const t = String(title ?? '').toLowerCase().replace(/[\s\-_]+/g, ' ');
+  const tokens = String(title ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const key = words(query).filter((w) => /\d/.test(w) || w.length >= 4);
   const need = key.length ? key : words(query);
-  return need.length > 0 && need.filter((w) => t.includes(w)).length >= Math.ceil(need.length * 0.6);
+  return need.length > 0 && need.filter((w) => tokens.includes(w)).length >= Math.ceil(need.length * 0.6);
 }
 
 export function browseChecks(events, { host, query, url: home }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const homeKey = pageKey(home);
   const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
-  const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+  const typed = typedQuery(events, query);
   // A listing: a page on the site, reached after the search, that is product-shaped, or
   // else not a results page and not a path already seen as one. Product shape wins over
   // the query check: Amazon's product URLs carry the search keywords in their query string.
@@ -210,7 +225,9 @@ export function browseChecks(events, { host, query, url: home }) {
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : Array.isArray(parsed.value) ? parsed.value[0] ?? {} : {};
   const reported = typeof v?.url === 'string' ? v.url : '';
-  const grounded = Boolean(reported) && urls.some((u) => listingKey(u) === listingKey(reported));
+  // Ground the report against the listing pages the run detected, not the whole visit
+  // history: a results page it stayed on is not a listing it opened.
+  const grounded = Boolean(reported) && listings.some((u) => listingKey(u) === listingKey(reported));
   const price = money(v?.price);
   return [
     check('reached the site', urls.length > 0, urls[0] ?? `no page on ${host}`),
@@ -278,12 +295,40 @@ export function rankSites(sites, history, { filter = () => true } = {}) {
   return ranked.filter(({ f }) => !seen.has(f) && seen.add(f)).map(({ s }) => s);
 }
 
-const queryFor = (history, offset) => QUERIES[(history.filter((h) => h.params?.query).length + offset) % QUERIES.length];
+/**
+ * What each query is about, in sites.json's `sells` vocabulary, so a query rotation can
+ * respect what a site actually carries.
+ */
+const QUERY_SELLS = new Map([
+  ['DDR4 32GB 3200 RAM', 'ram'],
+  ['DDR5 32GB RAM', 'ram'],
+  ['DDR4 ECC server memory', 'ram'],
+  ['RTX 3060 graphics card', 'gpu'],
+  ['RX 6700 XT', 'gpu'],
+  ['Ryzen 5 5600X', 'cpu'],
+  ['Intel i7-12700K', 'cpu'],
+  ['1TB NVMe SSD', 'storage'],
+  ['2TB SATA SSD', 'storage'],
+  ['ThinkPad T480', 'laptops'],
+  ['Dell OptiPlex 7050', 'desktops'],
+  ['used gaming PC', 'desktops'],
+]);
+
+const queryFor = (history, offset, site) => {
+  const i = history.filter((h) => h.params?.query).length + offset;
+  // Prefer a query whose subject the site's own sells metadata says it carries; a site
+  // without that metadata, or one that lists nothing we have a query for, falls back to
+  // the whole rotation.
+  const sells = site?.sells;
+  const compatible = Array.isArray(sells) && sells.length ? QUERIES.filter((q) => sells.includes(QUERY_SELLS.get(q))) : [];
+  const pool = compatible.length ? compatible : QUERIES;
+  return pool[i % pool.length];
+};
 
 export function nextBrowse(sites, history, offset = 0) {
   const ranked = rankSites(sites, history);
   const site = ranked[offset % Math.max(1, ranked.length)];
-  return site ? browseTask(site, queryFor(history, offset)) : null;
+  return site ? browseTask(site, queryFor(history, offset, site)) : null;
 }
 
 export const SITES_FILE = new URL('./sites.json', import.meta.url);
@@ -374,7 +419,7 @@ export function filterTask(site, query) {
 export function filterChecks(events, { host, query, url: home }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
-  const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+  const typed = typedQuery(events, query);
   const evidence = filterEvidence(urls, query);
   const { parsed, value, rows } = rowsOf(events, 'results');
   const prices = rows.map((r) => money(r?.price));
@@ -410,7 +455,7 @@ export function medianTask(site, query) {
 export function medianChecks(events, { host, query }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
-  const typed = calls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+  const typed = typedQuery(events, query);
   const page = highestPage(urls, query);
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : {};
@@ -512,7 +557,7 @@ export const ACTIVITIES = {
     build: ({ sites, history, offset, site, query }) => {
       const pool = rankSites(sites, history, { filter: isShop });
       const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)];
-      return s ? filterTask(s, query ?? queryFor(history, offset)) : null;
+      return s ? filterTask(s, query ?? queryFor(history, offset, s)) : null;
     },
     score: (events, ctx) => filterChecks(events, ctx.params),
     invalid: (events, ctx) => browseInvalid(events, ctx.params),
@@ -524,7 +569,7 @@ export const ACTIVITIES = {
     build: ({ sites, history, offset, site, query }) => {
       const pool = rankSites(sites, history, { filter: isShop });
       const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)];
-      return s ? medianTask(s, query ?? queryFor(history, offset)) : null;
+      return s ? medianTask(s, query ?? queryFor(history, offset, s)) : null;
     },
     score: (events, ctx) => medianChecks(events, ctx.params),
     invalid: (events, ctx) => browseInvalid(events, ctx.params),
@@ -912,7 +957,13 @@ export function scoreboard(history, { activity = 'browse' } = {}) {
   }
   const lines = [`${activity}: ${runs.length} runs.  cell per run: P pass, i invalid, else score %`, ''];
   lines.push(`${'leader + follower'.padEnd(52)} pass   valid  mean   calls  secs  tokens-in`);
-  const ranked = [...pairs].sort((a, b) => b[1].pass / Math.max(1, b[1].valid) - a[1].pass / Math.max(1, a[1].valid) || b[1].score - a[1].score);
+  // Pass rate over valid runs first, then mean score per valid run: a pair that squeaked
+  // one high score is not ahead of one that reliably lands mid-range.
+  const ranked = [...pairs].sort(
+    (a, b) =>
+      b[1].pass / Math.max(1, b[1].valid) - a[1].pass / Math.max(1, a[1].valid) ||
+      b[1].score / Math.max(1, b[1].valid) - a[1].score / Math.max(1, a[1].valid),
+  );
   for (const [p, s] of ranked) {
     const v = Math.max(1, s.valid);
     lines.push(
@@ -940,7 +991,14 @@ async function main(argv) {
     const rows = [];
     for (const dir of fs.readdirSync(root).filter((d) => d.startsWith('activities-')).sort()) {
       for (const f of fs.readdirSync(path.join(root, dir)).filter((f) => f.endsWith('-task.json'))) {
-        const task = JSON.parse(fs.readFileSync(path.join(root, dir, f), 'utf8'));
+        // A truncated or empty artifact is one bad run, not a board-wide crash: skip it.
+        let task;
+        try {
+          task = JSON.parse(fs.readFileSync(path.join(root, dir, f), 'utf8'));
+        } catch {
+          continue;
+        }
+        if (!task || typeof task !== 'object' || Array.isArray(task)) continue;
         const id = task.activity ?? f.replace(/-\d+-task\.json$/, '');
         const runlog = path.join(root, dir, f.replace(/-task\.json$/, '-runlog.jsonl'));
         if (id !== activity || !fs.existsSync(runlog)) continue;
@@ -1004,8 +1062,18 @@ async function main(argv) {
     return 0;
   }
   if (cmd === 'score') {
+    // Validate everything before reading anything: a wrong invocation exits 2 with the
+    // usage, not a stack trace, and never scores against the wrong activity.
     const id = flag(argv, 'activity');
-    const events = readJsonl(fs.readFileSync(flag(argv, 'runlog'), 'utf8'));
+    const a = ACTIVITIES[id];
+    const runlog = flag(argv, 'runlog');
+    if (!a) return console.error(`unknown activity ${id ?? '<none>'}; one of ${Object.keys(ACTIVITIES).join(', ')}`), 2;
+    // Dynamic activities score their checks against the site and query in the task file's
+    // params; without them the verdict would be about a run that never happened.
+    if (a.dynamic && !flag(argv, 'task')) return console.error(`scoring ${id} needs --task <task.json> (its params carry the site and query)`), 2;
+    if (!runlog) return console.error('score needs --runlog <file>'), 2;
+    if (!fs.existsSync(runlog)) return console.error(`no runlog at ${runlog}`), 2;
+    const events = readJsonl(fs.readFileSync(runlog, 'utf8'));
     const taskFile = flag(argv, 'task');
     const params = taskFile ? JSON.parse(fs.readFileSync(taskFile, 'utf8')).params ?? undefined : undefined;
     const r = scoreActivity(id, events, { artifactsDir: flag(argv, 'artifacts'), params });
@@ -1029,6 +1097,6 @@ async function main(argv) {
   return 2;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main(process.argv.slice(2)).then((code) => process.exit(code ?? 0));
 }

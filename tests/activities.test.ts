@@ -80,9 +80,12 @@ describe('generic activities: browse, any shop-like site', () => {
     expect(listingKey('https://www.amazon.co.uk/dp/B07FPH493J')).not.toBe(listingKey(visited));
   });
 
-  it('fails a listing for a different part than the one searched', () => {
+  it('fails a listing for a different part than the one searched, model numbers as complete tokens', () => {
     expect(titleMatches('AMD Ryzen 7 5800x', 'Ryzen 5 5600X')).toBe(false);
     expect(titleMatches('AMD Ryzen 5 5600X 6-Core Processor', 'Ryzen 5 5600X')).toBe(true);
+    // Model numbers and capacities match as complete tokens: 5600XT is not 5600X.
+    expect(titleMatches('AMD Ryzen 5 5600XT', 'Ryzen 5 5600X')).toBe(false);
+    expect(titleMatches('2TB SATA SSD', '1TB NVMe SSD')).toBe(false);
     expect(titleMatches('Crucial 32GB DDR4-3200 UDIMM', 'DDR4 32GB 3200 RAM')).toBe(true);
   });
 
@@ -90,6 +93,46 @@ describe('generic activities: browse, any shop-like site', () => {
     const events = log(params.url, [obs(params.url)], 'error');
     (events.at(-1) as Record<string, unknown>).message = '429 Provider returned error';
     expect(scoreActivity('browse', events, { params })).toMatchObject({ verdict: 'invalid', invalid: 'the model provider rate-limited the run (429)' });
+  });
+
+  it('marks a run invalid when the site never came up: the requested start URL is not reachability evidence', () => {
+    const events = log(params.url, [], 'error');
+    (events.at(-1) as Record<string, unknown>).message = 'net::ERR_NAME_NOT_RESOLVED at https://techmikeny.com';
+    const r = scoreActivity('browse', events, { params });
+    expect(r.verdict).toBe('invalid');
+    expect(r.invalid).toMatch(/^site unreachable: net::ERR_NAME_NOT_RESOLVED/);
+    // A page that really loaded (an observation, not just the request) keeps the run valid.
+    const reached = log(params.url, [obs(params.url)], 'error');
+    (reached.at(-1) as Record<string, unknown>).message = 'net::ERR_CONNECTION_RESET mid-run';
+    expect(scoreActivity('browse', reached, { params }).invalid).toBeNull();
+  });
+
+  it('counts the type fallback only for calls that carried the query and landed', () => {
+    const done = { summary: JSON.stringify({ title: '32GB DDR4 3200', price: '$54.00', url: listing }) };
+    const byName = (events: Ev[]) =>
+      Object.fromEntries(scoreActivity('browse', events, { params }).checks.map((c: { name: string; ok: boolean }) => [c.name, c.ok]));
+    // A type call whose result failed, with no results page after it, proves no search happened.
+    const lost = log(params.url, [['type', { ref: 'e4', text: 'DDR4 32GB 3200 RAM' }, false], ['done', done]]);
+    expect(byName(lost)["searched with the site's own search"]).toBe(false);
+    // A successful type call that never carried the query does not count either.
+    const otherWords = log(params.url, [['type', { ref: 'e4', text: 'used laptops' }], obs('https://techmikeny.com/collections/laptops'), ['done', done]]);
+    expect(byName(otherWords)["searched with the site's own search"]).toBe(false);
+    // A failed type plus a results URL for the query still counts: the URL is evidence
+    // on its own; a failed call is not rehabilitated by what came after it.
+    const byUrl = log(params.url, [['type', { ref: 'e4', text: 'DDR4 32GB 3200 RAM' }, false], obs(results), ['done', done]]);
+    expect(byName(byUrl)["searched with the site's own search"]).toBe(true);
+  });
+
+  it('grounds the reported listing against the listing pages it detected, not the whole visit history', () => {
+    // Reporting the results page it stayed on is not reporting a listing it opened.
+    const events = log(params.url, [
+      ['type', { ref: 'e4', text: 'DDR4 32GB 3200 RAM' }],
+      obs(results),
+      ['click', { ref: 'e40' }],
+      obs(`${listing}?variant=7`),
+      ['done', { summary: JSON.stringify({ title: '32GB DDR4 3200', price: '$54.00', url: results }) }],
+    ]);
+    expect(failed(scoreActivity('browse', events, { params }))).toContain('the reported listing is a page it actually visited');
   });
 
   it('marks a run invalid when it ended on a Cloudflare challenge', () => {
@@ -102,6 +145,16 @@ describe('generic activities: browse, any shop-like site', () => {
     expect(filterEvidence([results, `${results}&_udhi=250`], params.query)).toBeNull();
     expect(filterEvidence([results, `${results}&_sop=price`], params.query)).toBeNull();
     expect(filterEvidence([results, `${results}&sort=price_asc`], params.query)).toBe('sort=price_asc');
+  });
+
+  it('a page on the bare parent domain is not the site: only the host and its own subdomains are', () => {
+    const forum = { host: 'forums.shop.example', query: 'DDR4 32GB 3200 RAM', url: 'https://forums.shop.example/', site: 'Forum shop' };
+    // Before the reverse-suffix match was removed, a visit to shop.example counted as
+    // reaching forums.shop.example; the other way round it is a different site.
+    const events = log(forum.url, [obs('https://shop.example/search?q=ddr4+32gb+3200+ram'), ['done', { summary: '{}' }]]);
+    const byName = Object.fromEntries(scoreActivity('browse', events, { params: forum }).checks.map((c: { name: string; ok: boolean }) => [c.name, c.ok]));
+    expect(byName["searched with the site's own search"]).toBe(false);
+    // A subdomain of the host still counts: www.forums.shop.example is the same site.
   });
 });
 
@@ -246,8 +299,20 @@ describe('site rotation', () => {
     expect(picks).toEqual(['open-shop.example', 'open-two.example', 'big-wall.example', 'small-wall.example']);
   });
 
+  it('prefers a query the site says it sells, and falls back to the rotation when it lists nothing usable', () => {
+    const gpuOnly = [{ name: 'GPU shop', url: 'https://gpu-shop.example', sells: ['gpu'] }];
+    expect(nextBrowse(gpuOnly, [], 0)!.prompt).toContain('RTX 3060 graphics card');
+    expect(nextBrowse(gpuOnly, [], 1)!.prompt).toContain('RX 6700 XT');
+    // No sells metadata at all: the plain rotation is unchanged.
+    const bare = [{ name: 'Bare shop', url: 'https://bare.example' }];
+    expect(nextBrowse(bare, [], 0)!.prompt).toContain('DDR4 32GB 3200 RAM');
+    // Metadata that no query maps to (only 'other') falls back rather than starving.
+    const odd = [{ name: 'Odd shop', url: 'https://odd.example', sells: ['other'] }];
+    expect(nextBrowse(odd, [], 0)!.prompt).toContain('DDR4 32GB 3200 RAM');
+  });
+
   it('sites.json flags the bot-walled operators, so a fresh rotation starts on an open site', () => {
-    const sites = JSON.parse(fs.readFileSync(new URL('../scripts/harness/sites.json', import.meta.url), 'utf8'));
+    const sites = JSON.parse(fs.readFileSync(new URL('../scripts/harness/sites.json', import.meta.url), 'utf8')) as Array<{ host: string; walled?: boolean }>;
     const walledHosts = sites.filter((s) => s.walled).map((s) => s.host);
     // One operator, all domains: flagging one eBay domain would not help, the rotation
     // would pick the first unflagged sibling of the same family.
@@ -277,6 +342,18 @@ describe('scoreboard', () => {
     expect(lines[3]).toMatch(/^a \+ b\s+1\/1\s+1\s+100%/);
     expect(lines[4]).toContain('mercari.com P   kleinanzeigen.de i');
     expect(lines[5]).toMatch(/^g \+ h\s+0\/1\s+1\s+50%/);
+  });
+
+  it('breaks pass-rate ties by mean score over valid runs, not the accumulated sum', () => {
+    // Both pairs accumulate 0.8 over valid runs: a+b scored it once, g+h spread it over two.
+    const board = scoreboard([
+      run('google/g:free', 'google/h:free', 'y.com', 'fail', 0.4),
+      run('google/g:free', 'google/h:free', 'z.com', 'fail', 0.4),
+      run('nvidia/a:free', 'nvidia/b:free', 'x.com', 'fail', 0.8),
+    ]);
+    const lines = board.split('\n');
+    expect(lines[3]).toMatch(/^a \+ b\s+0\/1\s+1\s+80%/);
+    expect(lines[5]).toMatch(/^g \+ h\s+0\/2\s+2\s+40%/);
   });
 });
 
@@ -361,5 +438,80 @@ describe('legacy opt-in gate', () => {
     const scored = spawnSync(process.execPath, [script, 'score', '--activity', 'ebay_compare', '--runlog', runlog], { cwd: ROOT, encoding: 'utf8' });
     expect(scored.status).toBe(1); // a fail, not the exit 2 of a gated build
     expect(scored.stdout).toContain('FAIL  ebay_compare');
+  });
+});
+
+describe('score and board CLIs', () => {
+  const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const script = path.join(ROOT, 'scripts/harness/activities.mjs');
+  const run = (cmd: string[]): { status: number | null; stdout: string; stderr: string } => {
+    const r = spawnSync(process.execPath, [script, ...cmd], { cwd: ROOT, encoding: 'utf8' });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+
+  /** A passing browse run log, as JSONL, for the given task params. */
+  const browseRunlog = (p: { url: string; host: string }, resultsUrl: string, listingUrl: string) =>
+    log(p.url, [
+      ['type', { ref: 'e4', text: 'DDR4 32GB 3200 RAM' }],
+      obs(resultsUrl),
+      ['click', { ref: 'e40' }],
+      obs(listingUrl),
+      ['done', { summary: JSON.stringify({ title: '32GB DDR4 3200', price: '$54.00', url: listingUrl }) }],
+    ])
+      .map((e) => JSON.stringify(e))
+      .join('\n');
+
+  it('validates score arguments before reading anything: exit 2 with usage, not a stack trace', () => {
+    // Unknown activity.
+    expect(run(['score', '--activity', 'nope', '--runlog', 'x.jsonl'])).toMatchObject({ status: 2 });
+    expect(run(['score', '--runlog', 'x.jsonl'])).toMatchObject({ status: 2 });
+    // Missing runlog.
+    expect(run(['score', '--activity', 'ebay_compare'])).toMatchObject({ status: 2 });
+    expect(run(['score', '--activity', 'ebay_compare', '--runlog', 'no/such/file.jsonl'])).toMatchObject({ status: 2 });
+  });
+
+  it('requires --task params for a dynamic activity, and scores fine with them', () => {
+    // browse is dynamic: without the task's site and query the verdict is meaningless.
+    const refused = run(['score', '--activity', 'browse', '--runlog', 'x.jsonl']);
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain('needs --task');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'score-cli-'));
+    const task = JSON.parse(run(['task', '--activity', 'browse']).stdout) as {
+      url: string;
+      params: { host: string; url: string };
+    };
+    const taskFile = path.join(dir, 'task.json');
+    fs.writeFileSync(taskFile, JSON.stringify(task));
+    const runlog = path.join(dir, 'runlog.jsonl');
+    const resultsUrl = `https://${task.params.host}/search?q=ddr4+32gb+3200+ram`;
+    const listingUrl = `https://${task.params.host}/products/32gb-ddr4-3200-rdimm`;
+    fs.writeFileSync(runlog, browseRunlog(task.params, resultsUrl, listingUrl));
+    const scored = run(['score', '--activity', 'browse', '--task', taskFile, '--runlog', runlog]);
+    expect(scored.status).toBe(0);
+    expect(scored.stdout).toContain('PASS  browse');
+  });
+
+  it('board skips malformed and empty task artifacts instead of crashing, and still scores the readable ones', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'board-cli-'));
+    const broken = path.join(dir, 'activities-broken');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(path.join(broken, 'browse-1-task.json'), '{ truncated');
+    fs.writeFileSync(path.join(broken, 'browse-2-task.json'), '');
+    fs.writeFileSync(path.join(broken, 'browse-3-task.json'), 'null');
+
+    // One readable run alongside the broken artifacts.
+    const good = path.join(dir, 'activities-good');
+    fs.mkdirSync(good);
+    const params = { host: 'x.com', query: 'DDR4 32GB 3200 RAM', url: 'https://x.com/', site: 'X' };
+    const resultsUrl = 'https://x.com/search?q=ddr4+32gb+3200+ram';
+    const listingUrl = 'https://x.com/products/32gb-ddr4-3200-rdimm';
+    fs.writeFileSync(path.join(good, 'browse-1-task.json'), JSON.stringify({ activity: 'browse', params }));
+    fs.writeFileSync(path.join(good, 'browse-1-runlog.jsonl'), `${browseRunlog(params, resultsUrl, listingUrl)}\n`);
+
+    const board = run(['board', '--runs', dir, '--activity', 'browse']);
+    expect(board.status).toBe(0);
+    expect(board.stdout).toContain('browse: 1 runs');
+    expect(board.stdout).toContain('P');
   });
 });
