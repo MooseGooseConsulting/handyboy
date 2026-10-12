@@ -204,7 +204,9 @@ cleanup_test() {
 
 cmd_test() {
   local list=() task
-  read -ra list <<<"$(tr ',' ' ' <<<"${1:-$DEFAULT_TASKS}")"
+  # Deduplicated: per-task evidence files are named by task, so a repeat would score the
+  # first invocation's download. Repeated trials belong to #40.
+  read -ra list <<<"$(tr ',' '\n' <<<"${1:-$DEFAULT_TASKS}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
   [ "${#list[@]}" -gt 0 ] || die "no tasks given (default: $DEFAULT_TASKS)"
   # The eBay verdict compares against listings scraped independently of the agent, which
   # needs a second reader of the page. The harness-owned Chrome has one (CDP); this one

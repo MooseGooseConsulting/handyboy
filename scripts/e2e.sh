@@ -165,8 +165,13 @@ SOURCE_OPTS=()
 [ -n "$LEADER_SOURCE" ] && SOURCE_OPTS+=(--option "leaderModelSource=$LEADER_SOURCE")
 [ -n "$FOLLOWER_SOURCE" ] && SOURCE_OPTS+=(--option "followerModelSource=$FOLLOWER_SOURCE")
 
+# Killing nb-run does not stop the run in the extension. Ctrl-C reaches nb-run and then
+# this trap, which cancels the run by the id chosen up front.
+RUN_ID="e2e-$(date +%s)-$RANDOM"
+trap 'echo "cancelling $RUN_ID" >&2; host/bin/nb-cancel "$RUN_ID" >/dev/null 2>&1; exit 130' INT TERM
 host/bin/nb-run "$PROMPT" \
   --url "$URL" \
+  --run-id "$RUN_ID" \
   "${SOURCE_OPTS[@]}" \
   --option "leaderModel=$LEADER" \
   --option "followerModel=$FOLLOWER" \
@@ -174,6 +179,7 @@ host/bin/nb-run "$PROMPT" \
   --option "inputFidelity=$FIDELITY" \
   >"$STREAM"
 RUN_RC=$?
+trap - INT TERM
 
 fi
 
