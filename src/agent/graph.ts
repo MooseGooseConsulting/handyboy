@@ -205,8 +205,16 @@ function compactStoredRead(message: BaseMessage, step: number): BaseMessage {
 /** Consecutive tool-call-less Follower turns before a run is called stalled. */
 export const MAX_IDLE_FOLLOWER_TURNS = 4;
 
-/** Identical failures of the same action before the run is called stuck. */
+/**
+ * Identical failures of the same action before the Follower hands back to the Leader
+ * to replan around it. Ending the run here threw away recoverable runs: a live
+ * ServeTheHome search ended at step 4 because a search button was covered by an icon
+ * the error named, with the advice to try something else going nowhere but the log.
+ */
 export const MAX_REPEAT_FAILURE_TURNS = 2;
+
+/** The same failure still repeating after that replan: now the run is stuck. */
+export const MAX_REPEAT_FAILURE_TURNS_TO_END = 4;
 
 /**
  * Identity of one failed attempt: the tool name, its visible arguments with stable
@@ -1076,13 +1084,19 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   }
 
   if (status === 'running' && repeatFailureTurns >= MAX_REPEAT_FAILURE_TURNS) {
-    status = 'error';
     const failingName = failureAction ?? (call ? call.name : null);
-    note =
+    const what =
       `the follower repeated the same failing action ${repeatFailureTurns} times` +
-      `${failingName ? ` (${failingName})` : ''}: ${summarize(failureText, 160)} No successful action happened ` +
-      'between attempts. Try a different tool or subgoal, or call blocked.';
-    endNote = note;
+      `${failingName ? ` (${failingName})` : ''}: ${summarize(failureText, 160)}`;
+    if (repeatFailureTurns >= MAX_REPEAT_FAILURE_TURNS_TO_END) {
+      status = 'error';
+      note = `${what} No successful action happened between attempts, including after a replan.`;
+      endNote = note;
+    } else if (repeatFailureTurns === MAX_REPEAT_FAILURE_TURNS) {
+      // Hand back once with the reason; the Leader's report carries the failing result.
+      signal = 'RETURN_TO_LEADER';
+      note = `${what} Replan around it: a different element, tool or route.`;
+    }
   }
 
   if (status === 'running' && stepN >= ctx.maxSteps) status = 'max-steps';
