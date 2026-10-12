@@ -630,6 +630,53 @@ export function liveLine(e, state) {
   }
 }
 
+/* ------------------------------------------------------------------ scoreboard */
+
+const short = (m) => String(m ?? '?').replace(/^[^/]+\//, '').replace(/:free$/, '');
+export const pairOf = (h) => `${short(h.telemetry?.byRole?.leader?.models?.[0])} + ${short(h.telemetry?.byRole?.follower?.models?.[0])}`;
+
+/**
+ * Model pair by site, from runs/history.jsonl: which free models actually get the job
+ * done, on what, and at what cost. Invalid runs (bot walls, provider 429s) are counted
+ * apart and kept out of the pass rate: they say nothing about the model.
+ */
+export function scoreboard(history, { activity = 'browse' } = {}) {
+  const runs = history.filter((h) => h.activity === activity && h.telemetry?.byRole);
+  if (!runs.length) return `no ${activity} runs with model telemetry yet`;
+  const pairs = new Map();
+  for (const h of runs) {
+    const p = pairOf(h);
+    const s = pairs.get(p) ?? { runs: 0, valid: 0, pass: 0, score: 0, calls: 0, seconds: 0, tokensIn: 0, sites: new Map() };
+    s.runs += 1;
+    const site = h.params?.host ?? '?';
+    const cell = s.sites.get(site) ?? [];
+    cell.push(h.verdict === 'pass' ? 'P' : h.verdict === 'invalid' ? 'i' : `${Math.round((h.score ?? 0) * 100)}`);
+    s.sites.set(site, cell);
+    if (h.verdict === 'invalid') {
+      pairs.set(p, s);
+      continue;
+    }
+    s.valid += 1;
+    s.pass += h.verdict === 'pass' ? 1 : 0;
+    s.score += h.score ?? 0;
+    s.calls += h.telemetry.modelCalls ?? 0;
+    s.seconds += h.telemetry.seconds ?? 0;
+    s.tokensIn += Object.values(h.telemetry.byRole).reduce((n, r) => n + (r.inputTokens ?? 0), 0);
+    pairs.set(p, s);
+  }
+  const lines = [`${activity}: ${runs.length} runs.  cell per run: P pass, i invalid, else score %`, ''];
+  lines.push(`${'leader + follower'.padEnd(52)} pass   valid  mean   calls  secs  tokens-in`);
+  const ranked = [...pairs].sort((a, b) => b[1].pass / Math.max(1, b[1].valid) - a[1].pass / Math.max(1, a[1].valid) || b[1].score - a[1].score);
+  for (const [p, s] of ranked) {
+    const v = Math.max(1, s.valid);
+    lines.push(
+      `${p.padEnd(52)} ${`${s.pass}/${s.valid}`.padEnd(6)} ${String(s.valid).padEnd(6)} ${`${Math.round((s.score / v) * 100)}%`.padEnd(6)} ${String(Math.round(s.calls / v)).padEnd(6)} ${String(Math.round(s.seconds / v)).padEnd(5)} ${k(Math.round(s.tokensIn / v))}`,
+    );
+    lines.push(`    ${[...s.sites].map(([site, cell]) => `${site} ${cell.join(',')}`).join('   ')}`);
+  }
+  return lines.join('\n');
+}
+
 /* ------------------------------------------------------------------ CLI */
 
 function flag(argv, name) {
@@ -639,6 +686,25 @@ function flag(argv, name) {
 
 async function main(argv) {
   const cmd = argv[0];
+  if (cmd === 'board') {
+    // Rescore every saved run from its raw log with the scorer as it is now, so the board
+    // never mixes verdicts from older scorer versions.
+    const root = flag(argv, 'runs') ?? 'runs';
+    const activity = flag(argv, 'activity') ?? 'browse';
+    const rows = [];
+    for (const dir of fs.readdirSync(root).filter((d) => d.startsWith('activities-')).sort()) {
+      for (const f of fs.readdirSync(path.join(root, dir)).filter((f) => f.endsWith('-task.json'))) {
+        const task = JSON.parse(fs.readFileSync(path.join(root, dir, f), 'utf8'));
+        const id = task.activity ?? f.replace(/-\d+-task\.json$/, '');
+        const runlog = path.join(root, dir, f.replace(/-task\.json$/, '-runlog.jsonl'));
+        if (id !== activity || !fs.existsSync(runlog)) continue;
+        const r = scoreActivity(id, readJsonl(fs.readFileSync(runlog, 'utf8')), { params: task.params ?? undefined });
+        rows.push({ ...r, params: task.params });
+      }
+    }
+    console.log(scoreboard(rows, { activity }));
+    return 0;
+  }
   if (cmd === 'list') {
     for (const [id, a] of Object.entries(ACTIVITIES)) console.log(`${id.padEnd(18)} ${a.title}`);
     return 0;
