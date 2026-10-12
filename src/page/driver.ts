@@ -175,15 +175,19 @@ export class PageDriver {
   }
 
   private async send<T extends PageResponse>(tabId: number, request: PageRequest): Promise<T> {
-    tabId = currentTabId(tabId);
     const ready = await this.ensureInjected(tabId);
     if (!ready.ok) return ready as T;
+    // Injection waited through ping/inject/ping round trips; the tab id can be replaced
+    // while it runs (prerender activation, a redirect chain). Re-resolve here and target
+    // *that* id: sending to the id the injection started on fails "No tab with id" and
+    // cost a live run its whole remaining session.
+    const target = currentTabId(tabId);
     try {
-      const res = await this.withTimeout(this.api.tabs.sendMessage(tabId, request), `page op "${request.op}"`);
+      const res = await this.withTimeout(this.api.tabs.sendMessage(target, request), `page op "${request.op}"`);
       if (!res) return { ok: false, error: 'no response from page' } as T;
       return res as T;
     } catch (err) {
-      this.injected.delete(tabId);
+      this.injected.delete(target);
       return { ok: false, error: errorOf(err) } as T;
     }
   }
