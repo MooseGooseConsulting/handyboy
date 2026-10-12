@@ -234,6 +234,28 @@ describe('site rotation', () => {
     const picks = [0, 1, 2].map((i) => nextBrowse(sites, history, i).params.host);
     expect(picks).toEqual(['b-surplus.de', 'ebay.com', 'a-parts.com']);
   });
+
+  it('does not start a fresh history on a walled site; the walled ones come last among the never-tested', () => {
+    const sites = [
+      { name: 'Walled big shop', url: 'https://big-wall.example', walled: true },
+      { name: 'Open shop', url: 'https://open-shop.example' },
+      { name: 'Open two', url: 'https://open-two.example' },
+      { name: 'Walled small', url: 'https://small-wall.example', walled: true },
+    ];
+    const picks = [0, 1, 2, 3].map((i) => nextBrowse(sites, [], i)?.params.host);
+    expect(picks).toEqual(['open-shop.example', 'open-two.example', 'big-wall.example', 'small-wall.example']);
+  });
+
+  it('sites.json flags the bot-walled operators, so a fresh rotation starts on an open site', () => {
+    const sites = JSON.parse(fs.readFileSync(new URL('../scripts/harness/sites.json', import.meta.url), 'utf8'));
+    const walledHosts = sites.filter((s) => s.walled).map((s) => s.host);
+    // One operator, all domains: flagging one eBay domain would not help, the rotation
+    // would pick the first unflagged sibling of the same family.
+    expect(walledHosts).toEqual(expect.arrayContaining(['ebay.com', 'ebay.co.uk', 'ebay.de', 'amazon.com', 'walmart.com']));
+    expect(nextBrowse(sites, [], 0)!.params.host).not.toMatch(/ebay|amazon\.com|walmart\.com/);
+    // The open refurbishers the everyday loop was built for are reachable.
+    expect(nextBrowse(sites, [], 0)!.params.host).toBe('techmikeny.com');
+  });
 });
 
 describe('scoreboard', () => {

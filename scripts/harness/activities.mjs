@@ -267,7 +267,10 @@ export function rankSites(sites, history, { filter = () => true } = {}) {
   const ranked = usable
     .map((s, i) => {
       const f = familyOf(hostOf(s.url));
-      return { s, f, order: lastUsed.has(f) ? lastUsed.get(f) : -1e6 + i };
+      // Never-tested operators first, least recently tested next. Among the never-tested,
+      // walled sites (CAPTCHA and bot walls, per sites.json) go last: a fresh history
+      // should not start a run on a site that blocks it.
+      return { s, f, order: lastUsed.has(f) ? lastUsed.get(f) : -1e6 + i + (s.walled ? 1e5 : 0) };
     })
     .sort((a, b) => a.order - b.order);
   // One site per operator per batch.
