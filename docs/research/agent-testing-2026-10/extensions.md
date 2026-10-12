@@ -184,7 +184,13 @@ demo scripts that call a real LLM and `console.log` the result, with no assertio
   model never gets called". It prefers Playwright's full Chromium "to avoid the system-Chrome singleton hand-off
   (which closes the automation context)".
 - [code] `packages/e2e/src/real-llm.ts`: production build plus a real endpoint. The provider is seeded by
-  `chrome.storage.local.set` from the `options.html` page, "in a throwaway profile — never written to disk". It also
+  `chrome.storage.local.set` from the `options.html` page in a temporary profile. Chrome documents `storage.local`
+  as persistent local storage, not memory-only storage ([Storage API](https://developer.chrome.com/docs/extensions/reference/api/storage#storage-areas)).
+  The cited launcher creates the profile with `mkdtempSync`, but its `close()` only closes the browser context and
+  does not remove the directory ([real-llm.ts](https://github.com/uiuing/browser-agent/blob/main/packages/e2e/src/real-llm.ts),
+  [ext-launch.ts](https://github.com/uiuing/browser-agent/blob/main/packages/e2e/src/ext-launch.ts)). The source therefore
+  does not support the comment "never written to disk" or establish profile cleanup; treat the API key as persisted
+  in temporary profile storage unless that harness adds and verifies deletion. The test also
   "proves cross-window smart targeting — the page under automation lives in a SECOND, unfocused Chrome window".
 - [code] `packages/e2e/src/real-sites.ts`: 3 real sites (Bing, httpbin `/html`, httpbin `/forms/post`). Each
   `Scenario` has `urls` (fallback candidates "survives regional blocking"), a **Playwright-side `truth(page)`** that

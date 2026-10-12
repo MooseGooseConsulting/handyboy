@@ -149,7 +149,7 @@ browser-use runs four separate eval systems at different levels.
 
 ## 4. Magnitude: `magnitudedev/browser-agent` `evals/`
 
-- **Local fixtures** [code]. `evals/basic/site/{scroll,shadow}/index.html` is served on localhost:8080. Tests are written as `test.group('scroll arena', {url}, …) test(\`can find target ${n}\`, ({ai}) => ai.step(...))` (`evals/basic/tests/scroll/scroll.mag.ts`). Magnitude-test is itself a natural-language test runner.
+- **Local fixtures** [code]. `evals/basic/site/{scroll,shadow}/index.html` is served on localhost:8080. Tests are written as ``test.group('scroll arena', {url}, …) test(\`can find target ${n}\`, ({ai}) => ai.step(...))`` (`evals/basic/tests/scroll/scroll.mag.ts`). Magnitude-test is itself a natural-language test runner.
 - **WebVoyager on live sites** [code]:
   - `wv-runner.ts` creates a **fresh `chromium.launchPersistentContext("")`** per task at a fixed 1024×768 viewport. The prompt gets "Consider that today is <date>". The task timeout is 20 minutes.
   - Token and cost totals are rewritten to `results/<id>.json` after every action, so a crash leaves a record.
