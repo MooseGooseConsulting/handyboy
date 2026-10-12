@@ -4,7 +4,8 @@
 #   scripts/live.sh setup              build, register the host, get the extension connected
 #   scripts/live.sh test [task,...]    run fixture tasks in real Chrome and score each one
 #   scripts/live.sh activities [id,...] [--repeat N]   the agent performs real activities: by default
-#                                      browse, rotating across sites.json; live telemetry, verdict, waste
+#                                      browse; deep jobs (filter_sort, site_median, compare_sites)
+#                                      rotate across shop sites the same way; live telemetry, verdict, waste
 #   scripts/live.sh run "<prompt>" [--url <url>]   one ad-hoc run with the free pair
 #   scripts/live.sh status | logs
 #
@@ -18,9 +19,10 @@
 # 127.0.0.1. The eBay task runs from the harness tier (see below).
 #
 # Environment: NB_LIVE_CHROME, NB_LIVE_CHROME_DIR (browser and its config dir),
-# NB_LIVE_LEADER, NB_LIVE_FOLLOWER (model ids), NB_LIVE_TIMEOUT (seconds per run),
-# NB_LIVE_CONNECT_WAIT, and NB_LIVE_REINSTALL_HOST=1 to point the registered dev host at
-# this checkout when setup reports it runs from another one.
+# NB_LIVE_LEADER, NB_LIVE_FOLLOWER (model ids; setting either pins the pair — unset, the
+# pair rotates across the ones runs/history.jsonl has seen, least recently used first),
+# NB_LIVE_TIMEOUT (seconds per run), NB_LIVE_CONNECT_WAIT, and NB_LIVE_REINSTALL_HOST=1 to
+# point the registered dev host at this checkout when setup reports it runs from another one.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,6 +36,29 @@ CHROME="${NB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google
 CHROME_DIR="${NB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
 LEADER="${NB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
 FOLLOWER="${NB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
+# Without a pinned pair, rotate across the pairs runs/history.jsonl has already seen,
+# least recently used first: the everyday runs spread over models the way the site
+# rotation spreads them over sites, and no pair owns the default by inertia. Setting
+# either environment variable above pins the pair instead.
+rotate_pair() {
+  local file="$ROOT/runs/history.jsonl" pair
+  [ -f "$file" ] || return 1
+  pair="$(jq -rs '
+    [to_entries[]
+     | .value.telemetry.byRole as $r
+     | select($r.leader.models[0] != null and $r.follower.models[0] != null)
+     | {l: $r.leader.models[0], f: $r.follower.models[0], i: .key}]
+    | select(length > 0)
+    | group_by(.l + "|" + .f)
+    | map({l: .[0].l, f: .[0].f, last: (map(.i) | max)})
+    | sort_by(.last)
+    | .[0] | (.l, .f)
+  ' "$file" 2>/dev/null)" || return 1
+  [ -n "$pair" ] || return 1
+  LEADER="$(sed -n 1p <<<"$pair")"
+  FOLLOWER="$(sed -n 2p <<<"$pair")"
+}
+if [ -z "${NB_LIVE_LEADER:-}" ] && [ -z "${NB_LIVE_FOLLOWER:-}" ]; then rotate_pair; fi
 RUN_TIMEOUT="${NB_LIVE_TIMEOUT:-600}"
 CONNECT_WAIT="${NB_LIVE_CONNECT_WAIT:-300}"
 # The local fixture tasks. ebay runs from `just harness`, which can read the page itself.
@@ -42,7 +67,7 @@ DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,st
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Same derivation as host/install.sh: the manifest key pins the id across rebuilds.
 ext_id() {
@@ -352,10 +377,15 @@ cmd_activities() {
       *) read -ra list <<<"$(tr ',' ' ' <<<"$1")"; shift ;;
     esac
   done
-  # The everyday loop is browse, rotating across sites; name eBay activities to run them.
+  # The everyday loop is browse, rotating across sites; deep jobs by name (filter_sort,
+  # site_median, compare_sites) rotate across shop sites the same way. eBay activities are
+  # the exception: they run on ebay.com every time, so a repeat is a batch on one site.
   [ "${#list[@]}" -gt 0 ] || list=(browse)
   host_up || die "the extension is not connected; run scripts/live.sh setup first"
   host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
+  if [ "$repeat" -gt 1 ] && [[ " ${list[*]} " == *' ebay_'* ]]; then
+    echo "NOTE: eBay activities are pinned to ebay.com every run; repeating one hammers a single site. One or two runs, then return to the rotating rungs."
+  fi
 
   local prof_args=() regs
   [ -n "${NB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")

@@ -9,14 +9,18 @@ The goal is that the agent can do what a person does with a browser: search, fil
 ```sh
 scripts/live.sh setup                      # build, load the extension, check the host and key
 scripts/live.sh activities                 # one browse run on the next site in the rotation
-scripts/live.sh activities --repeat 6      # six runs, six different sites
+scripts/live.sh activities --repeat 6      # six runs on six sites, on the batch's model pair
+scripts/live.sh activities filter_sort,site_median --repeat 4   # deep jobs, rotating across shop sites
 scripts/live.sh activities --site mercari.com --query "Ryzen 5 5600X"   # pin a site and part
 NB_LIVE_LEADER=poolside/laguna-s-2.1:free NB_LIVE_FOLLOWER=poolside/laguna-s-2.1:free \
-  scripts/live.sh activities               # another free model pair
-node scripts/harness/activities.mjs board  # model pair by site, from every saved run
+  scripts/live.sh activities               # pin the model pair; unset, the pair rotates too
+node scripts/harness/activities.mjs list   # every activity id
+node scripts/harness/activities.mjs board  # model pair by site for one activity (default browse), from every saved run
 ```
 
 Each run opens a fresh tab and closes it when the run ends. Results go to `runs/activities-<time>/`: the task, the live stream, the run log, and the scored report. Every run is also appended to `runs/history.jsonl`.
+
+**Rotation.** Sites and models both rotate, off `runs/history.jsonl`. Each run goes to the site tested least recently — for the deep rungs, the priced shop sites — where every country domain of one operator counts as one site, so eBay.com, eBay UK and eBay.de are one. A long series spreads across the whole list instead of returning to the same few sites, and no single account or site sees a pattern of repeated automated visits. The query rotates too. The model pair rotates the same way while `NB_LIVE_LEADER` and `NB_LIVE_FOLLOWER` are unset: one invocation runs one pair, and the next picks the pair tested least recently, so no pair owns the default by inertia. Setting either variable pins the pair, which is how two pairs are compared on the same task.
 
 ## What a run does
 
@@ -29,30 +33,42 @@ This is the floor: any site, one search, one listing. It is what almost every ot
 3. Open one listing.
 4. Call `done` with only `{"title", "price", "url"}`.
 
-**Rotation.** Each run goes to the operator tested least recently. Every country domain of one operator counts as one site, so eBay.com, eBay UK and eBay.de are one. A long series spreads across the whole list instead of returning to the same few sites, and no single account or site sees a pattern of repeated automated visits. The part rotates too.
+### Rung 2: one site, one job
 
-### Rung 2 and up: multi-step jobs
-
-These are the real tests of the product. They exist today for eBay, and run by name (`scripts/live.sh activities ebay_compare,ebay_csv`):
+These are built and passing today, and they are the default next step once `browse` is solid — not eBay. Each picks a priced, USD shop site (marketplace, refurbisher, used-retailer section, classifieds) by the same least-recently-tested rotation as `browse`, so repeating them moves across sites instead of camping on one. They run by name (`scripts/live.sh activities filter_sort,site_median`):
 
 | Activity | What it asks of the agent |
 |---|---|
-| `ebay_compare` | apply eBay's own Buy It Now and price filters, open three listings, read title, price, shipping and seller, report JSON |
-| `ebay_csv` | extract every listing on a results page with a userscript and save it as a CSV (checked on disk: 60 rows) |
-| `ebay_sold_median` | use the Sold Items filter across two pages and work out the median |
-| `ebay_watchlist` | read a signed-in watchlist without changing it |
+| `filter_sort` | search a site, then sort by price or filter with the site's own controls, and prove it from the URL or the page (#51) |
+| `site_median` | read two pages of results, using the site's own next-page control, and work out the median price |
 
-The last two need the Chrome profile signed in to eBay: eBay sends a signed-out visitor to sign-in, behind a CAPTCHA. Until that profile is signed in, these two come back **invalid**, which is a fact about the setup, not a verdict on the agent.
+A site that filters in the page without touching its URL shows no URL evidence; the scorer's detail says so rather than guessing.
 
-**What to build next.** None of this is built yet, and the order is not fixed. Each item is a multi-step job on any of the 245 sites, scored by the same run-log method:
+### Rung 3: three sites in one run
 
-- **Filter and sort:** apply a condition, a price cap and a sort order through the site's own controls, and prove from the URL or the page that they applied (#51).
-- **Compare across sites:** find the same part on three different sites and report the cheapest with shipping.
+`compare_sites` starts on one shop site, has the agent navigate to two more, and names the cheapest of the three offers it grounded in pages it actually visited. Fifty steps, three searches, three currencies' worth of sites kept to one (USD) so the comparison means something.
+
+### Opt-in: the eBay jobs
+
+The eBay activities are the same jobs pinned to one site — eBay — which is also the most defended site in the list: a run can end behind a CAPTCHA or a bot wall, and the scorer marks those **invalid**, a fact about the setup, not a verdict on the model. Until the agent has a way past those walls (of seven eBay live runs on 2026-10-12, three ended at CAPTCHAs and one passed), these runs measure the walls, not the agent. So they are opt-in: run one when deliberately probing eBay, not as the default deep job, and never many back to back — one or two runs, then return to the rungs above, which rotate for you.
+
+| Activity | What it asks of the agent | Preconditions |
+|---|---|---|
+| `ebay_compare` | apply eBay's own Buy It Now and price filters, open three listings, read title, price, shipping and seller, report JSON | none beyond the walls |
+| `ebay_csv` | extract every listing on a results page with a userscript and save it as a CSV (checked on disk: at least 10 rows with 10 distinct item ids) | none beyond the walls |
+| `ebay_sold_median` | use the Sold Items filter across two pages and work out the median | none beyond the walls |
+| `ebay_watchlist` | read a signed-in watchlist without changing it | the Chrome profile must be signed in to eBay; until it is, this comes back **invalid** every time |
+
+A run that ends behind a CAPTCHA, a bot wall or a sign-in redirect is scored invalid and kept out of pass rates. Repeating an eBay job repeats on ebay.com every time — that is the one rotation cannot spread.
+
+**What to build next.** The rungs above cover search, the site's own filter controls, two-page reading and cross-site comparison. Still unbuilt, each a multi-step job on any of the 245 sites, scored by the same run-log method:
+
 - **Collect:** walk several pages of results into a file, with a count, deduplicated.
 - **Cart and forms, up to checkout:** add to a cart, fill an address form, stop before paying. Test credentials and addresses only.
 - **Sign-in:** reuse the current session, and complete a sign-in the user has authorized.
 - **Recover:** a task that starts behind a cookie banner, a modal, or a moved search box.
 - **Long runs:** 40 or more steps, with replans, where the cost and the cache share matter.
+- **Defeat a bot wall or CAPTCHA:** the missing skill that keeps the eBay jobs out of the default.
 
 Start a new activity as a rung-1 `browse` on the same site if that is quicker to get working, then climb.
 
@@ -98,16 +114,16 @@ Results on 2026-10-12 (small samples):
 | laguna-s-2.1 + laguna-s-2.1 | 2/2 | 100% | 10 | 96k |
 | nemotron-3-ultra + nemotron-3-super | 2/3 | 73% | 19 | 250k |
 | gemma-4-31b + gemma-4-26b | 1/2 | 90% | 9 | 90k |
-| nemotron-3-ultra + nemotron-3.5-lightning (default) | 2/13 | 48% | 19 | 207k |
+| nemotron-3-ultra + nemotron-3.5-lightning (fallback pair, used when history has none) | 2/13 | 48% | 19 | 207k |
 
-The default pair's 13 runs include six on the build before the fixes below.
+That fallback pair's 13 runs include six on the build before the fixes below.
 
 ## Rules for whoever works on this
 
 - **A recoverable error must not end a run.** That covers a failed screenshot, a swapped tab id, one 429, and two failed clicks: each is information for the agent, not a verdict. Each of those ended runs at some point and was fixed. Treat any new one as a product bug.
 - **Check the scorer before blaming the model.** Rescore with `board` and read the run log. The scorer was wrong four times on 2026-10-12 (Amazon product URLs carry the search keywords, Kleinanzeigen's results path, trimmed listing URLs, wrong-part listings), and every fix is pinned by a test in `tests/activities.test.ts`.
-- **Keep climbing.** Rung 1 is cheap and runs often and broadly, and that is all it is for. A day with only rung-1 results has not tested the agent's real work. Add the next harder activity when the current one passes, and write down what the failures showed.
-- **Breadth and depth both.** Spread the cheap runs across sites and models, and the deep ones across the hardest jobs. Do not run the deep jobs on one site over and over: that is how you get an account flagged.
+- **Keep climbing.** Rung 1 is cheap and runs often and broadly, and that is all it is for. Rungs 2 and 3 (`filter_sort`, `site_median`, `compare_sites`) are built and rotate for you; once rung 1 passes on the current pair, the next run is a rung-2 run, not another rung-1 run. Add the next harder activity when the current one passes, and write down what the failures showed.
+- **Breadth and depth both, by rotation.** The rotating rungs spread sites and model pairs on their own; `--site` and `--query` are for comparing pairs on the same page, not for defaults. The eBay jobs are the only activities pinned to one site, so they stay opt-in: one or two runs when deliberately probing eBay, never a repeating batch. Do not run any deep job on one site over and over: that is how you get an account flagged.
 - **Paste real output** when reporting a result: the report lines, the board, the run id.
 
 ## Product bugs these runs found
