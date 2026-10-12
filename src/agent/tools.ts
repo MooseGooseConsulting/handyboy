@@ -33,6 +33,8 @@ void _signalParity;
 export interface SnapshotResult {
   text: string;
   tokens?: number;
+  /** The page the snapshot was taken of, so the run log records where the agent was. */
+  url?: string;
 }
 
 export interface ScreenshotResult {

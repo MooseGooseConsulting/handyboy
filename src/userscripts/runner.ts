@@ -17,6 +17,7 @@
  */
 import type { Userscript, UserscriptRunResult } from '@/src/messaging';
 import { matchesAny } from './match-pattern';
+import { currentTabId } from '@/src/page/tabReplacement';
 
 /** Captured console cap: enough to debug with, small enough to always ship. */
 export const MAX_CONSOLE_LINES = 200;
@@ -431,7 +432,9 @@ function failure(
  * left to the caller.
  */
 export async function runUserscript(options: RunUserscriptOptions): Promise<UserscriptRunResult> {
-  const { tabId, script } = options;
+  const { script } = options;
+  // Follow a tab Chrome replaced mid-run (prerender, redirect chains); see tabReplacement.ts.
+  const tabId = currentTabId(options.tabId);
   const now = options.now ?? Date.now;
   const scriptId = script.id;
 
@@ -601,7 +604,7 @@ export async function signalUserscriptStop(tabId: number, api?: UserScriptsApi):
   const userScripts = api ?? chromeUserScriptsApi();
   if (!userScripts) return;
   await userScripts.execute({
-    target: { tabId },
+    target: { tabId: currentTabId(tabId) },
     world: 'USER_SCRIPT',
     worldId: USERSCRIPT_WORLD_ID,
     injectImmediately: true,

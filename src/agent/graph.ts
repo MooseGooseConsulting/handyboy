@@ -867,6 +867,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   ];
 
   let tokens: number | undefined;
+  let url: string | undefined;
   let hasScreenshot = false;
   let unchanged = false;
   let lastSnapshotDigest = state.lastSnapshotDigest;
@@ -878,6 +879,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     // page change, or a scroll or userscript that left it alone.
     const snap = await ctx.page.snapshot();
     tokens = snap.tokens;
+    url = snap.url;
     const digest = snapshotDigest(snap.text);
     if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
       unchanged = true;
@@ -889,21 +891,41 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
-    const shot = await ctx.page.screenshot();
-    hasScreenshot = true;
-    blocks.push({
-      type: 'text',
-      text: `Screenshot of the visible page, ${shot.width} by ${shot.height} pixels.`,
-    });
-    // Standard multimodal block. `image_url` / `MessageContentComplex` are
-    // deprecated in @langchain/core 1.2.9 (C-03).
-    blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
+    // A capture that fails (captureVisibleTab stalls on a hidden or busy tab) used to
+    // throw and end the whole run at step 0. It is one missing observation, not a
+    // failed run: say so in the prompt and fall back to the DOM, which in 'both' mode
+    // was already taken.
+    let shot: Awaited<ReturnType<typeof ctx.page.screenshot>> | undefined;
+    let shotError: string | undefined;
+    try {
+      shot = await ctx.page.screenshot();
+    } catch (error) {
+      shotError = error instanceof Error ? error.message : String(error);
+    }
+    if (shot) {
+      hasScreenshot = true;
+      blocks.push({
+        type: 'text',
+        text: `Screenshot of the visible page, ${shot.width} by ${shot.height} pixels.`,
+      });
+      // Standard multimodal block. `image_url` / `MessageContentComplex` are
+      // deprecated in @langchain/core 1.2.9 (C-03).
+      blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
+    } else if (ctx.observe === 'both') {
+      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}); the page text above is current.` });
+    } else {
+      const snap = await ctx.page.snapshot();
+      tokens = snap.tokens;
+      url = snap.url;
+      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}), so here is the page text instead.\n${SNAPSHOT_HEADER}${snap.text}` });
+    }
   }
 
   emit(config, {
     kind: 'observation',
     mode: ctx.observe,
     tokens,
+    ...(url ? { url } : {}),
     hasScreenshot,
     ...(unchanged ? { unchanged } : {}),
     at: now(),
