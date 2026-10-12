@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 // The scorer is a plain Node script so live.sh can run it without a build step.
 // @ts-ignore -- untyped .mjs
-import { familyOf, nextBrowse, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
+import { familyOf, listingKey, nextBrowse, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
 
 type Ev = Record<string, unknown>;
 
@@ -172,6 +172,14 @@ describe('browse: any site, rotating', () => {
       ['done', { summary: JSON.stringify({ title: 'Sapphire Radeon RX 6700 XT (Renewed)', price: '£229.99', url: product }) }],
     ]);
     expect(scoreActivity('browse', events, { params: amazon }).verdict).toBe('pass');
+  });
+
+  it('accepts a reported listing URL with its tracking suffix trimmed, but not a different product', () => {
+    const k = 'https://www.kleinanzeigen.de/s-anzeige/2x-64gb-crucial-ddr4/3317781317-225-1866';
+    expect(listingKey('https://www.kleinanzeigen.de/s-anzeige/2x-64gb-crucial-ddr4/3317781317')).toBe(listingKey(k));
+    const visited = 'https://www.amazon.co.uk/Sapphire-Radeon-Renewed/dp/B098XXF99T/ref=sr_1_1?crid=2K';
+    expect(listingKey('https://www.amazon.co.uk/dp/B098XXF99T')).toBe(listingKey(visited));
+    expect(listingKey('https://www.amazon.co.uk/dp/B07FPH493J')).not.toBe(listingKey(visited));
   });
 
   it('fails a listing for a different part than the one searched', () => {

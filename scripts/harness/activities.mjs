@@ -187,6 +187,23 @@ export function browseInvalid(events, { host }) {
   return null;
 }
 
+/**
+ * What identifies a listing: an Amazon ASIN, else the longest run of 6+ digits in the
+ * path (eBay, Kleinanzeigen, Mercari ids), else host and path. A reported URL with its
+ * tracking suffix trimmed (/3317781317 for /3317781317-225-1866) is the same listing;
+ * /dp/B07FPH493J reported after visiting /dp/B098XXF99T is not.
+ */
+export function listingKey(u) {
+  const p = parseUrl(u);
+  if (!p) return String(u);
+  const host = p.hostname.replace(/^www\./, '');
+  const asin = p.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
+  if (asin) return `${host} asin:${asin[1].toUpperCase()}`;
+  const ids = p.pathname.match(/\d{6,}/g);
+  if (ids) return `${host} id:${[...ids].sort((a, b) => b.length - a.length)[0]}`;
+  return pageKey(u);
+}
+
 /** Most of the query's distinctive words (model numbers, sizes) appear in the title. */
 export function titleMatches(title, query) {
   const t = String(title ?? '').toLowerCase().replace(/[\s\-_]+/g, ' ');
@@ -211,7 +228,7 @@ export function browseChecks(events, { host, query, url: home }) {
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : Array.isArray(parsed.value) ? parsed.value[0] ?? {} : {};
   const reported = typeof v?.url === 'string' ? v.url : '';
-  const grounded = Boolean(reported) && urls.some((u) => pageKey(u) === pageKey(reported));
+  const grounded = Boolean(reported) && urls.some((u) => listingKey(u) === listingKey(reported));
   const price = money(v?.price);
   return [
     check('reached the site', urls.length > 0, urls[0] ?? `no page on ${host}`),
