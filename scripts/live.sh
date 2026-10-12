@@ -3,6 +3,8 @@
 #
 #   scripts/live.sh setup              build, register the host, get the extension connected
 #   scripts/live.sh test [task,...]    run fixture tasks in real Chrome and score each one
+#   scripts/live.sh activities [id,...] [--repeat N]   the agent performs real activities: by default
+#                                      browse, rotating across sites.json; live telemetry, verdict, waste
 #   scripts/live.sh run "<prompt>" [--url <url>]   one ad-hoc run with the free pair
 #   scripts/live.sh status | logs
 #
@@ -40,7 +42,7 @@ DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,st
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Same derivation as host/install.sh: the manifest key pins the id across rebuilds.
 ext_id() {
@@ -335,9 +337,86 @@ cmd_test() {
   [ "$fail" -eq 0 ]
 }
 
+# The agent performs each activity for real (scripts/harness/activities.mjs): real eBay,
+# the free pair, your Chrome. Each step prints as it happens; the verdict comes only from
+# what the run log shows, and the report names the workflow and token waste it saw.
+cmd_activities() {
+  local list=() repeat=1 a
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repeat) repeat="$2"; shift 2 ;;
+      *) read -ra list <<<"$(tr ',' ' ' <<<"$1")"; shift ;;
+    esac
+  done
+  # The everyday loop is browse, rotating across sites; name eBay activities to run them.
+  [ "${#list[@]}" -gt 0 ] || list=(browse)
+  host_up || die "the extension is not connected; run scripts/live.sh setup first"
+  host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
+
+  local prof_args=() regs
+  [ -n "${NB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")
+  regs="$(registrations)"
+  [ "$(grep -c . <<<"$regs")" -eq 1 ] && prof_args+=(--profile-directory="$(cut -f1 <<<"$regs")")
+
+  mkdir -p "$ROOT/runs"
+  local out; out="$(mktemp -d "$ROOT/runs/activities-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")" || die "could not create a results dir"
+  local history="$ROOT/runs/history.jsonl"
+  trap cleanup_test EXIT
+  trap 'exit 130' INT TERM
+  echo "models: leader=$LEADER follower=$FOLLOWER   results -> $out"
+  : >"$out/summary.txt"
+  local pass=0 fail=0 invalid=0 trial
+  for a in "${list[@]}"; do
+    for trial in $(seq "$repeat"); do
+      step "activity $a ($trial/$repeat)"
+      local tj="$out/$a-$trial-task.json"
+      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" >"$tj" || { fail=$((fail + 1)); continue; }
+      local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
+      echo "$(jq -r .title "$tj")  ($url)"
+      local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter
+        --option "leaderModel=$LEADER" --option "followerModel=$FOLLOWER")
+      while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
+        < <(jq -r '.options | {readOnly: false} + . | to_entries[] | "\(.key)=\(.value)"' "$tj")
+
+      if ! timeout 15 "$CHROME" "${prof_args[@]}" "$url" >/dev/null 2>&1; then
+        echo "could not open a fresh tab for $a; not starting it"
+        fail=$((fail + 1)); echo "FAIL     $a  (no fresh tab)" >>"$out/summary.txt"; continue
+      fi
+      sleep 3
+
+      local run_id="act-$(date +%s)-$RANDOM-$a"
+      ACTIVE_RUN="$run_id"
+      # Backgrounded and waited on, as in cmd_test, so Ctrl-C cancels the run at once.
+      { timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
+          2>"$out/$a-$trial-nb-run.stderr" \
+          | node "$HARNESS/activities.mjs" live --log "$out/$a-$trial-stream.jsonl"; } &
+      RUN_PID=$!
+      wait "$RUN_PID"
+      RUN_PID=""
+      ACTIVE_RUN=""
+      local runlog="$out/$a-$trial-runlog.jsonl"
+      cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$a-$trial-stream.jsonl" "$runlog"
+
+      node "$HARNESS/activities.mjs" score --activity "$a" --task "$tj" --runlog "$runlog" \
+        --artifacts "$DATA/artifacts/$run_id" --json "$out/$a-$trial-report.json" --history "$history" \
+        | tee "$out/$a-$trial-report.txt"
+      case "${PIPESTATUS[0]}" in
+        0) pass=$((pass + 1)); echo "PASS     $a #$trial  $(jq -r .title "$tj")  run=$run_id" >>"$out/summary.txt" ;;
+        3) invalid=$((invalid + 1)); echo "INVALID  $a #$trial  $(jq -r .title "$tj")  run=$run_id" >>"$out/summary.txt" ;;
+        *) fail=$((fail + 1)); echo "FAIL     $a #$trial  $(jq -r .title "$tj")  run=$run_id" >>"$out/summary.txt" ;;
+      esac
+    done
+  done
+  step "summary"
+  cat "$out/summary.txt"
+  echo "$pass passed, $fail failed, $invalid invalid   (history: $history)"
+  [ "$fail" -eq 0 ]
+}
+
 case "${1:-}" in
   setup) cmd_setup ;;
   test) shift; cmd_test "${1:-}" ;;
+  activities) shift; cmd_activities "$@" ;;
   run) shift
        exec scripts/e2e.sh --skip-build --leader "$LEADER" --follower "$FOLLOWER" \
          --leader-source openrouter --follower-source openrouter --prompt "$@" ;;
