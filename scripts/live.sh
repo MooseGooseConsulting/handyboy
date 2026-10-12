@@ -189,16 +189,13 @@ MSG
 }
 
 FIXTURE_PID=""
-ACTIVE_STDERR=""
+ACTIVE_RUN=""
 RUN_PID=""
 
-run_id_in() { grep -o 'runId=[A-Za-z0-9_-]*' "$1" 2>/dev/null | head -n1 | cut -d= -f2; }
-
 cleanup_test() {
-  local id
-  if [ -n "$ACTIVE_STDERR" ]; then
-    id="$(run_id_in "$ACTIVE_STDERR")"
-    [ -n "$id" ] && { echo "cancelling in-flight run $id"; host/bin/nb-cancel "$id" >/dev/null 2>&1 || true; }
+  if [ -n "$ACTIVE_RUN" ]; then
+    echo "cancelling in-flight run $ACTIVE_RUN"
+    host/bin/nb-cancel "$ACTIVE_RUN" >/dev/null 2>&1 || true
   fi
   [ -n "$RUN_PID" ] && kill "$RUN_PID" 2>/dev/null
   [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null
@@ -221,9 +218,11 @@ cmd_test() {
   # Chrome opens a command-line URL in its last-used profile. With one registration that
   # is pinned; with several, the CLI cannot tell which profile's worker owns the socket.
   local prof_args=() regs
+  # Without --user-data-dir a non-default Chrome dir would get the URL in the default instance.
+  [ -n "${NB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")
   regs="$(registrations)"
   if [ "$(grep -c . <<<"$regs")" -eq 1 ]; then
-    prof_args=(--profile-directory="$(cut -f1 <<<"$regs")")
+    prof_args+=(--profile-directory="$(cut -f1 <<<"$regs")")
   elif [ -n "$regs" ]; then
     echo "NOTE: nanobrowser is in several Chrome profiles; keep the one you set up frontmost."
   fi
@@ -278,19 +277,21 @@ cmd_test() {
     fi
     sleep 2
 
-    ACTIVE_STDERR="$out/$task-nb-run.stderr"
+    # Chosen here rather than read back from nb-run, so an interrupt that lands before
+    # nb-run reports the id can still cancel the run the extension already accepted.
+    local run_id="live-$(date +%s)-$RANDOM-$task"
+    ACTIVE_RUN="$run_id"
     # In the background and waited on: `timeout` puts itself in its own process group, so
     # Ctrl-C never reaches it, and bash runs no trap while a foreground child is running.
     # `wait` returns on the signal at once, so the trap cancels the run straight away.
-    timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" "${opt_args[@]}" \
-      >"$out/$task-stream.jsonl" 2>"$ACTIVE_STDERR" &
+    timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
+      >"$out/$task-stream.jsonl" 2>"$out/$task-nb-run.stderr" &
     RUN_PID=$!
     wait "$RUN_PID"
-    local rc=$? run_id
+    local rc=$?
     RUN_PID=""
-    ACTIVE_STDERR=""
-    run_id="$(run_id_in "$out/$task-nb-run.stderr")"
-    if [ "$rc" -eq 124 ] && [ -n "$run_id" ]; then
+    ACTIVE_RUN=""
+    if [ "$rc" -eq 124 ]; then
       echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
       host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true
     fi
@@ -303,13 +304,16 @@ cmd_test() {
 
     # Only files this task wrote count: Downloads may already hold a matching report from
     # an earlier run with the same seed. Give an in-progress Chrome download time to land.
-    local dl="$out/$task-downloads"
+    # Only the fixture's file name (Chrome may add " (1)") is copied, so nothing else that
+    # lands in Downloads meanwhile ends up in the results bundle.
+    local dl="$out/$task-downloads" want stem
+    want="$(jq -r '.download.filename' "$out/fixture/expected.json")"; stem="${want%.*}"
     mkdir -p "$dl"
     for _ in $(seq 10); do
       find "$HOME/Downloads" -maxdepth 1 -name '*.crdownload' -newer "$out/$task.start" 2>/dev/null | grep -q . || break
       sleep 1
     done
-    find "$HOME/Downloads" "$DATA/artifacts" -type f -newer "$out/$task.start" -not -name '*.crdownload' \
+    find "$HOME/Downloads" "$DATA/artifacts" -type f -newer "$out/$task.start" -name "$stem*.${want##*.}" \
       -exec cp --backup=numbered -t "$dl" {} + 2>/dev/null || true
 
     if node "$HARNESS/live-verdict.mjs" --task "$task" --stream "$runlog" \
