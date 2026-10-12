@@ -61,7 +61,6 @@ of files, and have them commit with `git add <paths>` — never `git add -A`.
   rather than equating a submitted form with a successful login.
 - Do not run `doppler secrets` in a way that prints values.
 - The extension never holds the API key. The native host attaches it.
-- Do not hammer third-party sites with automated navigation while testing.
 
 ## Style
 
