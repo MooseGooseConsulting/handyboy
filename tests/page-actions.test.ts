@@ -323,11 +323,27 @@ describe('click', () => {
       // `cover` is a sibling the button does not contain, so neither aim point verifies.
       expect(click(ref)).toEqual({
         ok: false,
-        error: 'element is occluded at its click point by another element',
+        error: 'element is occluded at its click point by <div> "cover"',
       });
     } finally {
       if (had) (document as unknown as { elementFromPoint: unknown }).elementFromPoint = orig;
       else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    }
+  });
+
+  it('names the cookie banner covering a refused click, with the ref to act on', () => {
+    document.body.innerHTML =
+      '<button>Search</button><div id="consent-banner" role="dialog"><p><span>We value your privacy</span></p><button>Accept</button></div>';
+    const ref = refOf('button');
+    const leaf = document.querySelector('span') as HTMLElement;
+    const orig = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: unknown }).elementFromPoint = () => leaf;
+    try {
+      const res = click(ref);
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^element is occluded at its click point by <div#consent-banner role="dialog"> "We value your privacy Accept" \[ref=e\d+\]$/);
+    } finally {
+      (document as unknown as { elementFromPoint: unknown }).elementFromPoint = orig;
     }
   });
 
@@ -610,6 +626,35 @@ describe('press', () => {
     codes.length = 0;
     press('7');
     expect(codes.every((c) => c === 'Digit7')).toBe(true);
+  });
+
+  it('Enter in a text field submits its form, as a real Enter would', () => {
+    document.body.innerHTML = '<form action="/search"><input type="search" name="q" value="ddr4"></form>';
+    const input = document.querySelector('input') as HTMLInputElement;
+    input.focus();
+    let submits = 0;
+    document.querySelector('form')!.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(submits).toBe(1);
+  });
+
+  it('Enter does not submit when the page handled the keydown itself, or outside a text field', () => {
+    document.body.innerHTML = '<form><input type="text"><textarea></textarea></form>';
+    let submits = 0;
+    document.querySelector('form')!.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    const input = document.querySelector('input') as HTMLInputElement;
+    input.addEventListener('keydown', (e) => e.preventDefault());
+    input.focus();
+    press('Enter');
+    (document.querySelector('textarea') as HTMLTextAreaElement).focus();
+    press('Enter');
+    expect(submits).toBe(0);
   });
 
   it('inserts no character — real typing is the R-13 escalation, not this', () => {

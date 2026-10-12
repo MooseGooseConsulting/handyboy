@@ -19,7 +19,7 @@
  * Event cortège and pointer-field realism follow
  * docs/research/trusted-input-and-stealth.md §hygiene rules 4, 5, 7 and 12.
  */
-import { resolveRef } from './snapshot';
+import { existingRef, resolveRef } from './snapshot';
 import { jitterInBox, planPath } from '../input/humanize';
 
 export interface ActionResult {
@@ -364,15 +364,51 @@ function actionPoint(el: HTMLElement): { point: Point } | { error: string } {
   const doc = el.ownerDocument;
   const canVerify = !!doc && typeof doc.elementFromPoint === 'function';
   let lastVerdict: AimVerdict = 'unverifiable';
+  let lastPoint: Point | undefined;
   for (const point of tries) {
     if (!canVerify) return { point };
     const verdict = verifyAim(el, doc, point);
     if (verdict === 'confirmed' || verdict === 'unverifiable') return { point };
     lastVerdict = verdict;
+    lastPoint = point;
   }
-  return lastVerdict === 'outside'
-    ? { error: 'element is outside the viewport at its click point' }
-    : { error: 'element is occluded at its click point by another element' };
+  if (lastVerdict === 'outside') return { error: 'element is outside the viewport at its click point' };
+  const probed = lastPoint ? tryHit(doc, lastPoint.clientX, lastPoint.clientY) : undefined;
+  const by = probed?.tested && probed.hit ? describeOccluder(probed.hit) : 'another element';
+  return { error: `element is occluded at its click point by ${by}` };
+}
+
+/** Visible-ish text with a space between nodes, so "privacy" + "Accept" do not run together. */
+function textOf(el: Element): string {
+  const parts: string[] = [];
+  const doc = el.ownerDocument;
+  const walker = doc?.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
+  for (let n = walker?.nextNode(); n && parts.join(' ').length < 80; n = walker!.nextNode()) parts.push(n.nodeValue ?? '');
+  return parts.join(' ');
+}
+
+/**
+ * Names what covers the target, so the agent can deal with it (close a cookie banner,
+ * dismiss an autocomplete list) instead of retrying the same click. Live runs on four
+ * sites refused eight clicks with only "another element" to go on.
+ */
+function describeOccluder(hit: Element): string {
+  const attr = (e: Element, n: string) => e.getAttribute?.(n) ?? '';
+  let refd: Element | null = hit;
+  let ref: string | undefined;
+  for (let i = 0; refd && i < 8 && !ref; i++, refd = refd.parentElement) ref = existingRef(refd);
+  // The closest landmark-ish container says more than the leaf (a <span> in a banner).
+  let box: Element | null = hit;
+  for (let i = 0; box && i < 12; i++, box = box.parentElement) {
+    const role = attr(box, 'role');
+    const idc = `${box.id} ${typeof box.className === 'string' ? box.className : ''}`;
+    if (/dialog|banner|alert|listbox|menu/.test(role) || /cookie|consent|gdpr|modal|overlay|popup|autocomplete|suggest/i.test(idc)) break;
+  }
+  const subject = box ?? hit;
+  const id = subject.id ? `#${subject.id}` : '';
+  const role = attr(subject, 'role') ? ` role="${attr(subject, 'role')}"` : '';
+  const text = (attr(subject, 'aria-label') || textOf(subject)).replace(/\s+/g, ' ').trim().slice(0, 60);
+  return `<${subject.localName}${id}${role}>${text ? ` "${text}"` : ''}${ref ? ` [ref=${ref}]` : ''}`;
 }
 
 /**
@@ -735,14 +771,40 @@ export function press(key: string): ActionResult {
   if (!target) return fail('no focused element to receive the key');
   const code = codeFor(key);
   const init: KeyboardEventInit = { key, code, bubbles: true, cancelable: true, composed: true };
-  dispatch(target, new KeyboardEvent('keydown', init));
+  const keydown = new KeyboardEvent('keydown', init);
+  dispatch(target, keydown);
   // keypress only ever fired for character-producing keys; Enter is the historical exception.
   if (key.length === 1 || key === 'Enter') {
     dispatch(target, new KeyboardEvent('keypress', init));
   }
   dispatch(target, new KeyboardEvent('keyup', init));
+  if (key === 'Enter' && !keydown.defaultPrevented) implicitSubmit(target);
   return { ok: true };
 }
+
+/**
+ * Enter in a text field submits its form: the browser's implicit submission, which an
+ * untrusted keydown never triggers. Without it a plain HTML search box could not be
+ * submitted at all; live runs on TechMikeNY and ServeTheHome typed the query and
+ * pressed Enter repeatedly with the page never moving. `requestSubmit` runs the page's
+ * own validation and submit handlers, as a real Enter would. A handler that cancelled
+ * the keydown (a site's own autocomplete) has already said Enter is not a submit.
+ */
+function implicitSubmit(target: Element): void {
+  const field = target as HTMLInputElement;
+  if (target.localName !== 'input' || !field.form) return;
+  if (!TEXT_SUBMIT_TYPES.has((field.type || 'text').toLowerCase())) return;
+  // requestSubmit throws only for an invalid submitter; the next observation shows
+  // whether the page moved, which is what the agent checks anyway.
+  try {
+    if (typeof field.form.requestSubmit === 'function') field.form.requestSubmit();
+    else field.form.submit();
+  } catch {
+    /* see above */
+  }
+}
+
+const TEXT_SUBMIT_TYPES: ReadonlySet<string> = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
 
 /**
  * Choose a `<select>` option by value, falling back to matching the option's visible label.

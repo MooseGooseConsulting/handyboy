@@ -284,6 +284,10 @@ export const FOLLOWER_SYSTEM = [
   'Read a userscript with read_userscript before you change it. run_userscript takes an id and optional args.',
   'A run_userscript result can be saved with save_file(fromLastUserscript:true) instead of retyping it; saved files land in the user\'s Downloads/nanobrowser folder.',
   'When a page holds more data than you can reach by clicking, write_userscript a small reader for it, run_userscript it, and fix it from the error and console lines you get back.',
+  // Live: a ServeTheHome run clicked the same covered button for 15 steps while the
+  // error named the cookie banner and its ref each time.
+  'A refused click names what covers the target and its ref. Deal with that first: close a cookie or consent banner (prefer reject or necessary-only, else accept), dismiss a popup or suggestion list, then retry.',
+  'A search usually submits with Enter in its box; if the search button is covered, press Enter instead.',
   // Authentication is ordinary task work, not a blanket stop. This guidance
   // does not invent a credential source or expose a tool we have not built.
   'Reuse the current signed-in session. Complete authorized sign-in or verification with available capabilities; a login page alone is not a reason to stop.',
