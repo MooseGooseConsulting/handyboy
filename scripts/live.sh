@@ -13,7 +13,7 @@
 #
 # `test` reuses the harness's fixture server, prompts and scorers (scripts/harness/), but
 # against this Chrome instead of a harness-owned one. Fixture pages are served on
-# 127.0.0.1, so no third-party site is touched unless you name the `ebay` task.
+# 127.0.0.1. The eBay task runs from the harness tier (see below).
 #
 # Environment: NB_LIVE_CHROME, NB_LIVE_CHROME_DIR (browser and its config dir),
 # NB_LIVE_LEADER, NB_LIVE_FOLLOWER (model ids), NB_LIVE_TIMEOUT (seconds per run),
@@ -34,7 +34,7 @@ LEADER="${NB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
 FOLLOWER="${NB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
 RUN_TIMEOUT="${NB_LIVE_TIMEOUT:-600}"
 CONNECT_WAIT="${NB_LIVE_CONNECT_WAIT:-300}"
-# Tasks that need nothing beyond a local page. ebay hits a real site, so it is opt-in.
+# The local fixture tasks. ebay runs from `just harness`, which can read the page itself.
 DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,stall,download"
 
 step() { printf '\n== %s\n' "$*"; }
