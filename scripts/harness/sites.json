@@ -22,7 +22,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Bot challenge likely on rapid repeated searches; filter to used/refurbished condition for parts.",
-  "segment": "us-marketplaces"
+  "segment": "us-marketplaces",
+  "walled": true
  },
  {
   "name": "TechMikeNY",
@@ -83,7 +84,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Large marketplace, mixed new and used; heavy automated search may trigger bot checks. Search pattern from memory, not re-fetched.",
-  "segment": "uk-ie"
+  "segment": "uk-ie",
+  "walled": true
  },
  {
   "name": "Kleinanzeigen",
@@ -127,7 +129,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Mixed new and used stock; filter by Used or Refurbished condition. Regional sch/i.html pattern not separately confirmed in this pass.",
-  "segment": "americas-apac"
+  "segment": "americas-apac",
+  "walled": true
  },
  {
   "name": "ServeTheHome Forums For Sale",
@@ -274,7 +277,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Same search path as eBay.com; country domain is separate. Heavy bot detection on automated traffic.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Newegg Canada",
@@ -2065,7 +2069,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Mixed new and used stock; filter by condition. Regional pattern not separately confirmed in this pass.",
-  "segment": "americas-apac"
+  "segment": "americas-apac",
+  "walled": true
  },
  {
   "name": "TechPowerUp Forums Classifieds",
@@ -2465,7 +2470,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Largest French classifieds site. Template from memory. Known for DataDome-style bot walls.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Trade Me",
@@ -2556,7 +2562,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Separate eBay domain, so listed separately from eBay UK. Search pattern from memory.",
-  "segment": "uk-ie"
+  "segment": "uk-ie",
+  "walled": true
  },
  {
   "name": "Back Market (France)",
@@ -2593,7 +2600,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Mixed new and used stock. Regional domain not verified in this pass.",
-  "segment": "americas-apac"
+  "segment": "americas-apac",
+  "walled": true
  },
  {
   "name": "r/hardwareswap",
@@ -2615,7 +2623,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Enthusiast PC-parts classifieds; Reddit rate-limits logged-out automation.",
-  "segment": "us-marketplaces"
+  "segment": "us-marketplaces",
+  "walled": true
  },
  {
   "name": "PCLiquidations",
@@ -2807,7 +2816,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Country eBay domain. Same search path as eBay.com. Heavy bot detection.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Yahoo Auctions Japan",
@@ -3073,7 +3083,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Heavy bot wall; filter Condition to Renewed or Used; third-party used sellers appear in normal results.",
-  "segment": "us-marketplaces"
+  "segment": "us-marketplaces",
+  "walled": true
  },
  {
   "name": "Computer Parts Liquidation (liqpa.com)",
@@ -3416,7 +3427,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Restored (refurbished) tab; PerimeterX bot challenge common.",
-  "segment": "us-marketplaces"
+  "segment": "us-marketplaces",
+  "walled": true
  },
  {
   "name": "UsedITHardware.com",
@@ -3471,7 +3483,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Country eBay domain. Same search path as eBay.com. Heavy bot detection.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Goofish (Xianyu)",
@@ -3795,7 +3808,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Country eBay domain. Same search path as eBay.com. Heavy bot detection.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Carousell Philippines",
@@ -3937,7 +3951,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Country eBay domain. Same search path as eBay.com. Heavy bot detection.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Lowyat.NET Computers Garage Sales",
@@ -4001,7 +4016,8 @@
   ],
   "loginToBrowse": false,
   "notes": "Dominant Polish marketplace. Template from memory. Known for captcha and bot challenges on automated traffic.",
-  "segment": "europe"
+  "segment": "europe",
+  "walled": true
  },
  {
   "name": "Mudah.my",

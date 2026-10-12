@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Live activities: realistic multi-step jobs on real eBay, performed by the real agent on
- * the free model pair, scored only from what the run log shows the agent did.
+ * Live activities: realistic multi-step jobs on real shop-like sites, performed by the real
+ * agent on the free model pair, scored only from what the run log shows the agent did.
  *
  *   node scripts/harness/activities.mjs list
  *   node scripts/harness/activities.mjs task  --activity <id>            -> {url, prompt, options}
@@ -9,10 +9,16 @@
  *   node scripts/harness/activities.mjs score --activity <id> --runlog <file>
  *        [--artifacts <dir>] [--json <out>] [--history <history.jsonl>]
  *
+ * The default tested path is the generic set — browse, filter_sort, site_median,
+ * compare_sites — which works on any shop-like site in sites.json. The ebay_* activities
+ * are legacy: coupled to eBay URL params and sign-in quirks, they are listed as such and
+ * building one takes an explicit `--legacy` on `task`. Scoring a saved legacy run needs no
+ * opt-in — old runs keep their verdicts.
+ *
  * `live` prints one line per step as events arrive. `score` prints the verdict, the
  * telemetry, and the workflow and token waste the log shows, and compares against the
  * last run of the same activity in --history. Exit status of `score`: 0 pass, 1 fail,
- * 3 invalid (the site, not the agent, made the run meaningless: a CAPTCHA, signed out).
+ * 3 invalid (the site, not the agent, made the run meaningless: a bot wall, signed out).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -58,12 +64,6 @@ const parseUrl = (u) => {
   }
 };
 
-/** eBay item id from any listing URL shape (/itm/123, /itm/slug/123, ?item=123). */
-export function itemId(u) {
-  const m = String(u).match(/\/itm\/(?:[^/?#]+\/)?(\d{9,})/) ?? String(u).match(/[?&]item=(\d{9,})/);
-  return m ? m[1] : null;
-}
-
 export function parseSummary(raw) {
   if (raw && typeof raw === 'object') return { ok: true, value: raw };
   if (typeof raw !== 'string') return { ok: false, error: 'no done summary' };
@@ -96,27 +96,9 @@ const WRITE_TOOLS = new Set(['click', 'hover', 'type', 'press', 'select', 'downl
 
 /* ------------------------------------------------------------------ activities */
 
-const onEbay = (u) => /(^|\.)ebay\.com$/.test(parseUrl(u)?.hostname ?? '');
-const searchUrls = (urls) => urls.filter((u) => onEbay(u) && parseUrl(u)?.searchParams.get('_nkw'));
-
 /**
- * Signed out, or stopped by a CAPTCHA or bot wall: the site, not the agent, made the run
- * meaningless. Only when the run ended still behind the wall: eBay often shows a
- * challenge that clears itself, and a run that got past it is scored normally.
+ * Used-hardware queries the browse activity rotates through.
  */
-function invalidReason(events, { needsSignIn = false } = {}) {
-  const last = of(events, 'observation').map((o) => o.url).filter(Boolean).at(-1) ?? urlsVisited(events).at(-1) ?? '';
-  const wall = /splashui\/(captcha|challenge)|\/captcha/i;
-  const signin = /signin\.ebay\.com|[?&]ru=https?%3A%2F%2Fsignin\.ebay\.com/i;
-  // A signed-in activity that was ever sent to sign-in cannot be scored on what it read.
-  if (needsSignIn && urlsVisited(events).some((u) => signin.test(u))) return 'not signed in to eBay (sent to sign-in)';
-  if (wall.test(last)) return 'stopped by an eBay CAPTCHA';
-  return null;
-}
-
-/* ---------------------------------------------- browse: any site, the everyday test */
-
-/** Used-hardware queries the browse activity rotates through. */
 export const QUERIES = [
   'DDR4 32GB 3200 RAM',
   'DDR5 32GB RAM',
@@ -285,7 +267,10 @@ export function rankSites(sites, history, { filter = () => true } = {}) {
   const ranked = usable
     .map((s, i) => {
       const f = familyOf(hostOf(s.url));
-      return { s, f, order: lastUsed.has(f) ? lastUsed.get(f) : -1e6 + i };
+      // Never-tested operators first, least recently tested next. Among the never-tested,
+      // walled sites (CAPTCHA and bot walls, per sites.json) go last: a fresh history
+      // should not start a run on a site that blocks it.
+      return { s, f, order: lastUsed.has(f) ? lastUsed.get(f) : -1e6 + i + (s.walled ? 1e5 : 0) };
     })
     .sort((a, b) => a.order - b.order);
   // One site per operator per batch.
@@ -311,7 +296,10 @@ function findSite(sites, host) {
 /* ---------------------------------------------- multi-step: filter, median, compare */
 
 // Query parameters that sorting or filtering a results list sets, across common sites.
-const FILTER_PARAM = /sort|order|price|min|max|cond|filter|facet|refine|_sop|_udhi|_udlo|^s$|^o$|^f$/i;
+// eBay's own params (_sop, _udhi, _udlo) are deliberately absent: those belong to the
+// legacy ebay_* scorers, and a generic check should not score an eBay param as generic
+// filter evidence.
+const FILTER_PARAM = /sort|order|price|min|max|cond|filter|facet|refine|^s$|^o$|^f$/i;
 const FILTER_PATH = /\/(sort|price|filter|condition|used|refurbished)[-_/]|[-_/](lowest|low-to-high|price-asc|price-low)/i;
 const PAGE_PARAM = /^(page|pg|p|_pgn|pagenum|pageno|paged|pagenumber)$/i;
 
@@ -478,6 +466,38 @@ export function compareChecks(events, { hosts, query }) {
   ];
 }
 
+/* ---------------------------------------- legacy eBay activities: opt-in via --legacy */
+
+/**
+ * Everything eBay-specific lives here, used only by the ebay_* scorers below: the _nkw /
+ * LH_BIN / LH_Sold / _udhi URL params, /itm/ item ids, and the sign-in and CAPTCHA walls.
+ * The generic checks above must not depend on any of it.
+ */
+
+const onEbay = (u) => /(^|\.)ebay\.com$/.test(parseUrl(u)?.hostname ?? '');
+const searchUrls = (urls) => urls.filter((u) => onEbay(u) && parseUrl(u)?.searchParams.get('_nkw'));
+
+/** eBay item id from any listing URL shape (/itm/123, /itm/slug/123, ?item=123). */
+export function itemId(u) {
+  const m = String(u).match(/\/itm\/(?:[^/?#]+\/)?(\d{9,})/) ?? String(u).match(/[?&]item=(\d{9,})/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Signed out, or stopped by a CAPTCHA or bot wall: the site, not the agent, made the run
+ * meaningless. Only when the run ended still behind the wall: eBay often shows a
+ * challenge that clears itself, and a run that got past it is scored normally.
+ */
+function invalidReason(events, { needsSignIn = false } = {}) {
+  const last = of(events, 'observation').map((o) => o.url).filter(Boolean).at(-1) ?? urlsVisited(events).at(-1) ?? '';
+  const wall = /splashui\/(captcha|challenge)|\/captcha/i;
+  const signin = /signin\.ebay\.com|[?&]ru=https?%3A%2F%2Fsignin\.ebay\.com/i;
+  // A signed-in activity that was ever sent to sign-in cannot be scored on what it read.
+  if (needsSignIn && urlsVisited(events).some((u) => signin.test(u))) return 'not signed in to eBay (sent to sign-in)';
+  if (wall.test(last)) return 'stopped by an eBay CAPTCHA';
+  return null;
+}
+
 export const ACTIVITIES = {
   browse: {
     title: 'Open a site, search it, open a listing, report it (any site; rotates)',
@@ -526,6 +546,7 @@ export const ACTIVITIES = {
 
   ebay_compare: {
     title: 'Search, filter and compare three listings',
+    legacy: true,
     url: 'https://www.ebay.com/',
     maxSteps: 40,
     prompt: [
@@ -566,6 +587,7 @@ export const ACTIVITIES = {
 
   ebay_watchlist: {
     title: 'Read my watchlist, signed in, read-only',
+    legacy: true,
     url: 'https://www.ebay.com/mye/myebay/watchlist',
     maxSteps: 25,
     options: { readOnly: true },
@@ -595,6 +617,7 @@ export const ACTIVITIES = {
 
   ebay_csv: {
     title: 'Extract a results page to a CSV file',
+    legacy: true,
     url: 'https://www.ebay.com/sch/i.html?_nkw=nikon+f3+camera',
     maxSteps: 30,
     prompt: [
@@ -637,6 +660,7 @@ export const ACTIVITIES = {
 
   ebay_sold_median: {
     title: 'Median sold price across two pages of sold listings',
+    legacy: true,
     url: 'https://www.ebay.com/',
     maxSteps: 40,
     prompt: [
@@ -928,13 +952,18 @@ async function main(argv) {
     return 0;
   }
   if (cmd === 'list') {
-    for (const [id, a] of Object.entries(ACTIVITIES)) console.log(`${id.padEnd(18)} ${a.title}`);
+    for (const [id, a] of Object.entries(ACTIVITIES)) console.log(`${id.padEnd(18)} ${a.legacy ? '[legacy] ' : ''}${a.title}`);
     return 0;
   }
   if (cmd === 'task') {
     const id = flag(argv, 'activity');
     let a = ACTIVITIES[id];
     if (!a) return console.error(`unknown activity; one of ${Object.keys(ACTIVITIES).join(', ')}`), 2;
+    // Legacy eBay activities are opt-in: the everyday path is the generic set on sites.json.
+    if (a.legacy && !argv.includes('--legacy')) {
+      console.error(`${id} is a legacy eBay activity; pass --legacy to opt in (score --activity still accepts old runs). Default path: ${Object.keys(ACTIVITIES).filter((k) => !ACTIVITIES[k].legacy).join(', ')}`);
+      return 2;
+    }
     if (a.dynamic) {
       const sites = JSON.parse(fs.readFileSync(SITES_FILE, 'utf8'));
       const historyFile = flag(argv, 'history');

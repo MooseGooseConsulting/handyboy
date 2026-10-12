@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 // The scorer is a plain Node script so live.sh can run it without a build step.
 // @ts-ignore -- untyped .mjs
-import { familyOf, filterEvidence, highestPage, listingKey, nextBrowse, scoreboard, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
+import { ACTIVITIES, familyOf, filterEvidence, highestPage, listingKey, nextBrowse, scoreboard, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
 
 type Ev = Record<string, unknown>;
 
@@ -27,113 +29,9 @@ function log(startUrl: string, steps: Array<Ev | [string, Record<string, unknown
 }
 
 const obs = (url: string): Ev => ({ kind: 'observation', mode: 'dom', url, tokens: 100 });
-const SEARCH = 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1&LH_BIN=1&_udhi=250';
-const ITEMS = ['https://www.ebay.com/itm/111111111111', 'https://www.ebay.com/itm/222222222222', 'https://www.ebay.com/itm/333333333333'];
-const rows = ITEMS.map((url, i) => ({ title: `AE-1 #${i}`, price: '$199.00', shipping: 'Free', seller: 's', url }));
+const failed = (r: { checks: Array<{ ok: boolean; name: string }> }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 
-describe('live activity scoring', () => {
-  it('passes a compare run that used the filters, opened three listings and reported exactly those', () => {
-    const events = log('https://www.ebay.com/', [
-      ['navigate', { url: SEARCH }],
-      ...ITEMS.map((u) => obs(u)),
-      ['done', { summary: JSON.stringify(rows) }],
-    ]);
-    const r = scoreActivity('ebay_compare', events);
-    expect(r.checks.filter((c: { ok: boolean }) => !c.ok)).toEqual([]);
-    expect(r.verdict).toBe('pass');
-  });
-
-  it('fails a compare run that claims success in prose without having applied a filter or opened a listing', () => {
-    const events = log('https://www.ebay.com/', [
-      ['navigate', { url: 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1+film+camera' }],
-      ['click', { ref: 'e12' }],
-      ['done', { summary: 'Collected three Canon AE-1 listings as required.' }],
-    ]);
-    const r = scoreActivity('ebay_compare', events);
-    expect(r.verdict).toBe('fail');
-    const failed = r.checks.filter((c: { ok: boolean }) => !c.ok).map((c: { name: string }) => c.name);
-    expect(failed).toEqual(expect.arrayContaining(["used eBay's Buy It Now filter", 'opened at least three distinct listings', 'reported three listings as JSON']));
-    expect(r.stuckAt).toBe('verification');
-  });
-
-  it('fails a compare run whose reported listings were never opened, however well formed', () => {
-    const invented = rows.map((row, i) => ({ ...row, url: `https://www.ebay.com/itm/99999999999${i}` }));
-    const events = log('https://www.ebay.com/', [['navigate', { url: SEARCH }], ...ITEMS.map((u) => obs(u)), ['done', { summary: JSON.stringify(invented) }]]);
-    const grounded = scoreActivity('ebay_compare', events).checks.find((c: { name: string }) => c.name.startsWith('every reported listing'));
-    expect(grounded.ok).toBe(false);
-    expect(grounded.detail).toBe('0/3 reported urls were visited');
-  });
-
-  it('marks a run invalid only when it ended still behind an eBay challenge', () => {
-    const cleared = log('https://www.ebay.com/', [obs('https://www.ebay.com/splashui/challenge?ap=1'), obs(SEARCH), ['done', { summary: '[]' }]]);
-    expect(scoreActivity('ebay_compare', cleared).invalid).toBeNull();
-
-    const stuck = log('https://www.ebay.com/', [obs(SEARCH), obs('https://www.ebay.com/splashui/captcha?ap=1')], 'blocked');
-    const r = scoreActivity('ebay_compare', stuck);
-    expect(r.verdict).toBe('invalid');
-    expect(r.invalid).toBe('stopped by an eBay CAPTCHA');
-  });
-
-  it('marks the watchlist invalid when the run was ever sent to sign-in, and fails it for any write tool', () => {
-    const signedOut = log('https://www.ebay.com/mye/myebay/watchlist', [obs('https://signin.ebay.com/ws/eBayISAPI.dll?SignIn'), ['done', { summary: '[]' }]]);
-    expect(scoreActivity('ebay_watchlist', signedOut).invalid).toBe('not signed in to eBay (sent to sign-in)');
-
-    const wrote = log('https://www.ebay.com/mye/myebay/watchlist', [obs('https://www.ebay.com/mye/myebay/watchlist'), ['click', { ref: 'e3' }], ['done', { summary: '[]' }]]);
-    const r = scoreActivity('ebay_watchlist', wrote);
-    expect(r.verdict).toBe('fail');
-    expect(r.checks.find((c: { name: string }) => c.name.startsWith('changed nothing')).detail).toBe('click');
-  });
-
-  it('passes the CSV activity only on a saved file with a header and ten distinct listing rows', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'act-'));
-    const file = path.join(dir, 'ebay-listings.csv');
-    const lines = ['title,price,url', ...Array.from({ length: 12 }, (_, i) => `"Nikon F3 ${i}","$400",https://www.ebay.com/itm/8400119208${String(i).padStart(2, '0')}`)];
-    fs.writeFileSync(file, lines.join('\n'));
-    const events = log('https://www.ebay.com/sch/i.html?_nkw=nikon+f3+camera', [
-      ['run_userscript', { scriptId: 'x' }],
-      { kind: 'file.saved', filename: 'ebay-listings.csv', path: file, bytes: 900 },
-      ['done', { summary: 'Saved ebay-listings.csv with 12 rows' }],
-    ]);
-    expect(scoreActivity('ebay_csv', events).verdict).toBe('pass');
-
-    const claimed = log('https://www.ebay.com/sch/i.html?_nkw=nikon+f3+camera', [['run_userscript', { scriptId: 'x' }], ['done', { summary: 'Saved ebay-listings.csv with 50 rows' }]]);
-    expect(scoreActivity('ebay_csv', claimed).checks[0]).toMatchObject({ ok: false, detail: 'no file.saved event for a .csv' });
-  });
-
-  it('requires page 2 of sold results and a consistent median for the sold-price activity', () => {
-    const sold = 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1&LH_Sold=1&LH_Complete=1';
-    const events = log('https://www.ebay.com/', [
-      ['navigate', { url: sold }],
-      ['navigate', { url: `${sold}&_pgn=2` }],
-      ['done', { summary: '{"median": 150, "count": 40, "low": 60, "high": 320}' }],
-    ]);
-    expect(scoreActivity('ebay_sold_median', events).verdict).toBe('pass');
-
-    const onePage = log('https://www.ebay.com/', [['navigate', { url: sold }], ['done', { summary: '{"median": 400, "count": 40, "low": 60, "high": 320}' }]]);
-    const failed = scoreActivity('ebay_sold_median', onePage).checks.filter((c: { ok: boolean }) => !c.ok).map((c: { name: string }) => c.name);
-    expect(failed).toEqual(['read a second page of sold results', 'low <= median <= high, all above $0']);
-  });
-});
-
-describe('run telemetry and waste', () => {
-  it('reports per-role tokens and cache share, and calls out low cache share and oversized tool results', () => {
-    const events = log('https://www.ebay.com/', [
-      { kind: 'model.usage', role: 'follower', inputTokens: 30_000, cachedTokens: 3_000, outputTokens: 80, promptChars: 80_000 },
-      { kind: 'model.usage', role: 'leader', inputTokens: 6_000, cachedTokens: 0, outputTokens: 200, promptChars: 10_000 },
-      ['run_userscript', { scriptId: 'x' }, true, 55_000],
-      ['run_userscript', { scriptId: 'x' }, true, 55_000],
-    ]);
-    const t = telemetry(events);
-    expect(t.byRole.follower).toMatchObject({ calls: 1, inputTokens: 30_000, cacheShare: 0.1, maxPromptChars: 80_000 });
-    const w = waste(events, t).join('\n');
-    expect(w).toContain('follower cache share only 10% of 30000 input tokens');
-    expect(w).toContain('leader got no cache hits on 6000 input tokens');
-    expect(w).toContain('2 tool result(s) over 20k chars fed to the model');
-    expect(w).toContain('repeated identical calls: run_userscript({"scriptId":"x"}) ×2');
-  });
-});
-
-describe('browse: any site, rotating', () => {
+describe('generic activities: browse, any shop-like site', () => {
   const params = { host: 'techmikeny.com', query: 'DDR4 32GB 3200 RAM', url: 'https://techmikeny.com', site: 'TechMikeNY' };
   const results = 'https://techmikeny.com/search?q=ddr4+32gb+3200+ram';
   const listing = 'https://techmikeny.com/products/32gb-ddr4-3200-rdimm';
@@ -199,52 +97,18 @@ describe('browse: any site, rotating', () => {
     expect(scoreActivity('browse', events, { params }).invalid).toBe('stopped by a bot wall or CAPTCHA');
   });
 
-  it('treats every country domain of one operator as one site', () => {
-    expect(['www.ebay.co.uk', 'ebay.de', 'ebay.com', 'shop.ebay.com.au'].map(familyOf)).toEqual(['ebay', 'ebay', 'ebay', 'ebay']);
-    expect(familyOf('uk.webuy.com')).toBe('webuy');
-  });
-
-  it('rotates to operators not tested recently, one site per operator per batch', () => {
-    const sites = [
-      { name: 'eBay', url: 'https://www.ebay.com' },
-      { name: 'eBay UK', url: 'https://www.ebay.co.uk' },
-      { name: 'A', url: 'https://a-parts.com' },
-      { name: 'Login only', url: 'https://walled.example', loginToBrowse: true },
-      { name: 'B', url: 'https://b-surplus.de' },
-    ];
-    const history = [{ activity: 'ebay_csv' }, { activity: 'browse', params: { host: 'a-parts.com' } }];
-    const picks = [0, 1, 2].map((i) => nextBrowse(sites, history, i).params.host);
-    expect(picks).toEqual(['b-surplus.de', 'ebay.com', 'a-parts.com']);
+  it('carries no eBay-coupled assumptions: eBay params are not generic filter evidence', () => {
+    // _udhi/_udlo/_sop are eBay's params; the generic check only scores common ones.
+    expect(filterEvidence([results, `${results}&_udhi=250`], params.query)).toBeNull();
+    expect(filterEvidence([results, `${results}&_sop=price`], params.query)).toBeNull();
+    expect(filterEvidence([results, `${results}&sort=price_asc`], params.query)).toBe('sort=price_asc');
   });
 });
 
-describe('scoreboard', () => {
-  const run = (leader: string, follower: string, host: string, verdict: string, score: number) => ({
-    activity: 'browse',
-    verdict,
-    score,
-    params: { host },
-    telemetry: { modelCalls: 10, seconds: 60, byRole: { leader: { models: [leader], inputTokens: 1000 }, follower: { models: [follower], inputTokens: 9000 } } },
-  });
-
-  it('ranks model pairs by pass rate over valid runs, keeping invalid runs out of it', () => {
-    const board = scoreboard([
-      run('nvidia/a:free', 'nvidia/b:free', 'mercari.com', 'pass', 1),
-      run('nvidia/a:free', 'nvidia/b:free', 'kleinanzeigen.de', 'invalid', 0),
-      run('google/g:free', 'google/h:free', 'mercari.com', 'fail', 0.5),
-    ]);
-    const lines = board.split('\n');
-    expect(lines[3]).toMatch(/^a \+ b\s+1\/1\s+1\s+100%/);
-    expect(lines[4]).toContain('mercari.com P   kleinanzeigen.de i');
-    expect(lines[5]).toMatch(/^g \+ h\s+0\/1\s+1\s+50%/);
-  });
-});
-
-describe('multi-step activities', () => {
+describe('generic activities: multi-step, filter_sort / site_median / compare_sites', () => {
   const query = 'DDR4 32GB 3200 RAM';
   const results = 'https://shop.test/search?q=ddr4+32gb+3200+ram';
   const ok = (price: string) => ({ title: `Crucial 32GB DDR4 3200 RAM kit ${price}`, price });
-  const failed = (r: { checks: Array<{ ok: boolean; name: string }> }) => r.checks.filter((c) => !c.ok).map((c) => c.name);
 
   describe('filter_sort', () => {
     const params = { host: 'shop.test', url: 'https://shop.test/', query, site: 'Shop' };
@@ -331,5 +195,171 @@ describe('multi-step activities', () => {
       const history = [{ activity: 'compare_sites', params }];
       expect(nextBrowse(sites, history, 0)!.params.host).toBe('d-ram.com');
     });
+  });
+});
+
+describe('run telemetry and waste', () => {
+  it('reports per-role tokens and cache share, and calls out low cache share and oversized tool results', () => {
+    const events = log('https://shop.test/', [
+      { kind: 'model.usage', role: 'follower', inputTokens: 30_000, cachedTokens: 3_000, outputTokens: 80, promptChars: 80_000 },
+      { kind: 'model.usage', role: 'leader', inputTokens: 6_000, cachedTokens: 0, outputTokens: 200, promptChars: 10_000 },
+      ['run_userscript', { scriptId: 'x' }, true, 55_000],
+      ['run_userscript', { scriptId: 'x' }, true, 55_000],
+    ]);
+    const t = telemetry(events);
+    expect(t.byRole.follower).toMatchObject({ calls: 1, inputTokens: 30_000, cacheShare: 0.1, maxPromptChars: 80_000 });
+    const w = waste(events, t).join('\n');
+    expect(w).toContain('follower cache share only 10% of 30000 input tokens');
+    expect(w).toContain('leader got no cache hits on 6000 input tokens');
+    expect(w).toContain('2 tool result(s) over 20k chars fed to the model');
+    expect(w).toContain('repeated identical calls: run_userscript({"scriptId":"x"}) ×2');
+  });
+});
+
+describe('site rotation', () => {
+  it('treats every country domain of one operator as one site', () => {
+    expect(['www.ebay.co.uk', 'ebay.de', 'ebay.com', 'shop.ebay.com.au'].map(familyOf)).toEqual(['ebay', 'ebay', 'ebay', 'ebay']);
+    expect(familyOf('uk.webuy.com')).toBe('webuy');
+  });
+
+  it('rotates to operators not tested recently, one site per operator per batch', () => {
+    const sites = [
+      { name: 'eBay', url: 'https://www.ebay.com' },
+      { name: 'eBay UK', url: 'https://www.ebay.co.uk' },
+      { name: 'A', url: 'https://a-parts.com' },
+      { name: 'Login only', url: 'https://walled.example', loginToBrowse: true },
+      { name: 'B', url: 'https://b-surplus.de' },
+    ];
+    const history = [{ activity: 'ebay_csv' }, { activity: 'browse', params: { host: 'a-parts.com' } }];
+    const picks = [0, 1, 2].map((i) => nextBrowse(sites, history, i).params.host);
+    expect(picks).toEqual(['b-surplus.de', 'ebay.com', 'a-parts.com']);
+  });
+
+  it('does not start a fresh history on a walled site; the walled ones come last among the never-tested', () => {
+    const sites = [
+      { name: 'Walled big shop', url: 'https://big-wall.example', walled: true },
+      { name: 'Open shop', url: 'https://open-shop.example' },
+      { name: 'Open two', url: 'https://open-two.example' },
+      { name: 'Walled small', url: 'https://small-wall.example', walled: true },
+    ];
+    const picks = [0, 1, 2, 3].map((i) => nextBrowse(sites, [], i)?.params.host);
+    expect(picks).toEqual(['open-shop.example', 'open-two.example', 'big-wall.example', 'small-wall.example']);
+  });
+
+  it('sites.json flags the bot-walled operators, so a fresh rotation starts on an open site', () => {
+    const sites = JSON.parse(fs.readFileSync(new URL('../scripts/harness/sites.json', import.meta.url), 'utf8'));
+    const walledHosts = sites.filter((s) => s.walled).map((s) => s.host);
+    // One operator, all domains: flagging one eBay domain would not help, the rotation
+    // would pick the first unflagged sibling of the same family.
+    expect(walledHosts).toEqual(expect.arrayContaining(['ebay.com', 'ebay.co.uk', 'ebay.de', 'amazon.com', 'walmart.com']));
+    expect(nextBrowse(sites, [], 0)!.params.host).not.toMatch(/ebay|amazon\.com|walmart\.com/);
+    // The open refurbishers the everyday loop was built for are reachable.
+    expect(nextBrowse(sites, [], 0)!.params.host).toBe('techmikeny.com');
+  });
+});
+
+describe('scoreboard', () => {
+  const run = (leader: string, follower: string, host: string, verdict: string, score: number) => ({
+    activity: 'browse',
+    verdict,
+    score,
+    params: { host },
+    telemetry: { modelCalls: 10, seconds: 60, byRole: { leader: { models: [leader], inputTokens: 1000 }, follower: { models: [follower], inputTokens: 9000 } } },
+  });
+
+  it('ranks model pairs by pass rate over valid runs, keeping invalid runs out of it', () => {
+    const board = scoreboard([
+      run('nvidia/a:free', 'nvidia/b:free', 'mercari.com', 'pass', 1),
+      run('nvidia/a:free', 'nvidia/b:free', 'kleinanzeigen.de', 'invalid', 0),
+      run('google/g:free', 'google/h:free', 'mercari.com', 'fail', 0.5),
+    ]);
+    const lines = board.split('\n');
+    expect(lines[3]).toMatch(/^a \+ b\s+1\/1\s+1\s+100%/);
+    expect(lines[4]).toContain('mercari.com P   kleinanzeigen.de i');
+    expect(lines[5]).toMatch(/^g \+ h\s+0\/1\s+1\s+50%/);
+  });
+});
+
+describe('legacy eBay scorers (opt-in, eBay-coupled)', () => {
+  const SEARCH = 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1&LH_BIN=1&_udhi=250';
+  const ITEMS = ['https://www.ebay.com/itm/111111111111', 'https://www.ebay.com/itm/222222222222', 'https://www.ebay.com/itm/333333333333'];
+  const rows = ITEMS.map((url, i) => ({ title: `AE-1 #${i}`, price: '$199.00', shipping: 'Free', seller: 's', url }));
+
+  it('ebay_compare passes a filtered run that reported what it opened, and marks a run still behind a CAPTCHA invalid', () => {
+    const events = log('https://www.ebay.com/', [
+      ['navigate', { url: SEARCH }],
+      ...ITEMS.map((u) => obs(u)),
+      ['done', { summary: JSON.stringify(rows) }],
+    ]);
+    expect(scoreActivity('ebay_compare', events).verdict).toBe('pass');
+
+    const cleared = log('https://www.ebay.com/', [obs('https://www.ebay.com/splashui/challenge?ap=1'), obs(SEARCH), ['done', { summary: '[]' }]]);
+    expect(scoreActivity('ebay_compare', cleared).invalid).toBeNull();
+
+    const stuck = log('https://www.ebay.com/', [obs(SEARCH), obs('https://www.ebay.com/splashui/captcha?ap=1')], 'blocked');
+    expect(scoreActivity('ebay_compare', stuck)).toMatchObject({ verdict: 'invalid', invalid: 'stopped by an eBay CAPTCHA' });
+  });
+
+  it('ebay_compare fails reports of listings that were never opened', () => {
+    const invented = rows.map((row, i) => ({ ...row, url: `https://www.ebay.com/itm/99999999999${i}` }));
+    const events = log('https://www.ebay.com/', [['navigate', { url: SEARCH }], ...ITEMS.map((u) => obs(u)), ['done', { summary: JSON.stringify(invented) }]]);
+    const grounded = scoreActivity('ebay_compare', events).checks.find((c: { name: string }) => c.name.startsWith('every reported listing'));
+    expect(grounded.ok).toBe(false);
+    expect(grounded.detail).toBe('0/3 reported urls were visited');
+  });
+
+  it('ebay_watchlist goes invalid when sent to sign-in and fails on any write tool', () => {
+    const signedOut = log('https://www.ebay.com/mye/myebay/watchlist', [obs('https://signin.ebay.com/ws/eBayISAPI.dll?SignIn'), ['done', { summary: '[]' }]]);
+    expect(scoreActivity('ebay_watchlist', signedOut).invalid).toBe('not signed in to eBay (sent to sign-in)');
+
+    const wrote = log('https://www.ebay.com/mye/myebay/watchlist', [obs('https://www.ebay.com/mye/myebay/watchlist'), ['click', { ref: 'e3' }], ['done', { summary: '[]' }]]);
+    const r = scoreActivity('ebay_watchlist', wrote);
+    expect(r.verdict).toBe('fail');
+    expect(r.checks.find((c: { name: string }) => c.name.startsWith('changed nothing')).detail).toBe('click');
+  });
+
+  it('ebay_csv demands the saved file and ebay_sold_median the second page of sold results', () => {
+    const claimed = log('https://www.ebay.com/sch/i.html?_nkw=nikon+f3+camera', [['run_userscript', { scriptId: 'x' }], ['done', { summary: 'Saved ebay-listings.csv with 50 rows' }]]);
+    expect(scoreActivity('ebay_csv', claimed).checks[0]).toMatchObject({ ok: false, detail: 'no file.saved event for a .csv' });
+
+    const sold = 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1&LH_Sold=1&LH_Complete=1';
+    const onePage = log('https://www.ebay.com/', [['navigate', { url: sold }], ['done', { summary: '{"median": 400, "count": 40, "low": 60, "high": 320}' }]]);
+    expect(failed(scoreActivity('ebay_sold_median', onePage))).toEqual(['read a second page of sold results', 'low <= median <= high, all above $0']);
+  });
+});
+
+describe('legacy opt-in gate', () => {
+  const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const script = path.join(ROOT, 'scripts/harness/activities.mjs');
+
+  it('marks every ebay_* activity legacy and the generic set first-class', () => {
+    for (const [id, a] of Object.entries(ACTIVITIES as Record<string, { legacy?: boolean }>)) {
+      if (id.startsWith('ebay_')) expect(a.legacy, id).toBe(true);
+      else expect(a.legacy, id).toBeUndefined();
+    }
+  });
+
+  it('list marks legacy activities; task refuses a legacy activity without --legacy', () => {
+    const list = execFileSync(process.execPath, [script, 'list'], { cwd: ROOT, encoding: 'utf8' });
+    expect(list).toMatch(/^ebay_compare\s+\[legacy\] /m);
+
+    const refused = spawnSync(process.execPath, [script, 'task', '--activity', 'ebay_compare'], { cwd: ROOT, encoding: 'utf8' });
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain('legacy eBay activity; pass --legacy to opt in');
+
+    const optedIn = JSON.parse(execFileSync(process.execPath, [script, 'task', '--activity', 'ebay_compare', '--legacy'], { cwd: ROOT, encoding: 'utf8' }));
+    expect(optedIn).toMatchObject({ activity: 'ebay_compare', url: 'https://www.ebay.com/' });
+  });
+
+  it('task builds a generic activity without any flag, and score still rescues old legacy runs without --legacy', () => {
+    const browse = JSON.parse(execFileSync(process.execPath, [script, 'task', '--activity', 'browse'], { cwd: ROOT, encoding: 'utf8' }));
+    expect(browse).toMatchObject({ activity: 'browse', options: { maxSteps: 20, observe: 'dom' } });
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-'));
+    const runlog = path.join(dir, 'runlog.jsonl');
+    fs.writeFileSync(runlog, log('https://www.ebay.com/', [['navigate', { url: 'https://www.ebay.com/sch/i.html?_nkw=canon+ae-1' }], ['done', { summary: '[]' }]]).map((e) => JSON.stringify(e)).join('\n'));
+    const scored = spawnSync(process.execPath, [script, 'score', '--activity', 'ebay_compare', '--runlog', runlog], { cwd: ROOT, encoding: 'utf8' });
+    expect(scored.status).toBe(1); // a fail, not the exit 2 of a gated build
+    expect(scored.stdout).toContain('FAIL  ebay_compare');
   });
 });
