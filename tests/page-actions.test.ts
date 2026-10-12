@@ -4,6 +4,9 @@ import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { click, getBox, hover, press, resetPointerForTests, scroll, select, type } from '@/src/page/actions';
 import { resolveRef, snapshot } from '@/src/page/snapshot';
+import { PageDriver } from '@/src/page/driver';
+import type { ChromeApi } from '@/src/page/driver';
+import { recordTabReplaced, resetTabReplacements } from '@/src/page/tabReplacement';
 
 /**
  * Take a snapshot (the only thing that mints refs) and hand back the ref for `selector`.
@@ -347,6 +350,27 @@ describe('click', () => {
     }
   });
 
+  it('resolves the reported ref from the described dialog, not from an interactive child of it', () => {
+    document.body.innerHTML =
+      '<button>Search</button><div id="consent-banner" role="dialog"><p>We value your privacy</p><button>Accept</button></div>';
+    const banner = document.querySelector('#consent-banner') as HTMLElement;
+    const accept = banner.querySelector('button') as HTMLButtonElement;
+    const ref = refOf('button');
+    const orig = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    (document as unknown as { elementFromPoint: unknown }).elementFromPoint = () => accept;
+    try {
+      const res = click(ref);
+      expect(res.ok).toBe(false);
+      const reported = res.error?.match(/\[ref=(e\d+)\]/)?.[1];
+      expect(reported).toBeDefined();
+      // Acting on the reported ref must hit the dialog itself — clicking the child
+      // (the Accept button) would submit the consent instead of dealing with it.
+      expect(resolveRef(reported!)).toBe(banner);
+    } finally {
+      (document as unknown as { elementFromPoint: unknown }).elementFromPoint = orig;
+    }
+  });
+
   it('clicks into an open shadow root instead of mistaking the host for an occluder', () => {
     document.body.innerHTML = '<div id="host"></div>';
     const host = document.querySelector('#host') as HTMLElement;
@@ -657,6 +681,107 @@ describe('press', () => {
     expect(submits).toBe(0);
   });
 
+  it('Enter does not submit when the page cancels the keypress either', () => {
+    document.body.innerHTML = '<form action="/search"><input type="search" name="q" value="ddr4"></form>';
+    let submits = 0;
+    document.querySelector('form')!.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    const input = document.querySelector('input') as HTMLInputElement;
+    input.addEventListener('keypress', (e) => e.preventDefault());
+    input.focus();
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(submits).toBe(0);
+  });
+
+  it('Enter activates the form’s default submit button instead of submitting blind', () => {
+    document.body.innerHTML =
+      '<form action="/search"><input type="search" name="q" value="ddr4">' +
+      '<button type="submit" name="scope" value="products">Search</button></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const button = document.querySelector('button') as HTMLButtonElement;
+    (document.querySelector('input') as HTMLInputElement).focus();
+
+    let buttonClicks = 0;
+    let clickTarget: EventTarget | null = null;
+    button.addEventListener('click', (e) => {
+      buttonClicks += 1;
+      clickTarget = e.target;
+    });
+    const requestSubmit = vi.spyOn(form, 'requestSubmit');
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+
+    expect(press('Enter')).toEqual({ ok: true });
+    // The default button was activated — its own click ran — and the form submitted
+    // through it, carrying its handler and its name/value/formaction with it.
+    expect(buttonClicks).toBe(1);
+    expect(clickTarget).toBe(button);
+    expect(requestSubmit).not.toHaveBeenCalled();
+    expect(submits).toBe(1);
+  });
+
+  it('skips disabled submit buttons and activates the first enabled one in tree order', () => {
+    document.body.innerHTML =
+      '<form><input type="text">' +
+      '<button type="submit" disabled>First</button>' +
+      '<button type="submit">Second</button></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const first = document.querySelector('button:nth-of-type(1)') as HTMLButtonElement;
+    const second = document.querySelector('button:nth-of-type(2)') as HTMLButtonElement;
+    (document.querySelector('input') as HTMLInputElement).focus();
+
+    let firstClicks = 0;
+    let secondClicks = 0;
+    first.addEventListener('click', () => {
+      firstClicks += 1;
+    });
+    second.addEventListener('click', () => {
+      secondClicks += 1;
+    });
+    form.addEventListener('submit', (e) => e.preventDefault());
+
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(firstClicks).toBe(0);
+    expect(secondClicks).toBe(1);
+  });
+
+  it('does not submit a buttonless form with more than one field blocking implicit submission', () => {
+    document.body.innerHTML = '<form><input type="text" name="a"><input type="search" name="b"></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const requestSubmit = vi.spyOn(form, 'requestSubmit');
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    (document.querySelector('input') as HTMLInputElement).focus();
+    expect(press('Enter')).toEqual({ ok: true });
+    // Two visible text fields never submit on Enter in a real browser; neither do we.
+    expect(requestSubmit).not.toHaveBeenCalled();
+    expect(submits).toBe(0);
+  });
+
+  it('counts only enabled, editable text fields as blocking, so a disabled or readonly sibling still submits', () => {
+    document.body.innerHTML =
+      '<form><input type="text">' +
+      '<input type="number" disabled>' +
+      '<input type="email" readonly></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    (document.querySelector('input') as HTMLInputElement).focus();
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(submits).toBe(1);
+  });
+
   it('inserts no character — real typing is the R-13 escalation, not this', () => {
     document.body.innerHTML = '<input type="text">';
     const input = document.querySelector('input') as HTMLInputElement;
@@ -911,5 +1036,48 @@ describe('triage: bubbling boundary events fire once', () => {
     // same transition also fired mouseout directly on the button, delivering
     // it twice with target button.
     expect(seen).toEqual([{ type: 'mouseout', target: s }]);
+  });
+});
+
+describe('driver: the op goes to the tab id re-resolved after injection', () => {
+  // Regression: `send()` resolved the tab id once, before `ensureInjected` awaited its
+  // ping/inject/ping round trips. A `tabs.onReplaced` swap recorded during those awaits
+  // left the op being sent to the dead id, failing "No tab with id" for the rest of the
+  // session.
+  it('re-resolves the tab id after the awaited injection check completes, not before', async () => {
+    resetTabReplacements();
+    let replaced = false;
+    const sentTo: number[] = [];
+    const api: ChromeApi = {
+      scripting: {
+        async executeScript() {
+          return [];
+        },
+      },
+      tabs: {
+        async sendMessage(tabId, message) {
+          if (message.op === 'ping' && !replaced) {
+            // Chrome reports the swap while the injection check is still in flight;
+            // the ping itself still goes through on the id it was addressed to.
+            replaced = true;
+            recordTabReplaced(2, 1);
+          }
+          sentTo.push(tabId);
+          if (message.op !== 'ping' && tabId === 1) throw new Error('No tab with id: 1');
+          return message.op === 'ping'
+            ? { ok: true, pong: true, url: '', title: '', devicePixelRatio: 1, width: 0, height: 0 }
+            : { ok: true };
+        },
+        update: async () => ({}),
+        get: async () => ({ windowId: 1 }),
+        captureVisibleTab: async () => 'data:image/png;base64,AAAA',
+        onUpdated: { addListener: () => {}, removeListener: () => {} },
+      },
+    };
+
+    const res = await new PageDriver(api).click(1, 'e1');
+    expect(res).toEqual({ ok: true });
+    // The op itself went to the replacement id; the dead id never got it.
+    expect(sentTo.at(-1)).toBe(2);
   });
 });
