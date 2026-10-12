@@ -35,8 +35,14 @@ else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/nanobrowser"; fi
 EXT_DIR="$ROOT/.output/chrome-mv3"
 CHROME="${NB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google-chrome || true)}"
 CHROME_DIR="${NB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
-LEADER="${NB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
-FOLLOWER="${NB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
+# Cold-start pair, used only until runs/history.jsonl has something to rotate. Chosen from
+# runs, not from a spec sheet: `laguna-s-2.1` on both seats took 3 of its 9 valid browse runs
+# at a mean score of 0.51 and 136k input tokens per run, against 1 of 11 at 0.45 and 202k for
+# the nemotron-ultra pair that used to sit here (see docs/research/live-model-pairs.md). It is
+# also the better-sampled of the two, which matters more than the smaller-gap winner.
+# Set NB_LIVE_LEADER/NB_LIVE_FOLLOWER to pin anything else, including a paid pair.
+LEADER="${NB_LIVE_LEADER:-poolside/laguna-s-2.1:free}"
+FOLLOWER="${NB_LIVE_FOLLOWER:-poolside/laguna-s-2.1:free}"
 # Without a pinned pair, rotate across the pairs runs/history.jsonl has already seen,
 # least recently used first: the everyday runs spread over models the way the site
 # rotation spreads them over sites, and no pair owns the default by inertia. Setting
