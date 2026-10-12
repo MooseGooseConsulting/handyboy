@@ -472,14 +472,16 @@ export class RunManager {
         // so a worker restart right after success cannot restore a stale prefix
         // and falsely mark the run interrupted.
         await (this.#persistTails.get(runId) ?? Promise.resolve());
-        if (this.#active?.runId === runId) this.#active = undefined;
         if (config.closeTabWhenDone) {
-          // After the terminal save, so nothing still reads the tab. currentTabId: Chrome
-          // may have swapped the tab's id during the run.
+          // The run and its tab stay reserved until the removal settles: clearing
+          // `#active` first would let a start racing the close resolve the active
+          // tab to the very tab that is mid-remove. `currentTabId`: Chrome may have
+          // swapped the tab's id during the run.
           await this.#deps.tabs.remove?.(currentTabId(tab.id)).catch((error: unknown) => {
             console.warn('[nanobrowser] could not close the run tab', error);
           });
         }
+        if (this.#active?.runId === runId) this.#active = undefined;
         return ended;
       });
 
