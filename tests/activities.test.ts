@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 // The scorer is a plain Node script so live.sh can run it without a build step.
 // @ts-ignore -- untyped .mjs
-import { familyOf, listingKey, nextBrowse, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
+import { familyOf, listingKey, nextBrowse, scoreboard, titleMatches, scoreActivity, telemetry, waste } from '../scripts/harness/activities.mjs';
 
 type Ev = Record<string, unknown>;
 
@@ -215,5 +215,27 @@ describe('browse: any site, rotating', () => {
     const history = [{ activity: 'ebay_csv' }, { activity: 'browse', params: { host: 'a-parts.com' } }];
     const picks = [0, 1, 2].map((i) => nextBrowse(sites, history, i).params.host);
     expect(picks).toEqual(['b-surplus.de', 'ebay.com', 'a-parts.com']);
+  });
+});
+
+describe('scoreboard', () => {
+  const run = (leader: string, follower: string, host: string, verdict: string, score: number) => ({
+    activity: 'browse',
+    verdict,
+    score,
+    params: { host },
+    telemetry: { modelCalls: 10, seconds: 60, byRole: { leader: { models: [leader], inputTokens: 1000 }, follower: { models: [follower], inputTokens: 9000 } } },
+  });
+
+  it('ranks model pairs by pass rate over valid runs, keeping invalid runs out of it', () => {
+    const board = scoreboard([
+      run('nvidia/a:free', 'nvidia/b:free', 'mercari.com', 'pass', 1),
+      run('nvidia/a:free', 'nvidia/b:free', 'kleinanzeigen.de', 'invalid', 0),
+      run('google/g:free', 'google/h:free', 'mercari.com', 'fail', 0.5),
+    ]);
+    const lines = board.split('\n');
+    expect(lines[3]).toMatch(/^a \+ b\s+1\/1\s+1\s+100%/);
+    expect(lines[4]).toContain('mercari.com P   kleinanzeigen.de i');
+    expect(lines[5]).toMatch(/^g \+ h\s+0\/1\s+1\s+50%/);
   });
 });
