@@ -146,6 +146,10 @@ export class PageDriver {
     } catch (err) {
       return { ok: false, error: `injection failed: ${errorOf(err)}` };
     }
+    // A `tabs.onReplaced` swap recorded while the entry ping and the executeScript above were
+    // in flight makes the id injected above the dead one; pinging it reports "no injected
+    // script" and fails a live injection the replacement tab would have answered on.
+    tabId = currentTabId(tabId);
     if (!(await this.ping(tabId))) {
       return { ok: false, error: 'injected script did not respond to ping' };
     }

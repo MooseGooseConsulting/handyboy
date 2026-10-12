@@ -137,6 +137,44 @@ describe('leader/follower cadence (R-04)', () => {
   });
 });
 
+describe('observation across a replan', () => {
+  it('sends the full snapshot again on the first step after a replan, not the unchanged-page note', async () => {
+    // Regression: the leader handed back `stepsSinceReplan: 0` but left `lastSnapshotDigest`
+    // set, so the first follower step after the replan took the "page unchanged" shortcut and
+    // told the model to reuse refs from a snapshot that observation compaction had already
+    // replaced with a placeholder. Live evidence: an ebay_compare run spent three failed
+    // clicks on "unknown or stale ref" right after a replan.
+    const prompts: string[] = [];
+    await harness({
+      planningInterval: 2,
+      maxSteps: 4,
+      follower: (call) => {
+        // The current turn is the last message; earlier turns' observations survive as
+        // history, so only the last message says what this step is being shown.
+        const last = call.messages.at(-1);
+        const blocks = Array.isArray(last?.content)
+          ? (last!.content as Array<{ type?: string; text?: string }>)
+          : [];
+        prompts.push(blocks.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n'));
+        return call.index < 2
+          ? { kind: 'tool', name: 'wait', args: { ms: 10, signal: 'CONTINUE', note: 'looking' } }
+          : { kind: 'tool', name: 'done', args: { summary: 'found the widget' } };
+      },
+    });
+
+    expect(prompts).toHaveLength(3);
+    const [first, second, afterReplan] = prompts;
+    // Steps 1 and 2 see the identical fake snapshot, so step 2 takes the shortcut.
+    expect(first).toContain('[e1] link "Example"');
+    expect(second).toContain('Page unchanged since step 1');
+    expect(second).not.toContain('[e1] link "Example"');
+    // The replan falls between 2 and 3: the digest is stale, so the observation is sent whole
+    // rather than referring the model at a snapshot that is no longer in its prompt.
+    expect(afterReplan).toContain('[e1] link "Example"');
+    expect(afterReplan).not.toContain('Page unchanged since step');
+  });
+});
+
 describe('follower-initiated handoff (R-03)', () => {
   it.each(['SUBGOAL_COMPLETE', 'RETURN_TO_LEADER'] as const)(
     'routes %s straight back to the leader',

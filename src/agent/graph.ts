@@ -847,6 +847,14 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
     subgoals,
     currentSubgoal,
     stepsSinceReplan: 0,
+    // A replan hands the Follower a fresh subgoal, and the digest from the previous one cannot
+    // describe the page it is about to see. Resetting it forces the first observation after
+    // the handoff to carry the full snapshot instead of `unchangedPageNote`, which asserts
+    // "refs from that snapshot still work" — the very snapshot that observation compaction
+    // has already replaced with a placeholder. Live evidence: an ebay_compare run burned
+    // three clicks on "unknown or stale ref" after a replan.
+    lastSnapshotDigest: null,
+    lastSnapshotStep: null,
     status: 'running',
   };
 };
