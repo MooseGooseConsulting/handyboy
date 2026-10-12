@@ -262,7 +262,8 @@ cmd_test() {
     # Pin everything the panel also stores, or its last choice leaks in: a Kilo source
     # would route the Nemotron ids to the wrong gateway, a read-only toggle would block
     # the writes a task's verdict requires.
-    local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter)
+    # closeTabWhenDone: every task opens a fresh tab; the extension closes it after the run.
+    local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter --option closeTabWhenDone=true)
     while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
       < <(jq -r '.options | {readOnly: false} + . | to_entries[] | "\(.key)=\(.value)"' "$tj")
 
@@ -341,10 +342,13 @@ cmd_test() {
 # the free pair, your Chrome. Each step prints as it happens; the verdict comes only from
 # what the run log shows, and the report names the workflow and token waste it saw.
 cmd_activities() {
-  local list=() repeat=1 a
+  local list=() repeat=1 a pin=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --repeat) repeat="$2"; shift 2 ;;
+      # Pin browse to one site and query, e.g. to compare model pairs on the same page.
+      --site) pin+=(--site "$2"); shift 2 ;;
+      --query) pin+=(--query "$2"); shift 2 ;;
       *) read -ra list <<<"$(tr ',' ' ' <<<"$1")"; shift ;;
     esac
   done
@@ -370,11 +374,11 @@ cmd_activities() {
     for trial in $(seq "$repeat"); do
       step "activity $a ($trial/$repeat)"
       local tj="$out/$a-$trial-task.json"
-      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" >"$tj" || { fail=$((fail + 1)); continue; }
+      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" "${pin[@]}" >"$tj" || { fail=$((fail + 1)); continue; }
       local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
       echo "$(jq -r .title "$tj")  ($url)"
       local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter
-        --option "leaderModel=$LEADER" --option "followerModel=$FOLLOWER")
+        --option "leaderModel=$LEADER" --option "followerModel=$FOLLOWER" --option closeTabWhenDone=true)
       while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
         < <(jq -r '.options | {readOnly: false} + . | to_entries[] | "\(.key)=\(.value)"' "$tj")
 
