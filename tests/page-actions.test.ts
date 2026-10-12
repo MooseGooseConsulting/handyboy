@@ -725,6 +725,77 @@ describe('press', () => {
     expect(submits).toBe(1);
   });
 
+  it('activates a typeless <button> — the Submit Button state is the default for button', () => {
+    document.body.innerHTML =
+      '<form><input type="search"><button>Search</button></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const button = document.querySelector('button') as HTMLButtonElement;
+    // jsdom agrees with the spec here: a typeless button reports type="submit" over the IDL.
+    expect(button.type).toBe('submit');
+    (document.querySelector('input') as HTMLInputElement).focus();
+
+    let clicks = 0;
+    button.addEventListener('click', () => {
+      clicks += 1;
+    });
+    const requestSubmit = vi.spyOn(form, 'requestSubmit');
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(clicks).toBe(1);
+    expect(requestSubmit).not.toHaveBeenCalled();
+    expect(submits).toBe(1);
+  });
+
+  it('normalizes a differently-cased or invalid button type attribute through the IDL', () => {
+    document.body.innerHTML =
+      '<form><input type="search"><button type="SUBMIT">Search</button></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const button = document.querySelector('button') as HTMLButtonElement;
+    (document.querySelector('input') as HTMLInputElement).focus();
+
+    let clicks = 0;
+    button.addEventListener('click', () => {
+      clicks += 1;
+    });
+    const requestSubmit = vi.spyOn(form, 'requestSubmit');
+    form.addEventListener('submit', (e) => e.preventDefault());
+
+    expect(press('Enter')).toEqual({ ok: true });
+    expect(clicks).toBe(1);
+    expect(requestSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not activate a typeless <button type="button"> — it is not a submit button', () => {
+    document.body.innerHTML =
+      '<form><input type="search"><button type="button">Toggle</button></form>';
+    const form = document.querySelector('form') as HTMLFormElement;
+    const button = document.querySelector('button') as HTMLButtonElement;
+    (document.querySelector('input') as HTMLInputElement).focus();
+
+    let clicks = 0;
+    button.addEventListener('click', () => {
+      clicks += 1;
+    });
+    const requestSubmit = vi.spyOn(form, 'requestSubmit');
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+
+    expect(press('Enter')).toEqual({ ok: true });
+    // The toggle button is not the default button: no click fired on it, and the
+    // buttonless requestSubmit path submitted the form instead.
+    expect(clicks).toBe(0);
+    expect(requestSubmit).toHaveBeenCalledTimes(1);
+    expect(submits).toBe(1);
+  });
+
   it('skips disabled submit buttons and activates the first enabled one in tree order', () => {
     document.body.innerHTML =
       '<form><input type="text">' +

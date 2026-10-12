@@ -845,11 +845,20 @@ const BLOCKING_INPUT_TYPES: ReadonlySet<string> = new Set([
   'number',
 ]);
 
-/** The spec's default button: the first submit button in tree order that is not disabled. */
+/** The spec's default button: the first submit button in tree order that is not disabled.
+ *
+ * The `.type` IDL property, not the attribute, decides "submit button": a `<button>`
+ * with a missing, empty or invalid `type` attribute is still in the Submit Button state
+ * (HTML §4.10.6), and the IDL normalizes case. An attribute-only selector would miss all
+ * of those and drop the very common typeless `<button>Search</button>` into the
+ * buttonless requestSubmit path, losing the button's own handler.
+ */
 function defaultSubmitButton(form: HTMLFormElement): HTMLButtonElement | HTMLInputElement | null {
-  const buttons = form.querySelectorAll('button[type="submit"], input[type="submit"], input[type="image"]');
-  for (const b of buttons) {
-    if (!(b as HTMLButtonElement).disabled) return b as HTMLButtonElement;
+  for (const el of Array.from(form.querySelectorAll('button, input'))) {
+    const button = el as HTMLButtonElement;
+    const type = (button.type || '').toLowerCase();
+    if (type !== 'submit' && type !== 'image') continue;
+    if (!button.disabled) return button;
   }
   return null;
 }
