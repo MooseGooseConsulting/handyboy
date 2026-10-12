@@ -79,6 +79,8 @@ export interface TabsPort {
   /** The active tab of the last focused normal window. */
   activeTab(): Promise<TargetTab | undefined>;
   get(tabId: number): Promise<TargetTab | undefined>;
+  /** Closes a tab. Optional: a port without it simply never closes one. */
+  remove?(tabId: number): Promise<void>;
 }
 
 /**
@@ -457,6 +459,13 @@ export class RunManager {
         // and falsely mark the run interrupted.
         await (this.#persistTails.get(runId) ?? Promise.resolve());
         if (this.#active?.runId === runId) this.#active = undefined;
+        if (config.closeTabWhenDone) {
+          // After the terminal save, so nothing still reads the tab. currentTabId: Chrome
+          // may have swapped the tab's id during the run.
+          await this.#deps.tabs.remove?.(currentTabId(tab.id)).catch((error: unknown) => {
+            console.warn('[nanobrowser] could not close the run tab', error);
+          });
+        }
         return ended;
       });
 
@@ -597,6 +606,9 @@ export function chromeTabsPort(): TabsPort {
       } catch {
         return undefined;
       }
+    },
+    async remove(tabId) {
+      await chrome.tabs.remove(tabId);
     },
   };
 }
