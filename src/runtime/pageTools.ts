@@ -523,7 +523,11 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
     async snapshot(): Promise<ToolSnapshot> {
       const res = await driver.snapshot(tabId, { interactiveOnly: false, maxNodes });
       if (!res.ok) throw new Error(res.error ?? 'snapshot failed');
-      return { text: res.text ?? '', ...(res.approxTokens !== undefined ? { tokens: res.approxTokens } : {}) };
+      return {
+        text: res.text ?? '',
+        ...(res.approxTokens !== undefined ? { tokens: res.approxTokens } : {}),
+        ...(res.url ? { url: res.url } : {}),
+      };
     },
 
     async screenshot(): Promise<ToolScreenshot> {

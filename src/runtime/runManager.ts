@@ -37,6 +37,7 @@ import {
   type RunUserscript,
   type RuntimeDriver,
 } from './pageTools';
+import { currentTabId } from '@/src/page/tabReplacement';
 
 /**
  * Default `listAvailableUserscripts` (R-09): seeds the bundled examples into an
@@ -223,7 +224,7 @@ export class RunManager {
   /** The tab's URL now, so a navigate changes which scripts the list and the prompt show. */
   async #liveUrl(tab: TargetTab): Promise<string> {
     try {
-      const live = await this.#deps.tabs.get(tab.id);
+      const live = await this.#deps.tabs.get(currentTabId(tab.id));
       if (live?.url) return live.url;
     } catch {
       // The tab closed. The URL from start is the last one we have.
