@@ -13,12 +13,10 @@
  */
 import fs from 'node:fs';
 
-// Cold-start pair for the harness, used only until runs/history.jsonl has something to
-// rotate. `laguna-s-2.1` on both seats: 3 of 9 valid browse runs, mean score 0.51, 136k input
-// tokens per run — against 1 of 11 at 0.45 and 202k for the nemotron-ultra pair that used to
-// sit here (docs/research/live-model-pairs.md). Better-sampled, and a third of the waste.
-export const LIVE_LEADER_DEFAULT = 'poolside/laguna-s-2.1:free';
-export const LIVE_FOLLOWER_DEFAULT = 'poolside/laguna-s-2.1:free';
+// One pair, both seats. Model rotation is off (scripts/live.sh). nemotron-3-ultra was the
+// weak leader in the 2026-10-12 runs; lightning is the pinned choice until that changes.
+export const LIVE_LEADER_DEFAULT = 'nvidia/nemotron-3.5-lightning:free';
+export const LIVE_FOLLOWER_DEFAULT = 'nvidia/nemotron-3.5-lightning:free';
 
 export const TASK_IDS = [
   'ebay',

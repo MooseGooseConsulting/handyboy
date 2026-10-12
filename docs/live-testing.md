@@ -2,7 +2,7 @@
 
 The live tests have the real agent, on free models, do real tasks on real sites in your own Chrome. Each run is scored from what its run log shows it did, never from what the agent says it did.
 
-The goal is that the agent can do what a person does with a browser: search, filter, compare, collect, save, sign in, and finish long multi-step jobs. The tests below are a **ladder**. The lower rungs are cheap, so they run constantly and widely. They exist to make the agent solid on the basics, so that the upper rungs tell you something. Nothing here says the tests should stop at the lower rungs.
+The goal is that the agent can do what a person does with a browser: search, filter, compare, collect, save, sign in, and finish long multi-step jobs. The tests below are a **ladder**. A run is one activity, on one site, on one model pair. A few of those is a sample. They are not a gate, and they are not a batch to grind.
 
 ## Running it
 
@@ -13,15 +13,16 @@ scripts/live.sh activities --repeat 6      # six runs on six sites, on the batch
 scripts/live.sh activities filter_sort,site_median --repeat 4   # deep jobs, rotating across shop sites
 scripts/live.sh activities browse filter_sort   # positional ids accumulate: both rungs, in that order
 scripts/live.sh activities --site mercari.com --query "Ryzen 5 5600X"   # pin a site and part
+# both seats are nvidia/nemotron-3.5-lightning:free unless you set these
 NB_LIVE_LEADER=poolside/laguna-s-2.1:free NB_LIVE_FOLLOWER=poolside/laguna-s-2.1:free \
-  scripts/live.sh activities               # pin the model pair; unset, the pair rotates too
+  scripts/live.sh activities
 node scripts/harness/activities.mjs list   # every activity id
 node scripts/harness/activities.mjs board  # model pair by site for one activity (default browse), from every saved run
 ```
 
 Each run opens a fresh tab and closes it when the run ends. Results go to `runs/activities-<time>/`: the task, the live stream, the run log, and the scored report. Every run is also appended to `runs/history.jsonl`. A run that outlives `NB_LIVE_TIMEOUT` (600 s per run by default) is cancelled in the extension, not merely abandoned by the CLI — the CLI prints `timed out after <N>s; cancelling <run-id>`. To see that path work, `NB_LIVE_TIMEOUT=15 scripts/live.sh activities browse` should print that line within a minute, and the run log should end in a cancelled/interrupted status rather than the tab acting on for the full step budget.
 
-**Rotation.** Sites and models both rotate, off `runs/history.jsonl`. Each run goes to the site tested least recently — for the deep rungs, the priced shop sites — where every country domain of one operator counts as one site, so eBay.com, eBay UK and eBay.de are one. A long series spreads across the whole list instead of returning to the same few sites, and no single account or site sees a pattern of repeated automated visits. The query rotates too. The model pair rotates the same way while `NB_LIVE_LEADER` and `NB_LIVE_FOLLOWER` are unset: one invocation runs one pair, and the next picks the pair tested least recently, so no pair owns the default by inertia. Setting either variable pins the pair, which is how two pairs are compared on the same task.
+**Sites rotate. Models do not.** Each run goes to the site tested least recently — for the deep rungs, the priced shop sites — where every country domain of one operator counts as one site, so eBay.com, eBay UK and eBay.de are one. A long series spreads across sites instead of returning to the same few, and no single account sees a pattern of repeated automated visits. The query rotates too. The model pair does not: both seats are `nvidia/nemotron-3.5-lightning:free` until that choice changes. `NB_LIVE_LEADER` and `NB_LIVE_FOLLOWER` override either seat for a comparison; they are not how the everyday run picks a model.
 
 ## What a run does
 
@@ -106,7 +107,7 @@ Start a new activity as a rung-1 `browse` on the same site if that is quicker to
 
 ## Models
 
-Agent-initiated runs use free OpenRouter models only. Before adding a pair, probe each model with one tool-call request. `thinkingmachines/inkling` returns 403 ("only available on agentic harnesses"), and some free models 429 for long stretches. Compare pairs with `board`, never by reading logs.
+Agent-initiated runs use one free pair: `nvidia/nemotron-3.5-lightning:free` on both seats. Pair rotation is off. These runs are measurement, not a gate — CI does not run them. Before trying another model, probe it with one tool-call request. `thinkingmachines/inkling` returns 403 ("only available on agentic harnesses"), and some free models 429 for long stretches. Compare a deliberate override with `board`, never by reading logs.
 
 Results on 2026-10-12 (small samples):
 
@@ -115,7 +116,7 @@ Results on 2026-10-12 (small samples):
 | laguna-s-2.1 + laguna-s-2.1 | 2/2 | 100% | 10 | 96k |
 | nemotron-3-ultra + nemotron-3-super | 2/3 | 73% | 19 | 250k |
 | gemma-4-31b + gemma-4-26b | 1/2 | 90% | 9 | 90k |
-| nemotron-3-ultra + nemotron-3.5-lightning (fallback pair, used when history has none) | 2/13 | 48% | 19 | 207k |
+| nemotron-3-ultra + nemotron-3.5-lightning (the old default; ultra is not used now) | 2/13 | 48% | 19 | 207k |
 
 That fallback pair's 13 runs include six on the build before the fixes below.
 
@@ -123,8 +124,8 @@ That fallback pair's 13 runs include six on the build before the fixes below.
 
 - **A recoverable error must not end a run.** That covers a failed screenshot, a swapped tab id, one 429, and two failed clicks: each is information for the agent, not a verdict. Each of those ended runs at some point and was fixed. Treat any new one as a product bug.
 - **Check the scorer before blaming the model.** Rescore with `board` and read the run log. The scorer was wrong four times on 2026-10-12 (Amazon product URLs carry the search keywords, Kleinanzeigen's results path, trimmed listing URLs, wrong-part listings), and every fix is pinned by a test in `tests/activities.test.ts`.
-- **Keep climbing.** Rung 1 is cheap and runs often and broadly, and that is all it is for. Rungs 2 and 3 (`filter_sort`, `site_median`, `compare_sites`) are built and rotate for you; once rung 1 passes on the current pair, the next run is a rung-2 run, not another rung-1 run. Add the next harder activity when the current one passes, and write down what the failures showed.
-- **Breadth and depth both, by rotation.** The rotating rungs spread sites and model pairs on their own; `--site` and `--query` are for comparing pairs on the same page, not for defaults. The eBay jobs are the only activities pinned to one site, so they stay opt-in: one or two runs when deliberately probing eBay, never a repeating batch. Do not run any deep job on one site over and over: that is how you get an account flagged.
+- **A few runs, then stop.** `--repeat` defaults to 1. One browse run is a sample; six is a batch you asked for. Once browse passes on lightning, the next run is a rung-2 job (`filter_sort`, `site_median`, `compare_sites`), not another browse.
+- **Sites rotate. The model does not.** Every run is nemotron-3.5-lightning on both seats. Sites still move so one account is not hammered. `--site` and `--query` pin a page. The eBay jobs stay opt-in: one or two runs, then stop.
 - **Paste real output** when reporting a result: the report lines, the board, the run id.
 
 ## Product bugs these runs found

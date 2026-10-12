@@ -1,5 +1,9 @@
 # Live model pairs: what the runs say, against what the spec sheet said
 
+**Decision, same day:** model rotation is off. Both seats are `nvidia/nemotron-3.5-lightning:free`.
+`nemotron-3-ultra` stays out. The table below is why ultra was dropped; lightning itself has not
+been measured on its own yet, because every lightning run so far had ultra in the leader seat.
+
 Finding, 2026-10-12. Not a rewrite of `models-and-grounding.md` — that research picked the
 defaults from published specs (largest free MoE, 1M context, `tools` + `reasoning`). This is
 what the same models did on 30 real `browse` runs in the user's own Chrome on 2026-10-12.
