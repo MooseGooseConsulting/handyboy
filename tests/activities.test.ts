@@ -188,6 +188,12 @@ describe('browse: any site, rotating', () => {
     expect(titleMatches('Crucial 32GB DDR4-3200 UDIMM', 'DDR4 32GB 3200 RAM')).toBe(true);
   });
 
+  it('marks a run invalid, not failed, when the model provider rate-limited it to death', () => {
+    const events = log(params.url, [obs(params.url)], 'error');
+    (events.at(-1) as Record<string, unknown>).message = '429 Provider returned error';
+    expect(scoreActivity('browse', events, { params })).toMatchObject({ verdict: 'invalid', invalid: 'the model provider rate-limited the run (429)' });
+  });
+
   it('marks a run invalid when it ended on a Cloudflare challenge', () => {
     const events = log(params.url, [obs('https://techmikeny.com/cdn-cgi/challenge-platform/h/b/orchestrate')], 'blocked');
     expect(scoreActivity('browse', events, { params }).invalid).toBe('stopped by a bot wall or CAPTCHA');
