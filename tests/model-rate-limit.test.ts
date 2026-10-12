@@ -44,6 +44,11 @@ describe('free-tier rate limits', () => {
   }, 30_000);
 
   it('gives up after the last wait and reports the 429, rather than retrying forever', async () => {
+    // Codeant flagged that ChatOpenAI might retry the wrapper-returned 429 up to four
+    // more times, multiplying these calls. It does not: the OpenAI SDK client is
+    // built with maxRetries: 0 (ChatOpenAI does its own retrying through LangChain's
+    // AsyncCaller), and @langchain/core 1.2.12 classifies a headerless 429 as
+    // capacity and ends the call on it. The exact 3 is the pin.
     const gw = limitedFor(99, 'body');
     const model = createChatModel({ model: 'x/y:free', fetch: gw.fetch, rateLimitDelaysMs: [1, 1] });
     await expect(model.invoke([new HumanMessage('hi')])).rejects.toThrow(/429/);

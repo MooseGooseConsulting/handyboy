@@ -55,12 +55,22 @@ export function retryRateLimited(
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(input, init);
       if (res.status !== 429 || attempt >= delaysMs.length) return res;
-      const hinted = Number(res.headers.get('retry-after'));
-      const wait = Number.isFinite(hinted) && hinted > 0 ? Math.min(hinted * 1000, 60_000) : delaysMs[attempt]!;
+      const wait = retryAfterDelayMs(res.headers.get('retry-after'), delaysMs[attempt]!);
       await res.body?.cancel().catch(() => undefined);
-      await sleep(wait, init?.signal ?? undefined);
+      if (wait > 0) await sleep(wait, init?.signal ?? undefined);
     }
   };
+}
+
+/** Delay to the next attempt, in milliseconds, from one 429's Retry-After header. */
+export function retryAfterDelayMs(headerValue: string | null, fallbackMs: number): number {
+  const raw = headerValue?.trim();
+  if (!raw) return fallbackMs;
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw) > 0 ? Math.min(Number(raw) * 1000, 60_000) : 0;
+  const date = Date.parse(raw);
+  if (Number.isNaN(date)) return fallbackMs;
+  // A provider-issued date in the past is the same "go again now" as a 0.
+  return date > Date.now() ? Math.min(date - Date.now(), 60_000) : 0;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
