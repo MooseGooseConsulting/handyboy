@@ -5,7 +5,8 @@
 #   scripts/live.sh test [task,...]    run fixture tasks in real Chrome and score each one
 #   scripts/live.sh activities [id,...] [--repeat N]   the agent performs real activities: by default
 #                                      browse; deep jobs (filter_sort, site_median, compare_sites)
-#                                      rotate across shop sites the same way; live telemetry, verdict, waste
+#                                      rotate across shop sites the same way; live telemetry, verdict, waste.
+#                                      Positional ids accumulate across arguments (commas work too)
 #   scripts/live.sh run "<prompt>" [--url <url>]   one ad-hoc run with the free pair
 #   scripts/live.sh status | logs
 #
@@ -67,7 +68,7 @@ DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,st
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Same derivation as host/install.sh: the manifest key pins the id across rebuilds.
 ext_id() {
@@ -374,7 +375,8 @@ cmd_activities() {
       # Pin browse to one site and query, e.g. to compare model pairs on the same page.
       --site) pin+=(--site "$2"); shift 2 ;;
       --query) pin+=(--query "$2"); shift 2 ;;
-      *) read -ra list <<<"$(tr ',' ' ' <<<"$1")"; shift ;;
+      # Positional ids accumulate across arguments; commas and spaces split within one.
+      *) read -ra names <<<"$(tr ',' ' ' <<<"$1")"; list+=("${names[@]}"); shift ;;
     esac
   done
   # The everyday loop is browse, rotating across sites; deep jobs by name (filter_sort,
@@ -408,7 +410,11 @@ cmd_activities() {
       # naming one here is the opt-in, so pass it for ebay_* and nothing else.
       local legacy=()
       [[ "$a" == ebay_* ]] && legacy+=(--legacy)
-      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" "${legacy[@]}" "${pin[@]}" >"$tj" || { fail=$((fail + 1)); continue; }
+      # The redirection below creates $tj before the command runs; a failed or partial
+      # task file would be found by `board`, which JSON.parses every *-task.json, so
+      # delete it rather than leave an empty one behind.
+      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" "${legacy[@]}" "${pin[@]}" >"$tj" \
+        || { rm -f "$tj"; fail=$((fail + 1)); continue; }
       local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
       echo "$(jq -r .title "$tj")  ($url)"
       local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter
@@ -425,12 +431,22 @@ cmd_activities() {
       local run_id="act-$(date +%s)-$RANDOM-$a"
       ACTIVE_RUN="$run_id"
       # Backgrounded and waited on, as in cmd_test, so Ctrl-C cancels the run at once.
+      # pipefail is on, so the wait status keeps nb-run's own exit through the pipe
+      # (`activities.mjs live` ends 0 on EOF); 124 means the timeout fired. Closing
+      # nb-run does not stop the run in the extension, so cancel it exactly as cmd_test
+      # does, and keep ACTIVE_RUN set until that is done: an interrupt landing before
+      # the handling can still reach the cleanup trap.
       { timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
           2>"$out/$a-$trial-nb-run.stderr" \
           | node "$HARNESS/activities.mjs" live --log "$out/$a-$trial-stream.jsonl"; } &
       RUN_PID=$!
       wait "$RUN_PID"
+      local rc=$?
       RUN_PID=""
+      if [ "$rc" -eq 124 ]; then
+        echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
+        host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true
+      fi
       ACTIVE_RUN=""
       local runlog="$out/$a-$trial-runlog.jsonl"
       cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$a-$trial-stream.jsonl" "$runlog"
