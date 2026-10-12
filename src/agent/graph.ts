@@ -205,8 +205,16 @@ function compactStoredRead(message: BaseMessage, step: number): BaseMessage {
 /** Consecutive tool-call-less Follower turns before a run is called stalled. */
 export const MAX_IDLE_FOLLOWER_TURNS = 4;
 
-/** Identical failures of the same action before the run is called stuck. */
+/**
+ * Identical failures of the same action before the Follower hands back to the Leader
+ * to replan around it. Ending the run here threw away recoverable runs: a live
+ * ServeTheHome search ended at step 4 because a search button was covered by an icon
+ * the error named, with the advice to try something else going nowhere but the log.
+ */
 export const MAX_REPEAT_FAILURE_TURNS = 2;
+
+/** The same failure still repeating after that replan: now the run is stuck. */
+export const MAX_REPEAT_FAILURE_TURNS_TO_END = 4;
 
 /**
  * Identity of one failed attempt: the tool name, its visible arguments with stable
@@ -867,6 +875,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   ];
 
   let tokens: number | undefined;
+  let url: string | undefined;
   let hasScreenshot = false;
   let unchanged = false;
   let lastSnapshotDigest = state.lastSnapshotDigest;
@@ -878,6 +887,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     // page change, or a scroll or userscript that left it alone.
     const snap = await ctx.page.snapshot();
     tokens = snap.tokens;
+    url = snap.url;
     const digest = snapshotDigest(snap.text);
     if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
       unchanged = true;
@@ -889,21 +899,41 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
     }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
-    const shot = await ctx.page.screenshot();
-    hasScreenshot = true;
-    blocks.push({
-      type: 'text',
-      text: `Screenshot of the visible page, ${shot.width} by ${shot.height} pixels.`,
-    });
-    // Standard multimodal block. `image_url` / `MessageContentComplex` are
-    // deprecated in @langchain/core 1.2.9 (C-03).
-    blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
+    // A capture that fails (captureVisibleTab stalls on a hidden or busy tab) used to
+    // throw and end the whole run at step 0. It is one missing observation, not a
+    // failed run: say so in the prompt and fall back to the DOM, which in 'both' mode
+    // was already taken.
+    let shot: Awaited<ReturnType<typeof ctx.page.screenshot>> | undefined;
+    let shotError: string | undefined;
+    try {
+      shot = await ctx.page.screenshot();
+    } catch (error) {
+      shotError = error instanceof Error ? error.message : String(error);
+    }
+    if (shot) {
+      hasScreenshot = true;
+      blocks.push({
+        type: 'text',
+        text: `Screenshot of the visible page, ${shot.width} by ${shot.height} pixels.`,
+      });
+      // Standard multimodal block. `image_url` / `MessageContentComplex` are
+      // deprecated in @langchain/core 1.2.9 (C-03).
+      blocks.push({ type: 'image', url: shot.dataUrl, mimeType: 'image/png' });
+    } else if (ctx.observe === 'both') {
+      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}); the page text above is current.` });
+    } else {
+      const snap = await ctx.page.snapshot();
+      tokens = snap.tokens;
+      url = snap.url;
+      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}), so here is the page text instead.\n${SNAPSHOT_HEADER}${snap.text}` });
+    }
   }
 
   emit(config, {
     kind: 'observation',
     mode: ctx.observe,
     tokens,
+    ...(url ? { url } : {}),
     hasScreenshot,
     ...(unchanged ? { unchanged } : {}),
     at: now(),
@@ -1054,13 +1084,19 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   }
 
   if (status === 'running' && repeatFailureTurns >= MAX_REPEAT_FAILURE_TURNS) {
-    status = 'error';
     const failingName = failureAction ?? (call ? call.name : null);
-    note =
+    const what =
       `the follower repeated the same failing action ${repeatFailureTurns} times` +
-      `${failingName ? ` (${failingName})` : ''}: ${summarize(failureText, 160)} No successful action happened ` +
-      'between attempts. Try a different tool or subgoal, or call blocked.';
-    endNote = note;
+      `${failingName ? ` (${failingName})` : ''}: ${summarize(failureText, 160)}`;
+    if (repeatFailureTurns >= MAX_REPEAT_FAILURE_TURNS_TO_END) {
+      status = 'error';
+      note = `${what} No successful action happened between attempts, including after a replan.`;
+      endNote = note;
+    } else if (repeatFailureTurns === MAX_REPEAT_FAILURE_TURNS) {
+      // Hand back once with the reason; the Leader's report carries the failing result.
+      signal = 'RETURN_TO_LEADER';
+      note = `${what} Replan around it: a different element, tool or route.`;
+    }
   }
 
   if (status === 'running' && stepN >= ctx.maxSteps) status = 'max-steps';
