@@ -404,7 +404,11 @@ cmd_activities() {
     for trial in $(seq "$repeat"); do
       step "activity $a ($trial/$repeat)"
       local tj="$out/$a-$trial-task.json"
-      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" "${pin[@]}" >"$tj" || { fail=$((fail + 1)); continue; }
+      # M1's gate (3dd8e64) makes `task` refuse a legacy eBay activity without --legacy;
+      # naming one here is the opt-in, so pass it for ebay_* and nothing else.
+      local legacy=()
+      [[ "$a" == ebay_* ]] && legacy+=(--legacy)
+      node "$HARNESS/activities.mjs" task --activity "$a" --history "$history" "${legacy[@]}" "${pin[@]}" >"$tj" || { fail=$((fail + 1)); continue; }
       local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
       echo "$(jq -r .title "$tj")  ($url)"
       local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter

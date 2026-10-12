@@ -50,7 +50,7 @@ A site that filters in the page without touching its URL shows no URL evidence; 
 
 ### Opt-in: the eBay jobs
 
-The eBay activities are the same jobs pinned to one site — eBay — which is also the most defended site in the list: a run can end behind a CAPTCHA or a bot wall, and the scorer marks those **invalid**, a fact about the setup, not a verdict on the model. Until the agent has a way past those walls (of seven eBay live runs on 2026-10-12, three ended at CAPTCHAs and one passed), these runs measure the walls, not the agent. So they are opt-in: run one when deliberately probing eBay, not as the default deep job, and never many back to back — one or two runs, then return to the rungs above, which rotate for you.
+The eBay activities are the same jobs pinned to one site — eBay — which is also the most defended site in the list: a run can end behind a CAPTCHA or a bot wall, and the scorer marks those **invalid**, a fact about the setup, not a verdict on the model. Until the agent has a way past those walls (of seven eBay live runs on 2026-10-12, three ended at CAPTCHAs and one passed), these runs measure the walls, not the agent. So they are opt-in: run one when deliberately probing eBay (`scripts/live.sh activities ebay_compare` — live.sh passes the harness's `--legacy` opt-in for you), not as the default deep job, and never many back to back — one or two runs, then return to the rungs above, which rotate for you.
 
 | Activity | What it asks of the agent | Preconditions |
 |---|---|---|
