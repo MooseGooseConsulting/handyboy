@@ -1067,15 +1067,24 @@ async function main(argv) {
     const id = flag(argv, 'activity');
     const a = ACTIVITIES[id];
     const runlog = flag(argv, 'runlog');
+    const taskFile = flag(argv, 'task');
     if (!a) return console.error(`unknown activity ${id ?? '<none>'}; one of ${Object.keys(ACTIVITIES).join(', ')}`), 2;
     // Dynamic activities score their checks against the site and query in the task file's
     // params; without them the verdict would be about a run that never happened.
-    if (a.dynamic && !flag(argv, 'task')) return console.error(`scoring ${id} needs --task <task.json> (its params carry the site and query)`), 2;
+    if (a.dynamic && !taskFile) return console.error(`scoring ${id} needs --task <task.json> (its params carry the site and query)`), 2;
+    if (taskFile && !fs.existsSync(taskFile)) return console.error(`no task file at ${taskFile}`), 2;
     if (!runlog) return console.error('score needs --runlog <file>'), 2;
     if (!fs.existsSync(runlog)) return console.error(`no runlog at ${runlog}`), 2;
     const events = readJsonl(fs.readFileSync(runlog, 'utf8'));
-    const taskFile = flag(argv, 'task');
-    const params = taskFile ? JSON.parse(fs.readFileSync(taskFile, 'utf8')).params ?? undefined : undefined;
+    let params;
+    if (taskFile) {
+      // A truncated or non-JSON task file is a wrong invocation, not a crash: same exit 2.
+      try {
+        params = JSON.parse(fs.readFileSync(taskFile, 'utf8')).params ?? undefined;
+      } catch {
+        return console.error(`could not read the task file at ${taskFile}: not JSON`), 2;
+      }
+    }
     const r = scoreActivity(id, events, { artifactsDir: flag(argv, 'artifacts'), params });
     if (params) r.params = params;
     r.at = new Date().toISOString();

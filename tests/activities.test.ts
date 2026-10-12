@@ -468,6 +468,8 @@ describe('score and board CLIs', () => {
     // Missing runlog.
     expect(run(['score', '--activity', 'ebay_compare'])).toMatchObject({ status: 2 });
     expect(run(['score', '--activity', 'ebay_compare', '--runlog', 'no/such/file.jsonl'])).toMatchObject({ status: 2 });
+    // Missing task file: the same exit 2, not an ENOENT stack trace.
+    expect(run(['score', '--activity', 'ebay_compare', '--task', 'no/such-task.json', '--runlog', 'x.jsonl'])).toMatchObject({ status: 2 });
   });
 
   it('requires --task params for a dynamic activity, and scores fine with them', () => {
@@ -490,6 +492,13 @@ describe('score and board CLIs', () => {
     const scored = run(['score', '--activity', 'browse', '--task', taskFile, '--runlog', runlog]);
     expect(scored.status).toBe(0);
     expect(scored.stdout).toContain('PASS  browse');
+
+    // A task file that exists but is not JSON takes the same exit-2 path.
+    const badTask = path.join(dir, 'bad-task.json');
+    fs.writeFileSync(badTask, '{ truncated');
+    const bad = run(['score', '--activity', 'browse', '--task', badTask, '--runlog', runlog]);
+    expect(bad.status).toBe(2);
+    expect(bad.stderr).toContain('not JSON');
   });
 
   it('board skips malformed and empty task artifacts instead of crashing, and still scores the readable ones', () => {
