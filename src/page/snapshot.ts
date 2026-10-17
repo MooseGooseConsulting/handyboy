@@ -38,6 +38,11 @@ import {
 export const DEFAULT_MAX_NODES = 900;
 
 export interface SnapshotOptions {
+  /**
+   * Read `url` and `title` only. Does not walk the DOM and does not rebuild the ref
+   * table, so a telemetry probe cannot invalidate refs the model is about to click.
+   */
+  urlOnly?: boolean;
   /** Hard cap on emitted nodes. Sets `truncated` when hit. Default {@link DEFAULT_MAX_NODES}. */
   maxNodes?: number;
   /** Emit only actionable elements (plus iframes); drop landmarks and free text. Default false. */
@@ -413,6 +418,16 @@ function walk(node: Node, depth: number, state: WalkState): void {
  */
 export function snapshot(opts: SnapshotOptions = {}): SnapshotResult {
   const doc = opts.root ?? (globalThis as unknown as { document: Document }).document;
+  if (opts.urlOnly) {
+    return {
+      text: '',
+      nodes: 0,
+      truncated: false,
+      approxTokens: 0,
+      url: doc.location?.href ?? '',
+      title: doc.title ?? '',
+    };
+  }
   const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES;
   const state: WalkState = {
     lines: [],
