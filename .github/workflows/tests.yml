@@ -28,12 +28,14 @@ jobs:
       - name: Install extension dependencies
         run: pnpm install --frozen-lockfile
       - name: Install host dependencies
-        run: pnpm --dir host install --frozen-lockfile
+        # pnpm-workspace.yaml makes a plain `--dir host install` install the workspace
+        # root and leave host/node_modules empty. The host tree is its own lockfile.
+        run: pnpm --ignore-workspace --dir host install --frozen-lockfile
       - name: Typecheck extension
         run: pnpm typecheck
       - name: Test extension and existing invariants
         run: pnpm test
       - name: Typecheck host
-        run: pnpm --dir host typecheck
+        run: pnpm --ignore-workspace --dir host typecheck
       - name: Test host
-        run: pnpm --dir host test
+        run: pnpm --ignore-workspace --dir host test
