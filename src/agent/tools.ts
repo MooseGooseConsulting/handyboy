@@ -67,7 +67,8 @@ export interface WriteUserscriptRequest {
  * Implementations live outside `src/agent`.
  */
 export interface PageTools {
-  snapshot(): Promise<SnapshotResult>;
+  /** `urlOnly` reads the page URL without replacing the current ref table. */
+  snapshot(options?: { urlOnly?: boolean }): Promise<SnapshotResult>;
   screenshot(): Promise<ScreenshotResult>;
   extractText(maxChars?: number, startChar?: number): Promise<string>;
   /** Viewport box of one ref, so `both` mode can correlate refs to screenshot regions. */
