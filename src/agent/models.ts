@@ -51,12 +51,21 @@ export function retryRateLimited(
   fetch: typeof globalThis.fetch,
   delaysMs: readonly number[] = RATE_LIMIT_DELAYS_MS,
 ): typeof globalThis.fetch {
+  // Honour each Retry-After, but the waits together stay inside the schedule
+  // (about a minute for the default delays). A provider that sends Retry-After: 60
+  // on every 429 would otherwise hold the call for several minutes.
+  const budgetMs = delaysMs.reduce((sum, ms) => sum + ms, 0);
   return async (input, init) => {
+    let waited = 0;
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(input, init);
-      if (res.status !== 429 || attempt >= delaysMs.length) return res;
-      const wait = retryAfterDelayMs(res.headers.get('retry-after'), delaysMs[attempt]!);
+      if (res.status !== 429 || attempt >= delaysMs.length || waited >= budgetMs) return res;
+      const wait = Math.min(
+        retryAfterDelayMs(res.headers.get('retry-after'), delaysMs[attempt]!),
+        Math.max(0, budgetMs - waited),
+      );
       await res.body?.cancel().catch(() => undefined);
+      waited += wait;
       if (wait > 0) await sleep(wait, init?.signal ?? undefined);
     }
   };
@@ -76,8 +85,15 @@ export function retryAfterDelayMs(headerValue: string | null, fallbackMs: number
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'));
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => (clearTimeout(timer), reject(signal.reason ?? new Error('aborted'))), { once: true });
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
