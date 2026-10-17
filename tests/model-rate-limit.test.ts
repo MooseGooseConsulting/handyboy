@@ -64,6 +64,47 @@ describe('free-tier rate limits', () => {
     expect(calls).toBe(3);
   });
 
+  it('retries a transient 502 on its own schedule and does not retry a 400', async () => {
+    let gateway = 0;
+    const fetch: typeof globalThis.fetch = async () => {
+      gateway += 1;
+      if (gateway === 1) return new Response('bad gateway', { status: 502 });
+      return new Response('ok', { status: 200 });
+    };
+    const recovered = await retryRateLimited(fetch, [0], [0])('https://example.test/v1/chat/completions');
+    expect(recovered.status).toBe(200);
+    expect(gateway).toBe(2);
+
+    let denied = 0;
+    const permanent: typeof globalThis.fetch = async () => {
+      denied += 1;
+      return new Response('no', { status: 400 });
+    };
+    const rejected = await retryRateLimited(permanent, [0], [0])('https://example.test/v1/chat/completions');
+    expect(rejected.status).toBe(400);
+    expect(denied).toBe(1);
+  });
+
+  it('retries one dropped connection, then surfaces the error', async () => {
+    let calls = 0;
+    const fetch: typeof globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('socket hang up');
+      return new Response('ok', { status: 200 });
+    };
+    const res = await retryRateLimited(fetch, [0], [0])('https://example.test/v1/chat/completions');
+    expect(res.status).toBe(200);
+    expect(calls).toBe(2);
+
+    let blows = 0;
+    const dying: typeof globalThis.fetch = async () => {
+      blows += 1;
+      throw new Error('socket hang up');
+    };
+    await expect(retryRateLimited(dying, [0], [0])('https://example.test/v1/chat/completions')).rejects.toThrow(/socket hang up/);
+    expect(blows).toBe(2);
+  });
+
   it('does not run the rate-limit schedule once per SDK retry', async () => {
     const gw = limitedFor(99, 'status');
     const model = createChatModel({ model: 'x/y:free', fetch: gw.fetch, rateLimitDelaysMs: [1, 1] });
