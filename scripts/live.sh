@@ -100,7 +100,9 @@ cmd_setup() {
   # pnpm 10, as CI uses: pnpm 11+ ignores package.json's "pnpm.overrides" and would
   # rewrite the lockfile without the security overrides.
   [ -d node_modules ] || npx -y pnpm@10 install --frozen-lockfile || die "pnpm install failed"
-  [ -d host/node_modules ] || (cd host && npx -y pnpm@10 install --frozen-lockfile) || die "host pnpm install failed"
+  # pnpm-workspace.yaml at the repo root makes `pnpm install` inside host install the
+  # workspace root instead of host. --ignore-workspace keeps the host lockfile's install.
+  [ -d host/node_modules ] || (cd host && npx -y pnpm@10 --ignore-workspace install --frozen-lockfile) || die "host pnpm install failed"
   echo "ok"
 
   step "build"
@@ -366,6 +368,10 @@ cmd_activities() {
   [ "${#list[@]}" -gt 0 ] || list=(browse)
   host_up || die "the extension is not connected; run scripts/live.sh setup first"
   host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
+  case "$repeat" in
+    ''|*[!0-9]*) die "--repeat needs a positive integer" ;;
+  esac
+  [ "$repeat" -ge 1 ] || die "--repeat needs a positive integer"
   if [ "$repeat" -gt 1 ] && [[ " ${list[*]} " == *' ebay_'* ]]; then
     echo "NOTE: eBay activities are pinned to ebay.com every run; repeating one hammers a single site. One or two runs, then return to the rotating rungs."
   fi
@@ -382,11 +388,14 @@ cmd_activities() {
   trap 'exit 130' INT TERM
   echo "models: leader=$LEADER follower=$FOLLOWER   results -> $out"
   : >"$out/summary.txt"
-  local pass=0 fail=0 invalid=0 trial
+  local pass=0 fail=0 invalid=0 trial n=0
   for a in "${list[@]}"; do
     for trial in $(seq "$repeat"); do
+      # A monotonic suffix: repeating the same positional id would otherwise reuse
+      # `$a-$trial` and the later trial would overwrite the earlier task and result.
+      n=$((n + 1))
       step "activity $a ($trial/$repeat)"
-      local tj="$out/$a-$trial-task.json"
+      local tj="$out/$a-$n-task.json"
       # M1's gate (3dd8e64) makes `task` refuse a legacy eBay activity without --legacy;
       # naming one here is the opt-in, so pass it for ebay_* and nothing else.
       local legacy=()
@@ -418,23 +427,26 @@ cmd_activities() {
       # does, and keep ACTIVE_RUN set until that is done: an interrupt landing before
       # the handling can still reach the cleanup trap.
       { timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
-          2>"$out/$a-$trial-nb-run.stderr" \
-          | node "$HARNESS/activities.mjs" live --log "$out/$a-$trial-stream.jsonl"; } &
+          2>"$out/$a-$n-nb-run.stderr" \
+          | node "$HARNESS/activities.mjs" live --log "$out/$a-$n-stream.jsonl"; } &
       RUN_PID=$!
       wait "$RUN_PID"
       local rc=$?
       RUN_PID=""
-      if [ "$rc" -eq 124 ]; then
-        echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
+      # Closing the client does not stop a run the extension already accepted.
+      # Timeout is one cause; a dropped socket or a logger failure is another.
+      if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 124 ]; then echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
+        else echo "activity pipeline exited $rc; cancelling $run_id"; fi
         host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true
       fi
       ACTIVE_RUN=""
-      local runlog="$out/$a-$trial-runlog.jsonl"
-      cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$a-$trial-stream.jsonl" "$runlog"
+      local runlog="$out/$a-$n-runlog.jsonl"
+      cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$a-$n-stream.jsonl" "$runlog"
 
       node "$HARNESS/activities.mjs" score --activity "$a" --task "$tj" --runlog "$runlog" \
-        --artifacts "$DATA/artifacts/$run_id" --json "$out/$a-$trial-report.json" --history "$history" \
-        | tee "$out/$a-$trial-report.txt"
+        --artifacts "$DATA/artifacts/$run_id" --json "$out/$a-$n-report.json" --history "$history" \
+        | tee "$out/$a-$n-report.txt"
       case "${PIPESTATUS[0]}" in
         0) pass=$((pass + 1)); echo "PASS     $a #$trial  $(jq -r .title "$tj")  run=$run_id" >>"$out/summary.txt" ;;
         3) invalid=$((invalid + 1)); echo "INVALID  $a #$trial  $(jq -r .title "$tj")  run=$run_id" >>"$out/summary.txt" ;;
