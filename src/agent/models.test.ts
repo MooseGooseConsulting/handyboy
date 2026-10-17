@@ -85,8 +85,10 @@ describe('routing a run to the model\'s own source', () => {
     const model = createChatModel({ model: 'x/y', fetch: plainFetch, source: 'kilo' });
     const wrapped = (model as unknown as { clientConfig: { fetch: typeof fetch } }).clientConfig.fetch;
     const res = await wrapped('https://api.kilo.ai/api/gateway/chat/completions');
+    // hardenEmptyChoices rewrites the choice-less 200 as 502, and retryRateLimited
+    // then spends its short 5xx schedule (two delays) before returning that 502.
     expect(res.status).toBe(502);
-    expect(calls).toBe(1);
+    expect(calls).toBe(3);
   });
 });
 
