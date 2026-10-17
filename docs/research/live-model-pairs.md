@@ -6,7 +6,9 @@ been measured on its own yet, because every lightning run so far had ultra in th
 
 Finding, 2026-10-12. Not a rewrite of `models-and-grounding.md` — that research picked the
 defaults from published specs (largest free MoE, 1M context, `tools` + `reasoning`). This is
-what the same models did on 30 real `browse` runs in the user's own Chrome on 2026-10-12.
+what the same models did on real `browse` runs in the user's own Chrome on 2026-10-12.
+The table below is 26 runs that named a model. Runs with no model id are counted
+separately after the table and are not added into that 26.
 
 ## The numbers
 
@@ -51,10 +53,11 @@ from the model. Anyone quoting it should quote both halves.
 
 ## What changed as a result
 
-The cold-start pair in `scripts/live.sh` and `scripts/harness/live-tasks.mjs` is now
-`laguna-s-2.1` on both seats: the better-sampled performer, at two thirds of the input
-tokens. The least-recently-used rotation is unchanged — it still spreads, deliberately, per
-the user's "telemetry, not a benchmark" redirect.
+Agent-started runs do not cold-start on Laguna, and model rotation is off. Both seats
+in `scripts/live.sh` and `scripts/harness/live-tasks.mjs` are
+`nvidia/nemotron-3.5-lightning:free`. An earlier note the same day pointed at Laguna on
+both seats with least-recently-used rotation still on; that is not the configuration
+to use. `CLAUDE.md` keeps `nemotron-3-ultra` out of agent-started runs.
 
 Nothing here blocks a user from selecting any model, free or paid, in the panel. The change is
 only about what an agent-initiated run defaults to.

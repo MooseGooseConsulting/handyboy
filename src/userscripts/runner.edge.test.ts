@@ -115,6 +115,26 @@ describe('runUserscript: the target tab is re-resolved before execute', () => {
     expect(api.injections[0]!.target).toEqual({ tabId: 9 });
   });
 
+  it('does not trust the caller URL once the tab was already replaced', async () => {
+    recordTabReplaced(9, 7);
+    const tabs = {
+      get: async (tabId: number) => (tabId === 9 ? { url: 'https://example.com/' } : { url: URL_IN_SCOPE }),
+    };
+    const api = vmUserScriptsApi();
+
+    const result = await runUserscript({
+      tabId: 7,
+      script: script('return 1;'),
+      url: URL_IN_SCOPE,
+      api,
+      tabs,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/refused: https:\/\/example\.com\/ is not in this script's allow-list/);
+    expect(api.injections).toHaveLength(0);
+  });
+
   it('cannot verify a changed target from a caller-supplied URL alone, and refuses', async () => {
     // The caller's `url` describes the tab it started on; once Chrome replaced it,
     // only a live resolution could vouch for the new target, and there is no tabs

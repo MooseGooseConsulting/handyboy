@@ -5,9 +5,9 @@
 # field, and both lockfiles stay byte-identical.
 #
 # `packages` is deliberately empty: this repo is two separate installs (root and host, each
-# with its own pnpm-lock.yaml, which is what CI runs). Naming a package here would turn the
-# tree into a pnpm workspace, and a root install would then relink host/node_modules against
-# the root store and break `pnpm --dir host test` with MODULE_NOT_FOUND.
+# with its own pnpm-lock.yaml, which is what CI runs). The file's presence is already a
+# workspace, so host commands pass `--ignore-workspace`. Naming a package here would also
+# make a root install relink host/node_modules against the root store.
 packages: []
 
 # Security overrides, formerly package.json `pnpm.overrides`.
