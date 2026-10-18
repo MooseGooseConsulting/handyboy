@@ -64,6 +64,29 @@ describe('free-tier rate limits', () => {
     expect(calls).toBe(3);
   });
 
+  it('retries an overloaded 529 on the short transient schedule and does not retry 408, 409, or 501', async () => {
+    let gateway = 0;
+    const fetch: typeof globalThis.fetch = async () => {
+      gateway += 1;
+      if (gateway === 1) return new Response('overloaded', { status: 529 });
+      return new Response('ok', { status: 200 });
+    };
+    const recovered = await retryRateLimited(fetch, [0], [0])('https://example.test/v1/chat/completions');
+    expect(recovered.status).toBe(200);
+    expect(gateway).toBe(2);
+
+    for (const status of [408, 409, 501]) {
+      let calls = 0;
+      const once: typeof globalThis.fetch = async () => {
+        calls += 1;
+        return new Response('no', { status });
+      };
+      const rejected = await retryRateLimited(once, [0], [0])('https://example.test/v1/chat/completions');
+      expect(rejected.status).toBe(status);
+      expect(calls).toBe(1);
+    }
+  });
+
   it('retries a transient 502 on its own schedule and does not retry a 400', async () => {
     let gateway = 0;
     const fetch: typeof globalThis.fetch = async () => {
