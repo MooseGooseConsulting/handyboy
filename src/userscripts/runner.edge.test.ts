@@ -172,4 +172,22 @@ describe('runUserscript: the target tab is re-resolved before execute', () => {
     expect(calls).toBe(2);
     expect(api.injections.at(-1)?.target).toEqual({ tabId: 9 });
   });
+
+  it('does not inject again when the tab is replaced after a successful execute', async () => {
+    const api = vmUserScriptsApi();
+    const execute = api.execute.bind(api);
+    let calls = 0;
+    api.execute = async (injection) => {
+      calls += 1;
+      const result = await execute(injection);
+      recordTabReplaced(9, 7);
+      return result;
+    };
+    const tabs = { get: async () => ({ url: URL_IN_SCOPE }) };
+    const result = await runUserscript({ tabId: 7, script: script('return 1;'), api, tabs });
+    expect(result).toMatchObject({ ok: true, value: 1 });
+    expect(calls).toBe(1);
+    expect(api.injections).toHaveLength(1);
+    expect(api.injections[0]?.target).toEqual({ tabId: 7 });
+  });
 });
