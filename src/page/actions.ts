@@ -19,7 +19,7 @@
  * Event cortège and pointer-field realism follow
  * docs/research/trusted-input-and-stealth.md §hygiene rules 4, 5, 7 and 12.
  */
-import { existingRef, resolveRef } from './snapshot';
+import { existingRef, resolveRef, shadowRootOf } from './snapshot';
 import { jitterInBox, planPath } from '../input/humanize';
 
 export interface ActionResult {
@@ -620,15 +620,22 @@ function arrive(
  * `buttons` is consistent across the sequence.
  */
 function isDisabledControl(el: HTMLElement): boolean {
-  if (
-    el instanceof HTMLButtonElement ||
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLSelectElement ||
-    el instanceof HTMLTextAreaElement ||
-    el instanceof HTMLOptionElement ||
-    el instanceof HTMLFieldSetElement
-  ) {
-    return el.disabled;
+  // `.disabled` reflects only the element's own attribute. A control inside a
+  // disabled fieldset can report `.disabled === false` while `:disabled` matches.
+  if (typeof el.matches === 'function') {
+    try {
+      if (el.matches(':disabled')) return true;
+    } catch {
+      // An exotic element that rejects the selector still walks its ancestors.
+    }
+  }
+  let node: Node | null = el;
+  const seen = new Set<Node>();
+  while (node && !seen.has(node)) {
+    seen.add(node);
+    if (node instanceof HTMLFieldSetElement && node.disabled) return true;
+    if (node instanceof ShadowRoot) node = node.host;
+    else node = node.parentNode;
   }
   return false;
 }
@@ -663,6 +670,7 @@ export function click(ref: string): ActionResult {
   mouseAt(el, 'mousedown', point, 1, 1, screen);
   try {
     el.focus({ preventScroll: true });
+    noteFocus(el);
   } catch {
     // Non-focusable elements throw or no-op; the click still stands.
   }
@@ -741,6 +749,7 @@ export function type(ref: string, text: string, options: TypeOptions = {}): Acti
     const next = clear ? text : current + text;
     if (!setNativeValue(el, next)) return fail('no native value setter on this element');
     fireInputAndChange(el);
+    noteFocus(el);
     return { ok: true };
   }
 
@@ -759,6 +768,7 @@ export function type(ref: string, text: string, options: TypeOptions = {}): Acti
     } catch {
       return fail('execCommand("insertText") is unavailable');
     }
+    noteFocus(el);
     return { ok: true };
   }
 
@@ -799,37 +809,88 @@ function codeFor(key: string): string {
  * Use this for `Enter`/`Escape`/arrow-key handlers, not for entering text — that is `type()`,
  * and real typing is an R-13 escalation.
  */
+/** The element `type` or `click` last focused, including one inside a closed shadow root. */
+let focusedByUs: HTMLElement | null = null;
+
+function noteFocus(el: HTMLElement): void {
+  focusedByUs = el;
+}
+
 function deepActive(doc: Document): Element | null {
   let current: Element | null = doc.activeElement;
   const seen = new Set<Node>();
   while (current && !seen.has(current)) {
     seen.add(current);
-    const inner = current.shadowRoot?.activeElement ?? null;
+    const root = shadowRootOf(current);
+    const inner = root?.activeElement ?? null;
     if (!inner || inner === current) break;
     current = inner;
   }
   return current;
 }
 
+/** Same-origin iframe documents only. A cross-origin frame throws or returns null and is left alone. */
+function descendFrame(el: Element): Element {
+  const seen = new Set<Node>();
+  let current = el;
+  while (current.localName === 'iframe' && !seen.has(current)) {
+    seen.add(current);
+    const frame = current as HTMLIFrameElement;
+    let child: Document | null = null;
+    try {
+      child = frame.contentDocument;
+    } catch {
+      return current;
+    }
+    if (!child) return current;
+    const inner = deepActive(child);
+    if (!inner || inner === child.body || inner === child.documentElement) return current;
+    current = inner;
+  }
+  return current;
+}
+
+function pressTarget(doc: Document): Element | null {
+  let target = deepActive(doc);
+  if (target) target = descendFrame(target);
+  if (focusedByUs?.isConnected) {
+    const root = focusedByUs.getRootNode();
+    if (root instanceof ShadowRoot) {
+      const activeInRoot = root.activeElement;
+      const hostFocused = !target || target === root.host;
+      if (hostFocused && (activeInRoot === focusedByUs || activeInRoot === null || activeInRoot === root.host)) {
+        target = focusedByUs;
+      }
+    }
+  }
+  if (target) target = descendFrame(target);
+  return target ?? doc.body ?? doc.documentElement;
+}
+
+function keyEvent(target: Element, type: string, init: KeyboardEventInit): KeyboardEvent {
+  const Ctor = target.ownerDocument?.defaultView?.KeyboardEvent ?? KeyboardEvent;
+  return new Ctor(type, init);
+}
+
 export function press(key: string): ActionResult {
   const doc = (globalThis as unknown as { document: Document }).document;
-  const target: Element = deepActive(doc) ?? doc.body ?? doc.documentElement;
+  const target: Element | null = pressTarget(doc);
   if (!target) return fail('no focused element to receive the key');
   const code = codeFor(key);
   const init: KeyboardEventInit = { key, code, bubbles: true, cancelable: true, composed: true };
-  const keydown = new KeyboardEvent('keydown', init);
+  const keydown = keyEvent(target, 'keydown', init);
   dispatch(target, keydown);
   // keypress only ever fired for character-producing keys; Enter is the historical exception.
   let keypress: KeyboardEvent | null = null;
   if (key.length === 1 || key === 'Enter') {
-    keypress = new KeyboardEvent('keypress', init);
+    keypress = keyEvent(target, 'keypress', init);
     dispatch(target, keypress);
   }
   // Implicit submission is the default action of the Enter keypress, which a browser
   // runs before keyup. A keyup handler that clears or rewrites the field must not
   // change the value that gets submitted.
   if (key === 'Enter' && !keydown.defaultPrevented && !keypress?.defaultPrevented) implicitSubmit(target);
-  dispatch(target, new KeyboardEvent('keyup', init));
+  dispatch(target, keyEvent(target, 'keyup', init));
   return { ok: true };
 }
 
