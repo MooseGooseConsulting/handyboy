@@ -429,6 +429,36 @@ describe('click', () => {
     }
   });
 
+  it('does not treat a light-dom child covering a closed-shadow target as a hit', () => {
+    document.body.innerHTML = '<div id="host"><div id="cover">cover</div></div>';
+    const host = document.querySelector('#host') as HTMLElement;
+    const cover = document.querySelector('#cover') as HTMLElement;
+    const root = host.attachShadow({ mode: 'closed' });
+    root.innerHTML = '<button>Go</button>';
+    const button = root.querySelector('button') as HTMLButtonElement;
+    let clicks = 0;
+    button.addEventListener('click', () => {
+      clicks += 1;
+    });
+    const previous = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      dom: { openOrClosedShadowRoot: (el: Element) => (el === host ? root : el.shadowRoot) },
+    };
+    const ref = refOfElement(button);
+    const docTarget = document as unknown as { elementFromPoint: unknown };
+    const hadDoc = 'elementFromPoint' in document;
+    const origDoc = docTarget.elementFromPoint;
+    docTarget.elementFromPoint = () => cover;
+    try {
+      expect(click(ref).ok).toBe(false);
+      expect(clicks).toBe(0);
+    } finally {
+      (globalThis as { chrome?: unknown }).chrome = previous;
+      if (hadDoc) docTarget.elementFromPoint = origDoc;
+      else delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint;
+    }
+  });
+
   it('accepts a host hit for a button that is actually inside the closed root', () => {
     document.body.innerHTML = '<div id="host"></div>';
     const host = document.querySelector('#host') as HTMLElement;
@@ -558,6 +588,15 @@ describe('hover', () => {
 });
 
 describe('type', () => {
+  it('does not write a control disabled by a parent fieldset', () => {
+    document.body.innerHTML = '<fieldset disabled><input id="in" value="keep"></fieldset>';
+    const input = document.querySelector('#in') as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    expect(input.matches(':disabled')).toBe(true);
+    expect(type(refOf('#in'), 'changed')).toEqual({ ok: false, error: 'element is not editable' });
+    expect(input.value).toBe('keep');
+  });
+
   it('does not write a readonly or disabled field', () => {
     document.body.innerHTML = '<input id="ro" readonly value="keep"><textarea id="dis" disabled>nope</textarea>';
     const input = document.querySelector('#ro') as HTMLInputElement;
@@ -652,6 +691,39 @@ describe('type', () => {
 });
 
 describe('press', () => {
+  it('still clicks a link, a custom control, and a control in the first legend of a disabled fieldset', () => {
+    document.body.innerHTML =
+      '<fieldset disabled><legend><button id="legend">In legend</button></legend><a id="link" href="#go">Go</a><div id="custom" role="button" tabindex="0">Custom</div><button id="barred">Barred</button></fieldset>';
+    const legend = document.querySelector('#legend') as HTMLButtonElement;
+    const link = document.querySelector('#link') as HTMLAnchorElement;
+    const custom = document.querySelector('#custom') as HTMLElement;
+    const barred = document.querySelector('#barred') as HTMLButtonElement;
+    let legendClicks = 0;
+    let linkClicks = 0;
+    let customClicks = 0;
+    let barredClicks = 0;
+    legend.addEventListener('click', () => {
+      legendClicks += 1;
+    });
+    link.addEventListener('click', () => {
+      linkClicks += 1;
+    });
+    custom.addEventListener('click', () => {
+      customClicks += 1;
+    });
+    barred.addEventListener('click', () => {
+      barredClicks += 1;
+    });
+    expect(click(refOf('#legend'))).toEqual({ ok: true });
+    expect(click(refOf('#link'))).toEqual({ ok: true });
+    expect(click(refOf('#custom'))).toEqual({ ok: true });
+    expect(click(refOf('#barred'))).toEqual({ ok: false, error: 'element is disabled' });
+    expect(legendClicks).toBe(1);
+    expect(linkClicks).toBe(1);
+    expect(customClicks).toBe(1);
+    expect(barredClicks).toBe(0);
+  });
+
   it('does not click a control inside a disabled fieldset when its own disabled property is false', () => {
     document.body.innerHTML = '<fieldset disabled><button>Go</button></fieldset>';
     const button = document.querySelector('button') as HTMLButtonElement;
@@ -673,6 +745,40 @@ describe('press', () => {
     });
     expect(click(refOf('button'))).toEqual({ ok: false, error: 'element is disabled' });
     expect(clicks).toBe(0);
+  });
+
+  it('sends Enter to the focused input inside a closed shadow root when the document focus is the host', () => {
+    document.body.innerHTML = '<div id="host"></div>';
+    const host = document.querySelector('#host') as HTMLElement;
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.innerHTML = '<form><input id="first" type="search" name="q"><input id="live" type="search" name="q2" value="DDR4"><button type="submit">Search</button></form>';
+    const form = shadow.querySelector('form') as HTMLFormElement;
+    const first = shadow.querySelector('#first') as HTMLInputElement;
+    const live = shadow.querySelector('#live') as HTMLInputElement;
+    const previous = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      dom: { openOrClosedShadowRoot: (el: Element) => (el === host ? shadow : el.shadowRoot) },
+    };
+    type(refOfElement(first), 'stale');
+    live.focus();
+    expect(document.activeElement).toBe(host);
+    expect(shadow.activeElement).toBe(live);
+    (globalThis as { chrome?: unknown }).chrome = undefined;
+    const delivered: EventTarget[] = [];
+    live.addEventListener('keydown', (e) => delivered.push(e.currentTarget!));
+    host.addEventListener('keydown', (e) => delivered.push(e.currentTarget!));
+    let submits = 0;
+    form.addEventListener('submit', (e) => {
+      submits += 1;
+      e.preventDefault();
+    });
+    try {
+      expect(press('Enter')).toEqual({ ok: true });
+    } finally {
+      (globalThis as { chrome?: unknown }).chrome = previous;
+    }
+    expect(delivered[0]).toBe(live);
+    expect(submits).toBe(1);
   });
 
   it('activates a submit button inside the same closed shadow root as its form', () => {
