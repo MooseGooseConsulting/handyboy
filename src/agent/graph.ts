@@ -635,7 +635,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   const readByName = new Map(leaderReads.map((t) => [t.name, t]));
   const bound = ctx.leaderModel.bindTools?.([...leaderReads, planTool]) ?? ctx.leaderModel;
   const human = new HumanMessage(
-    `${situation}\nEvidence reads available: ${leaderReads.map((t) => t.name).join(', ') || '(none)'}.'` +
+    `${situation}\nEvidence reads available: ${leaderReads.map((t) => t.name).join(', ') || '(none)'}.` +
       (ctx.readOnly
         ? '\nRead-only mode is on: the Follower has no act tools (no click, hover, type, press, select, download, or write_userscript). Plan reads, navigation, read-only userscripts, and saving only — never a subgoal that needs an action.'
         : ''),
