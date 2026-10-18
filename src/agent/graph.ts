@@ -83,8 +83,11 @@ export function trimFollowerHistory(
 
 /** Opens the page snapshot block of a Follower observation. */
 const SNAPSHOT_HEADER = 'Page snapshot:\n';
-/** Run-log copy of a read the model was given. Larger than the 240-character panel summary, still bounded. */
-const READ_EVIDENCE_CAP = 16_000;
+/**
+ * Run-log copy of a read the model was given. The panel summary stays short;
+ * this is the body the model saw, so the scorer does not demand an exact price
+ * count from a shorter slice than the model used.
+ */
 const READ_EVIDENCE_TOOLS = new Set([
   'snapshot',
   'extract_text',
@@ -92,15 +95,12 @@ const READ_EVIDENCE_TOOLS = new Set([
   'leader_extract_text',
   'run_userscript',
 ]);
-function boundedEvidence(text: string): string {
-  return text.length <= READ_EVIDENCE_CAP ? text : text.slice(0, READ_EVIDENCE_CAP);
-}
 function withReadEvidence(
   result: { callId: string; name: string; ok: boolean; summary: string; durationMs: number; chars: number },
   body: string,
 ): { callId: string; name: string; ok: boolean; summary: string; durationMs: number; chars: number; text?: string } {
   if (!result.ok || !READ_EVIDENCE_TOOLS.has(result.name) || !body) return result;
-  return { ...result, text: boundedEvidence(body) };
+  return { ...result, text: body };
 }
 /** The step line every Follower observation carries; compaction reads turn numbers off it. */
 const STEP_LINE = /^Step (\d+) of at most /m;
@@ -635,7 +635,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   const readByName = new Map(leaderReads.map((t) => [t.name, t]));
   const bound = ctx.leaderModel.bindTools?.([...leaderReads, planTool]) ?? ctx.leaderModel;
   const human = new HumanMessage(
-    `${situation}\nEvidence reads available: ${leaderReads.map((t) => t.name).join(', ') || '(none)'}.` +
+    `${situation}\nEvidence reads available: ${leaderReads.map((t) => t.name).join(', ') || '(none)'}.'` +
       (ctx.readOnly
         ? '\nRead-only mode is on: the Follower has no act tools (no click, hover, type, press, select, download, or write_userscript). Plan reads, navigation, read-only userscripts, and saving only — never a subgoal that needs an action.'
         : ''),
@@ -941,7 +941,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
       lastSnapshotDigest = digest;
       lastSnapshotStep = stepN;
       blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
-      readEvidence = boundedEvidence(snapshot.text);
+      readEvidence = snapshot.text;
     }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
@@ -986,7 +986,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
       // doubles the DOM tokens.
       if (snapshot && unchanged) {
         blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
-        readEvidence = boundedEvidence(snapshot.text);
+        readEvidence = snapshot.text;
       }
       blocks.push({ type: 'text', text: `No screenshot this step (${shotError}); the page text above is current.` });
     } else {
@@ -994,7 +994,7 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
       tokens = snap.tokens;
       url = snap.url;
       blocks.push({ type: 'text', text: `No screenshot this step (${shotError}), so here is the page text instead.\n${SNAPSHOT_HEADER}${snap.text}` });
-      readEvidence = boundedEvidence(snap.text);
+      readEvidence = snap.text;
     }
   }
 
