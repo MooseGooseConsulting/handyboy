@@ -32,48 +32,95 @@ function longestText(obj, keys) {
   }
   return best;
 }
-/** One text per page the run actually read. A shortened tool summary never sits beside the page, and a second copy of the same page does not add a second set of prices. */
+/**
+ * One text per page the run actually read. extract_text chunks of one page,
+ * including startChar offsets, are concatenated in offset order. An identical
+ * snapshot is stored once. A shortened tool summary is never the page.
+ */
 function pageTexts(events) {
   const pages = new Map();
+  const callsById = new Map();
   let current = '';
-  const consider = (url, text) => {
+  const consider = (url, text, offset) => {
     if (typeof text !== 'string' || !text) return;
     const key = url ? pageKey(url) : `loose:${text.slice(0, 80)}`;
-    const prev = pages.get(key);
-    if (!prev || text.length > prev.text.length) pages.set(key, { url: url || prev?.url || '', text });
+    let page = pages.get(key);
+    if (!page) {
+      page = { url: url || '', parts: [] };
+      pages.set(key, page);
+    } else if (url && !page.url) page.url = url;
+    if (page.parts.some((part) => part.text === text)) return;
+    page.parts.push({ offset: Number.isFinite(offset) ? offset : 0, text });
   };
   for (const e of events) {
+    if (e.kind === 'tool.call' && e.call?.callId) callsById.set(e.call.callId, e);
     if (e.kind === 'run.started' && e.url) current = e.url;
     if (e.kind === 'observation' && e.url) current = e.url;
-    if (e.kind === 'observation') consider(e.url || current, longestText(e, ['text', 'snapshot', 'content']));
+    if (e.kind === 'observation') consider(e.url || current, longestText(e, ['text', 'snapshot', 'content']), 0);
     if (e.kind !== 'tool.result' || e.result?.ok !== true) continue;
     if (e.result.name && !READ_TOOLS.has(e.result.name)) continue;
-    // The panel summary is about 240 characters and is not the page. A dollar
-    // amount in it is not a price the run read.
     const full = typeof e.result.text === 'string' ? e.result.text : '';
-    if (full) consider(current, full);
+    if (!full) continue;
+    const call = callsById.get(e.result.callId);
+    const start = Number(call?.call?.args?.startChar);
+    // A read can land after the page has already moved. The result's own URL is
+    // the page that was read; the previous observation is only the fallback.
+    const live = typeof e.result.url === 'string' && e.result.url ? e.result.url : current;
+    consider(live, full, Number.isFinite(start) ? start : 0);
   }
-  return [...pages.values()];
+  return [...pages.values()].map((page) => ({
+    url: page.url,
+    text: page.parts
+      .slice()
+      .sort((a, b) => a.offset - b.offset)
+      .map((part) => part.text)
+      .join(''),
+  }));
 }
 function pageEvidence(events) {
   return pageTexts(events).map((page) => page.text).join('\n');
 }
 function resultsPriceText(events, host, query) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
-  const typed = typedQuery(events, query);
-  const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
-  const start = searchIdx >= 0 ? searchIdx : typed ? 1 : -1;
+  const entry = typedQuery(events, query) ? typedResultsUrl(events, host, query) : '';
+  const start = searchEntryIndex(urls, query, entry);
   if (start < 0) return '';
   const wanted = new Set(urls.slice(start).filter((u) => !productShaped(u)).map(pageKey));
   return pageTexts(events).filter((page) => page.url && wanted.has(pageKey(page.url))).map((page) => page.text).join('\n');
 }
-function pricesRead(text) {
+const STRIKE_BEFORE = /(?:was|list(?:\s+price)?|msrp|regular(?:\s+price)?|orig(?:inal(?:ly)?)?|rrp|compare(?:\s+at)?|~~|strike(?:through)?)\s*[:.]?\s*$/i;
+const SAVE_BEFORE = /(?:save|discount)\s*[:.]?\s*$/i;
+const SHIP_LINE = /shipping|postage|handling|freight|\bdelivery\b/i;
+function dollarAmounts(line) {
   const out = [];
   const re = /\$\s*(\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)/g;
   let m;
-  while ((m = re.exec(text))) {
+  while ((m = re.exec(line))) {
     const n = money(m[1]);
-    if (Number.isFinite(n) && n > 0) out.push(n);
+    if (Number.isFinite(n) && n > 0) out.push({ n, index: m.index });
+  }
+  return out;
+}
+function isFilterBoundLine(line) {
+  if (/\$\s*\d[\d,]*(?:\.\d{1,2})?\s*(?:-|–|—|\bto\b)\s*\$\s*\d/i.test(line)) return true;
+  return /\b(?:under|over|below|above|up to)\b[^$\n]{0,20}\$/i.test(line);
+}
+/** One current price per listing: shipping lines, crossed-out prices, and filter bounds are not listings. */
+function pricesRead(text) {
+  const out = [];
+  for (const line of String(text ?? '').split(/\n/)) {
+    if (isFilterBoundLine(line) || SHIP_LINE.test(line)) continue;
+    const amounts = dollarAmounts(line);
+    if (!amounts.length) continue;
+    const kept = amounts.filter((a) => {
+      const before = line.slice(Math.max(0, a.index - 24), a.index);
+      return !STRIKE_BEFORE.test(before) && !SAVE_BEFORE.test(before);
+    });
+    if (!kept.length) continue;
+    // Bare prices on one line are one listing each. A line that also showed a
+    // struck price is one listing, and the price that remains is the current one.
+    if (kept.length < amounts.length) out.push(kept[kept.length - 1].n);
+    else for (const a of kept) out.push(a.n);
   }
   return out;
 }
@@ -124,15 +171,30 @@ const words = (q) => q.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length 
 const SEARCH_PATH = /\/(search|s|sch|find|results?|suche|recherche|zoeken|buscar|cerca)(\/|$)|^\/s-[^/]+\/k\d+/i;
 const PRODUCT_PATH = /\/(dp|gp\/product|itm|item|items|product|products|p|listing|listings|anzeige|s-anzeige|offer|angebot|threads|ad|annonce|lot|lots)\/[^/]+/i;
 const productShaped = (u) => PRODUCT_PATH.test(parseUrl(u)?.pathname ?? '');
+const normParam = (x) => { try { return decodeURIComponent(String(x)).toLowerCase().replace(/[+_\-]/g, ' '); } catch { return String(x).toLowerCase(); } };
+/** Same bar carriesQuery uses: at least ceil(60%) of the query's identifying words. */
+const queryHits = (s, query) => {
+  const w = words(query);
+  const hay = String(s ?? '').toLowerCase();
+  return w.length > 0 && w.filter((x) => hay.includes(x)).length >= Math.ceil(w.length * 0.6);
+};
 const carriesQuery = (u, query) => {
   const p = parseUrl(u);
   if (!p) return false;
-  const norm = (x) => { try { return decodeURIComponent(x).toLowerCase().replace(/[+_\-]/g, ' '); } catch { return x.toLowerCase(); } };
-  const hits = (s) => { const w = words(query); return w.length > 0 && w.filter((x) => s.includes(x)).length >= Math.ceil(w.length * 0.6); };
-  return hits(norm(p.search)) || (SEARCH_PATH.test(p.pathname) && hits(norm(p.pathname)));
+  return queryHits(normParam(p.search), query) || (SEARCH_PATH.test(p.pathname) && queryHits(normParam(p.pathname), query));
+};
+/** An explicit search parameter that is a different query, not an opaque results URL. */
+const explicitOtherQuery = (u, query) => {
+  const p = parseUrl(u);
+  if (!p) return false;
+  for (const [k, v] of p.searchParams) {
+    if (!SEARCH_PARAM.test(k)) continue;
+    if (!queryHits(normParam(v), query)) return true;
+  }
+  return false;
 };
 const WALL = /captcha|cf_chl|challenge-platform|\/challenge|datadome|perimeterx|px-captcha|_incapsula|access.denied|are.you.a.robot|verify.you.are.human/i;
-const typedQuery = (events, query) => okCalls(events, 'type').some((c) => words(query).some((w) => String(c.call?.args?.text ?? '').toLowerCase().includes(w)));
+const typedQuery = (events, query) => okCalls(events, 'type').some((c) => queryHits(c.call?.args?.text, query));
 export function browseInvalid(events, { host }) {
   const ends = ended(events);
   const lastUrl = of(events, 'observation').map((o) => o.url).filter(Boolean).at(-1) ?? '';
@@ -141,6 +203,7 @@ export function browseInvalid(events, { host }) {
   if (!onSite && /net::ERR|ERR_NAME|ERR_CONNECTION|timed out|did not load|404|5\d\d/i.test(ends?.message ?? '')) return `site unreachable: ${String(ends.message).slice(0, 100)}`;
   return null;
 }
+const IDENTITY_PARAM = /^(id|sku|product_id|item)$/i;
 export function listingKey(u) {
   const p = parseUrl(u);
   if (!p) return String(u);
@@ -149,7 +212,14 @@ export function listingKey(u) {
   if (asin) return `${host} asin:${asin[1].toUpperCase()}`;
   const ids = p.pathname.match(/\d{6,}/g);
   if (ids) return `${host} id:${[...ids].sort((a, b) => b.length - a.length)[0]}`;
-  return pageKey(u);
+  // pageKey keeps pagination and the search, and drops tracking. A product that
+  // is only identified by a query parameter still has to stay distinct.
+  const identity = [];
+  for (const [k, v] of [...p.searchParams].sort(([a], [b]) => a.localeCompare(b))) {
+    if (IDENTITY_PARAM.test(k) && v) identity.push(`${k.toLowerCase()}=${v}`);
+  }
+  const base = pageKey(u);
+  return identity.length ? `${base}${base.includes('?') ? '&' : '?'}${identity.join('&')}` : base;
 }
 export function titleMatches(title, query) {
   const tokens = new Set(String(title ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
@@ -162,27 +232,48 @@ export function titleMatches(title, query) {
   return descriptive.filter((w) => tokens.has(w)).length >= Math.ceil(descriptive.length * 0.6);
 }
 /**
- * The first results page after a successful type on `host`. The page the query
- * was typed into stays the search box; the next distinct URL is the results
- * page, even when that URL does not contain the query.
+ * The results page after a successful type on `host`.
+ *
+ * A search that does not change the URL keeps that post-search observation as
+ * the entry. A navigate to an opaque results URL is counted when that
+ * destination is observed, even though the navigate already moved `current`.
+ * A later distinct page is a listing, not a second results entry.
  */
 function typedResultsUrl(events, host, query) {
   let current = '';
   let armed = false;
+  let typedOn = '';
+  let pendingNav = '';
+  let sameUrl = '';
+  const onHost = (u) => !host || sameSite(u, host);
   for (const e of events) {
     if (e.kind === 'run.started' && e.url) current = e.url;
-    if (e.kind === 'tool.call' && e.call?.name === 'navigate' && e.call.args?.url && resultOf(events, e)?.ok) current = String(e.call.args.url);
+    if (e.kind === 'tool.call' && e.call?.name === 'navigate' && e.call.args?.url && resultOf(events, e)?.ok) {
+      current = String(e.call.args.url);
+      if (armed && onHost(current)) {
+        pendingNav = current;
+        sameUrl = '';
+      }
+    }
     if (e.kind === 'tool.call' && e.call?.name === 'type' && resultOf(events, e)?.ok === true) {
-      const text = String(e.call?.args?.text ?? '').toLowerCase();
-      if (words(query).some((w) => text.includes(w)) && (!host || sameSite(current, host))) armed = true;
+      if (queryHits(e.call?.args?.text, query) && onHost(current)) {
+        armed = true;
+        typedOn = current;
+        sameUrl = '';
+        pendingNav = '';
+      }
     }
     if (e.kind === 'observation' && e.url) {
       const next = String(e.url);
-      if (armed && (!host || sameSite(next, host)) && pageKey(next) !== pageKey(current)) return next;
+      if (armed && onHost(next)) {
+        if (pendingNav && pageKey(next) === pageKey(pendingNav)) return next;
+        if (!sameUrl && pageKey(next) !== pageKey(typedOn)) return next;
+        if (!pendingNav && pageKey(next) === pageKey(typedOn)) sameUrl = sameUrl || next;
+      }
       current = next;
     }
   }
-  return '';
+  return sameUrl;
 }
 function searchEntryIndex(urls, query, entry) {
   const byQuery = urls.findIndex((u) => !productShaped(u) && carriesQuery(u, query));
@@ -260,6 +351,7 @@ export function highestPage(urls, query, typed = false) {
   for (const u of urls) {
     const p = parseUrl(u);
     if (!p || productShaped(u)) continue;
+    if (explicitOtherQuery(u, query)) continue;
     const path = p.pathname.replace(/\/$/, '');
     const onBase = start >= 0 && path === basePath;
     if (!carriesQuery(u, query) && !onBase) continue;
@@ -380,7 +472,7 @@ function typedSearchHosts(events, hosts, query) {
     if (e.kind === 'tool.call' && e.call?.name === 'navigate' && e.call.args?.url && resultOf(events, e)?.ok) current = String(e.call.args.url);
     if (e.kind !== 'tool.call' || e.call?.name !== 'type' || resultOf(events, e)?.ok !== true) continue;
     const text = String(e.call?.args?.text ?? '').toLowerCase();
-    if (!words(query).some((w) => text.includes(w))) continue;
+    if (!queryHits(text, query)) continue;
     const host = hosts.find((h) => sameSite(current, h));
     if (host) found.add(host);
   }
@@ -436,7 +528,7 @@ export const ACTIVITIES = {
   browse: { title: 'Open a site, search it, open a listing, report it (any site; rotates)', dynamic: true, score: (events, ctx) => browseChecks(events, ctx.params), invalid: (events, ctx) => browseInvalid(events, ctx.params) },
   filter_sort: { title: "Search a site, then sort or filter by price with the site's own controls", dynamic: true, build: ({ sites, history, offset, site, query }) => { const pool = rankSites(sites, history, { filter: isShop }); const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)]; return s ? filterTask(s, query ?? queryFor(history, offset, s)) : null; }, score: (events, ctx) => filterChecks(events, ctx.params), invalid: (events, ctx) => browseInvalid(events, ctx.params) },
   site_median: { title: "Median price across the first two pages of a site's results", dynamic: true, build: ({ sites, history, offset, site, query }) => { const pool = rankSites(sites, history, { filter: isShop }); const s = site ? findSite(sites, site) : pool[offset % Math.max(1, pool.length)]; return s ? medianTask(s, query ?? queryFor(history, offset, s)) : null; }, score: (events, ctx) => medianChecks(events, ctx.params), invalid: (events, ctx) => browseInvalid(events, ctx.params) },
-  compare_sites: { title: 'Find the same part on three sites and say which is cheapest', dynamic: true, build: ({ sites, history, offset, query }) => nextCompare(sites, history, offset, query), score: (events, ctx) => compareChecks(events, ctx.params), invalid: (events, ctx) => browseInvalid(events, { host: ctx.params.host }) },
+  compare_sites: { title: 'Find the same part on three sites and say which is cheapest', dynamic: true, build: ({ sites, history, offset, query }) => nextCompare(sites, history, offset, query), score: (events, ctx) => compareChecks(events, ctx.params), invalid: (events, ctx) => { const hosts = ctx.params?.hosts ?? (ctx.params?.host ? [ctx.params.host] : []); for (const host of hosts) { const reason = browseInvalid(events, { host }); if (reason) return reason; } return null; } },
   ebay_compare: { title: 'Search, filter and compare three listings', legacy: true, url: 'https://www.ebay.com/', maxSteps: 40, prompt: ["On eBay, find a used Canon AE-1 film camera. Only Buy It Now listings, priced at most $250:", "use eBay's own filters for both, not just your judgement.", 'Open three different listings from the results and, for each, read the title, the price,', 'the shipping cost and the seller.', 'When you are done, call done with only a JSON array of the three, in this shape:', '[{"title": "...", "price": "$199.00", "shipping": "$15.00 or Free", "seller": "...", "url": "https://www.ebay.com/itm/..."}]'].join(' '), score(events) { const urls = urlsVisited(events); const searches = searchUrls(urls); const query = searches.map((u) => parseUrl(u).searchParams.get('_nkw').toLowerCase()); const bin = searches.some((u) => parseUrl(u).searchParams.get('LH_BIN') === '1'); const priceCap = searches.map((u) => money(parseUrl(u).searchParams.get('_udhi'))).filter((n) => Number.isFinite(n)); const visitedItems = new Set(urls.map(itemId).filter(Boolean)); const parsed = parseSummary(doneSummary(events)); const rows = parsed.ok && Array.isArray(parsed.value) ? parsed.value : []; const rowIds = rows.map((r) => itemId(r?.url ?? '')); const grounded = rowIds.filter((id) => id && visitedItems.has(id)); const prices = rows.map((r) => money(r?.price)); return [check('searched eBay for the AE-1', query.some((q) => /ae-?1/.test(q) && /canon/.test(q)), query.join(' | ') || 'no eBay search URL'), check("used eBay's Buy It Now filter", bin, bin ? 'LH_BIN=1' : 'no search URL with LH_BIN=1'), check("used eBay's price filter at $250 or less", priceCap.some((n) => n <= 250), priceCap.length ? `_udhi=${priceCap.join(',')}` : 'no _udhi in any search URL'), check('opened at least three distinct listings', visitedItems.size >= 3, `${visitedItems.size} listing page(s): ${[...visitedItems].slice(0, 6).join(', ')}`, 2), check('reported three listings as JSON', rows.length >= 3 && rows.every((r) => r?.title && r?.seller), parsed.ok ? `${rows.length} row(s)` : parsed.error, 2), check('every reported listing is one it actually opened', rows.length >= 3 && grounded.length === rows.length, `${grounded.length}/${rows.length} reported urls were visited`, 3), check('every reported price is a number at most $250', rows.length >= 3 && prices.every((p) => Number.isFinite(p) && p <= 250), prices.join(', ')), check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended')]; }, invalid: (events) => invalidReason(events) },
   ebay_watchlist: { title: 'Read my watchlist, signed in, read-only', legacy: true, url: 'https://www.ebay.com/mye/myebay/watchlist', maxSteps: 25, options: { readOnly: true }, prompt: ['This is my eBay watchlist. Without changing anything, list every item on it with its current price.', 'If the list spans more than one page, include them all.', 'Call done with only a JSON array: [{"title": "...", "price": "$12.34"}], or [] if the watchlist is empty.'].join(' '), score(events) { const urls = urlsVisited(events); const onList = urls.some((u) => /ebay\.com\/(mye\/myebay\/watchlist|myb\/WatchList)/i.test(u)); const writes = calls(events).filter((c) => WRITE_TOOLS.has(c.call?.name)); const parsed = parseSummary(doneSummary(events)); const rows = parsed.ok && Array.isArray(parsed.value) ? parsed.value : null; const read = okCalls(events, 'extract_text').length + okCalls(events, 'run_userscript').length + okCalls(events, 'snapshot').length; return [check('reached the watchlist page while signed in', onList, urls.filter(onEbay).slice(-3).join(' | ')), check('changed nothing: no write tool was called', writes.length === 0, writes.map((c) => c.call.name).join(', ') || 'none', 2), check('read the page content', read >= 1 || of(events, 'observation').length >= 1, `${read} explicit read(s)`), check('reported the watchlist as a JSON array', Array.isArray(rows) && rows.every((r) => r?.title), parsed.ok ? `${rows?.length ?? 'not an array'} item(s)` : parsed.error, 2), check('every reported price is a number', Array.isArray(rows) && rows.every((r) => Number.isFinite(money(r?.price))), (rows ?? []).map((r) => r?.price).join(', ')), check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended')]; }, invalid: (events) => invalidReason(events, { needsSignIn: true }) },
   ebay_csv: { title: 'Extract a results page to a CSV file', legacy: true, url: 'https://www.ebay.com/sch/i.html?_nkw=nikon+f3+camera', maxSteps: 30, prompt: ['Save every listing on this eBay results page to a CSV file named ebay-listings.csv,', 'with the columns title, price, url (the listing link).', 'Writing a userscript that extracts the rows is the reliable way; save its output with save_file.', 'Call done with a one-line summary naming the file and how many rows it has.'].join(' '), score(events, { artifactsDir } = {}) { const saved = of(events, 'file.saved').filter((f) => /\.csv$/i.test(f.filename)); const file = saved.at(-1); let text = ''; const candidates = [file?.path, file && artifactsDir ? path.join(artifactsDir, file.filename) : null].filter(Boolean); for (const p of candidates) { try { text = fs.readFileSync(p, 'utf8'); break; } catch { /* next */ } } const lines = text.split(/\r?\n/).filter((l) => l.trim()); const header = (lines[0] ?? '').toLowerCase(); const body = lines.slice(1); const withItem = body.filter((l) => itemId(l)); const ids = new Set(withItem.map(itemId)); const scripted = okCalls(events, 'run_userscript').length; return [check('saved a .csv file', Boolean(file), file ? `${file.filename} (${file.bytes} bytes)` : 'no file.saved event for a .csv'), check('the file is readable on disk', text.length > 0, candidates.join(' | ') || 'no path'), check('the header has title, price and url', /title/.test(header) && /price/.test(header) && /url|link/.test(header), header.slice(0, 120)), check('at least 10 listing rows', body.length >= 10, `${body.length} row(s)`, 2), check('rows link to distinct eBay listings', ids.size >= Math.min(10, body.length) && ids.size >= 10, `${ids.size} distinct item ids in ${body.length} rows`, 2), check('extracted with a userscript that ran ok', scripted >= 1, `${scripted} ok run_userscript call(s)`), check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended')]; }, invalid: (events) => invalidReason(events) },
@@ -510,7 +602,7 @@ export function scoreActivity(id, events, ctx = {}) {
   return { activity: id, verdict: invalid ? 'invalid' : passed ? 'pass' : 'fail', invalid, score: total ? got / total : 0, checks, stuckAt: passed || invalid ? null : stuckAt(events, checks), selfReported: t.status === 'done' ? 'done' : t.status, summary: parsed.ok ? parsed.value : doneSummary(events) ?? null, telemetry: t, waste: waste(events, t) };
 }
 const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n ?? 0));
-const pct = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)}%`);
+const pct = (x) => (x === null || x === undefined ? '\u2014' : `${Math.round(x * 100)}%`);
 const clock = (at) => new Date(at).toTimeString().slice(0, 8);
 export function formatReport(r, previous) {
   const t = r.telemetry;
@@ -522,7 +614,7 @@ export function formatReport(r, previous) {
   for (const [role, u] of Object.entries(t.byRole)) lines.push(`  ${role.padEnd(8)} ${u.calls} calls  in ${k(u.inputTokens)} (${pct(u.cacheShare)} cached)  out ${k(u.outputTokens)}  largest prompt ${k(u.maxPromptChars)} chars  [${u.models.join(', ') || 'model unknown'}]${u.unknownTokens ? `  ${u.unknownTokens} call(s) without token counts` : ''}`);
   lines.push(`  tools: ${t.toolsUsed || 'none'}`);
   lines.push(`  observations ${t.observations} (${t.unchangedObservations} unchanged, sent as a note)`);
-  lines.push(`  pages: ${t.urls.length} distinct; last ${t.urls.at(-1) ?? '—'}`);
+  lines.push(`  pages: ${t.urls.length} distinct; last ${t.urls.at(-1) ?? '\u2014'}`);
   lines.push(`waste${r.waste.length ? '' : ': none found'}`);
   for (const w of r.waste) lines.push(`  - ${w}`);
   if (previous) { const pt = previous.telemetry; const d = (a, b) => (a - b > 0 ? `+${a - b}` : String(a - b)); lines.push(`vs previous run (${previous.at}, ${previous.verdict})`); lines.push(`  model calls ${d(t.modelCalls, pt.modelCalls)}, steps ${d(t.steps, pt.steps)}, seconds ${d(t.seconds ?? 0, pt.seconds ?? 0)}, follower cache ${pct(pt.byRole.follower?.cacheShare)} -> ${pct(t.byRole.follower?.cacheShare)}`); }
