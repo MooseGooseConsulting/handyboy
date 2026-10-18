@@ -153,4 +153,23 @@ describe('runUserscript: the target tab is re-resolved before execute', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('cannot resolve the tab URL');
   });
+
+  it('retries execute once when the tab is replaced after the last id check', async () => {
+    const api = vmUserScriptsApi();
+    const execute = api.execute.bind(api);
+    let calls = 0;
+    api.execute = async (injection) => {
+      calls += 1;
+      if (calls === 1) {
+        recordTabReplaced(9, 7);
+        throw new Error('No tab with id: 7');
+      }
+      return execute(injection);
+    };
+    const tabs = { get: async () => ({ url: URL_IN_SCOPE }) };
+    const result = await runUserscript({ tabId: 7, script: script('return 1;'), api, tabs });
+    expect(result).toMatchObject({ ok: true, value: 1 });
+    expect(calls).toBe(2);
+    expect(api.injections.at(-1)?.target).toEqual({ tabId: 9 });
+  });
 });
