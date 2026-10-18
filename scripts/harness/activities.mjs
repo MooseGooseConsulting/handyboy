@@ -48,9 +48,10 @@ function pageTexts(events) {
     if (e.kind === 'observation') consider(e.url || current, longestText(e, ['text', 'snapshot', 'content']));
     if (e.kind !== 'tool.result' || e.result?.ok !== true) continue;
     if (e.result.name && !READ_TOOLS.has(e.result.name)) continue;
+    // The panel summary is about 240 characters and is not the page. A dollar
+    // amount in it is not a price the run read.
     const full = typeof e.result.text === 'string' ? e.result.text : '';
-    const summary = typeof e.result.summary === 'string' ? e.result.summary : '';
-    consider(current, full || summary);
+    if (full) consider(current, full);
   }
   return [...pages.values()];
 }
@@ -107,7 +108,18 @@ const WRITE_TOOLS = new Set(['click', 'hover', 'type', 'press', 'select', 'downl
 export const QUERIES = ['DDR4 32GB 3200 RAM','DDR5 32GB RAM','DDR4 ECC server memory','RTX 3060 graphics card','RX 6700 XT','Ryzen 5 5600X','Intel i7-12700K','1TB NVMe SSD','2TB SATA SSD','ThinkPad T480','Dell OptiPlex 7050','used gaming PC'];
 const hostOf = (u) => (parseUrl(u)?.hostname ?? '').toLowerCase().replace(/^www\./, '');
 const sameSite = (u, host) => { const h = hostOf(u); return Boolean(h) && (h === host || h.endsWith(`.${host}`)); };
-const pageKey = (u) => { const p = parseUrl(u); return p ? `${p.hostname.replace(/^www\./, '')}${p.pathname.replace(/\/$/, '')}` : String(u); };
+const SEARCH_PARAM = /^(q|query|k|keyword|keywords|_nkw|nkw|search|term|text)$/i;
+const pageKey = (u) => {
+  const p = parseUrl(u);
+  if (!p) return String(u);
+  const host = p.hostname.replace(/^www\./, '');
+  const path = p.pathname.replace(/\/$/, '');
+  const keep = [];
+  for (const [k, v] of [...p.searchParams].sort(([a], [b]) => a.localeCompare(b))) {
+    if (PAGE_PARAM.test(k) || SEARCH_PARAM.test(k)) keep.push(`${k}=${v}`);
+  }
+  return keep.length ? `${host}${path}?${keep.join('&')}` : `${host}${path}`;
+};
 const words = (q) => q.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 2);
 const SEARCH_PATH = /\/(search|s|sch|find|results?|suche|recherche|zoeken|buscar|cerca)(\/|$)|^\/s-[^/]+\/k\d+/i;
 const PRODUCT_PATH = /\/(dp|gp\/product|itm|item|items|product|products|p|listing|listings|anzeige|s-anzeige|offer|angebot|threads|ad|annonce|lot|lots)\/[^/]+/i;
@@ -149,13 +161,45 @@ export function titleMatches(title, query) {
   if (!descriptive.length) return true;
   return descriptive.filter((w) => tokens.has(w)).length >= Math.ceil(descriptive.length * 0.6);
 }
+/**
+ * The first results page after a successful type on `host`. The page the query
+ * was typed into stays the search box; the next distinct URL is the results
+ * page, even when that URL does not contain the query.
+ */
+function typedResultsUrl(events, host, query) {
+  let current = '';
+  let armed = false;
+  for (const e of events) {
+    if (e.kind === 'run.started' && e.url) current = e.url;
+    if (e.kind === 'tool.call' && e.call?.name === 'navigate' && e.call.args?.url && resultOf(events, e)?.ok) current = String(e.call.args.url);
+    if (e.kind === 'tool.call' && e.call?.name === 'type' && resultOf(events, e)?.ok === true) {
+      const text = String(e.call?.args?.text ?? '').toLowerCase();
+      if (words(query).some((w) => text.includes(w)) && (!host || sameSite(current, host))) armed = true;
+    }
+    if (e.kind === 'observation' && e.url) {
+      const next = String(e.url);
+      if (armed && (!host || sameSite(next, host)) && pageKey(next) !== pageKey(current)) return next;
+      current = next;
+    }
+  }
+  return '';
+}
+function searchEntryIndex(urls, query, entry) {
+  const byQuery = urls.findIndex((u) => !productShaped(u) && carriesQuery(u, query));
+  if (byQuery >= 0) return byQuery;
+  if (!entry) return -1;
+  const key = pageKey(entry);
+  return urls.findIndex((u) => pageKey(u) === key);
+}
 export function browseChecks(events, { host, query, url: home }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const homeKey = pageKey(home);
-  const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
   const typed = typedQuery(events, query);
-  const after = searchIdx >= 0 ? urls.slice(searchIdx + 1) : typed ? urls.slice(1) : [];
+  const entry = typed ? typedResultsUrl(events, host, query) : '';
+  const searchIdx = searchEntryIndex(urls, query, entry);
+  const after = searchIdx >= 0 ? urls.slice(searchIdx + 1) : [];
   const resultPaths = new Set(urls.filter((u) => !productShaped(u) && carriesQuery(u, query)).map(pageKey));
+  if (searchIdx >= 0) resultPaths.add(pageKey(urls[searchIdx]));
   const listings = after.filter((u) => pageKey(u) !== homeKey && (productShaped(u) || (!carriesQuery(u, query) && !resultPaths.has(pageKey(u)))));
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : Array.isArray(parsed.value) ? parsed.value[0] ?? {} : {};
@@ -206,11 +250,19 @@ export function filterEvidence(urls, query) {
   }
   return null;
 }
-export function highestPage(urls, query) {
+export function highestPage(urls, query, typed = false) {
   let top = 1;
+  const entry = urls.findIndex((u) => !productShaped(u) && carriesQuery(u, query));
+  // A typed search whose results URL omits the query still has a results page:
+  // the first URL after the page the run started on. Pagination is read from that base.
+  const start = entry >= 0 ? entry : typed && urls.length > 1 ? 1 : -1;
+  const basePath = start >= 0 ? (parseUrl(urls[start])?.pathname ?? '').replace(/\/$/, '') : '';
   for (const u of urls) {
     const p = parseUrl(u);
-    if (!p || productShaped(u) || !carriesQuery(u, query)) continue;
+    if (!p || productShaped(u)) continue;
+    const path = p.pathname.replace(/\/$/, '');
+    const onBase = start >= 0 && path === basePath;
+    if (!carriesQuery(u, query) && !onBase) continue;
     for (const [k, v] of p.searchParams) if (PAGE_PARAM.test(k)) top = Math.max(top, Number(v) || 1);
     const inPath = p.pathname.match(/\/(?:page|p|seite)[-/](\d{1,3})(?:\/|$)/i);
     if (inPath) top = Math.max(top, Number(inPath[1]));
@@ -256,7 +308,7 @@ export function medianChecks(events, { host, query }) {
   const urls = urlsVisited(events).filter((u) => sameSite(u, host));
   const searchIdx = urls.findIndex((u) => carriesQuery(u, query));
   const typed = typedQuery(events, query);
-  const page = highestPage(urls, query);
+  const page = highestPage(urls, query, typed);
   const parsed = parseSummary(doneSummary(events));
   const v = parsed.ok && parsed.value && !Array.isArray(parsed.value) ? parsed.value : {};
   const [median, count, low, high] = ['median', 'count', 'low', 'high'].map((k) => money(v[k]));
@@ -310,13 +362,13 @@ export function compareTask(sites, query) {
   const list = sites.map((s) => `${s.name} (${s.url})`).join(', ');
   return { title: `Compare ${sites.map((s) => s.name).join(' / ')}: ${query}`, url: a.url, params: { hosts: sites.map((s) => hostOf(s.url)), names: sites.map((s) => s.name), host: hostOf(a.url), query, url: a.url, site: sites.map((s) => s.name).join(' / ') }, maxSteps: 50, prompt: [`Find ${query} on three sites: ${list}.`, "On each, use the site's own search, open the cheapest listing you can see on the first page of results, and read its title and price.", 'You start on the first one; go to the others with navigate.', 'Call done with only JSON: {"offers": [{"site": "<site name>", "title": "...", "price": "$12.34", "url": "<listing page url>"}, {...}, {...}],', '"cheapest": "<site name of the lowest price>"}.'].join(' ') };
 }
-function listingPages(urls, query, typed = false) {
-  let searchIdx = urls.findIndex((u) => carriesQuery(u, query));
-  // A typed search whose results URL does not carry the query is still the entry.
-  // carriesQuery being false must not throw away the pages that follow it.
-  if (searchIdx < 0 && typed) searchIdx = 0;
+function listingPages(events, host, query) {
+  const urls = urlsVisited(events).filter((u) => sameSite(u, host));
+  const entry = typedResultsUrl(events, host, query);
+  const searchIdx = searchEntryIndex(urls, query, entry);
   const after = searchIdx >= 0 ? urls.slice(searchIdx + 1) : [];
   const resultPaths = new Set(urls.filter((u) => !productShaped(u) && carriesQuery(u, query)).map(pageKey));
+  if (searchIdx >= 0) resultPaths.add(pageKey(urls[searchIdx]));
   return after.filter((u) => productShaped(u) || (!carriesQuery(u, query) && !resultPaths.has(pageKey(u))));
 }
 function typedSearchHosts(events, hosts, query) {
@@ -339,8 +391,15 @@ export function compareChecks(events, { hosts, query, names }) {
   const reached = hosts.filter((h) => visited.some((u) => sameSite(u, h)));
   const { parsed, value, rows } = rowsOf(events, 'offers');
   const prices = rows.map((r) => money(r?.price));
-  const listingsByHost = new Map(hosts.map((h) => [h, listingPages(visited.filter((u) => sameSite(u, h)), query, typedSearchHosts(events, hosts, query).has(h))]));
-  const grounded = rows.filter((r) => { if (typeof r?.url !== 'string') return false; const host = hosts.find((h) => sameSite(r.url, h)); if (!host) return false; return listingsByHost.get(host).some((u) => listingKey(u) === listingKey(r.url)); });
+  const listingsByHost = new Map(hosts.map((h) => [h, listingPages(events, h, query)]));
+  const offerOnPage = (r) => {
+    if (typeof r?.url !== 'string') return false;
+    const text = pageTexts(events).filter((page) => page.url && pageKey(page.url) === pageKey(r.url)).map((page) => page.text).join('\n');
+    const title = String(r?.title ?? '').trim();
+    const price = money(r?.price);
+    return title.length >= 4 && text.toLowerCase().includes(title.toLowerCase()) && pricesRead(text).some((p) => closeMoney(p, price));
+  };
+  const grounded = rows.filter((r) => { if (typeof r?.url !== 'string') return false; const host = hosts.find((h) => sameSite(r.url, h)); if (!host) return false; return listingsByHost.get(host).some((u) => listingKey(u) === listingKey(r.url)) && offerOnPage(r); });
   const sitesNamed = new Set(rows.map((r) => String(r?.site ?? '').toLowerCase()).filter(Boolean));
   const min = prices.every(Number.isFinite) && prices.length ? Math.min(...prices) : NaN;
   const cheapestRow = rows.find((r) => String(r?.site ?? '').toLowerCase() === String(value?.cheapest ?? '').toLowerCase());
@@ -356,7 +415,7 @@ export function compareChecks(events, { hosts, query, names }) {
     check('every reported listing is a page it actually visited', rows.length >= 3 && grounded.length === rows.length, `${grounded.length}/${rows.length} reported urls were visited`, 3),
     check('each offer is bound to the site it was asked for', rows.length >= 3 && oneEach, hosts.map((h) => `${h}:${offersOn.get(h)}`).join(', '), 3),
     check('every price is a number above 0', rows.length >= 3 && prices.every((p) => Number.isFinite(p) && p > 0), prices.join(', ')),
-    check('the cheapest it names is the lowest price it reported', Boolean(cheapestRow) && money(cheapestRow.price) === min, `cheapest=${value?.cheapest}; lowest reported=${min}`, 2),
+    check('the cheapest it names is the lowest price it reported', Boolean(cheapestRow) && money(cheapestRow.price) === min && offerOnPage(cheapestRow), `cheapest=${value?.cheapest}; lowest reported=${min}`, 2),
     check('the listings are for what was searched', rows.length >= 3 && rows.filter((r) => titleMatches(r?.title, query)).length >= 2, rows.map((r) => String(r?.title ?? '').slice(0, 36)).join(' | ')),
     check('each offer names the store that owns its listing', !Array.isArray(names) || names.length !== hosts.length || (rows.length >= 3 && rows.every((r) => { if (typeof r?.url !== 'string') return false; const idx = hosts.findIndex((h) => sameSite(r.url, h)); return idx >= 0 && String(r?.site ?? '').trim().toLowerCase() === String(names[idx]).trim().toLowerCase(); })), Array.isArray(names) ? rows.map((r) => `${r?.site} -> ${r?.url}`).join(' | ') : 'no store list on the task'),
     check('the run ended done', ended(events)?.status === 'done', ended(events)?.status ?? 'no run.ended'),
