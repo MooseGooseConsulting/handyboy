@@ -602,7 +602,7 @@ export function scoreActivity(id, events, ctx = {}) {
   return { activity: id, verdict: invalid ? 'invalid' : passed ? 'pass' : 'fail', invalid, score: total ? got / total : 0, checks, stuckAt: passed || invalid ? null : stuckAt(events, checks), selfReported: t.status === 'done' ? 'done' : t.status, summary: parsed.ok ? parsed.value : doneSummary(events) ?? null, telemetry: t, waste: waste(events, t) };
 }
 const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n ?? 0));
-const pct = (x) => (x === null || x === undefined ? '\u2014' : `${Math.round(x * 100)}%`);
+const pct = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)}%`);
 const clock = (at) => new Date(at).toTimeString().slice(0, 8);
 export function formatReport(r, previous) {
   const t = r.telemetry;
@@ -614,7 +614,7 @@ export function formatReport(r, previous) {
   for (const [role, u] of Object.entries(t.byRole)) lines.push(`  ${role.padEnd(8)} ${u.calls} calls  in ${k(u.inputTokens)} (${pct(u.cacheShare)} cached)  out ${k(u.outputTokens)}  largest prompt ${k(u.maxPromptChars)} chars  [${u.models.join(', ') || 'model unknown'}]${u.unknownTokens ? `  ${u.unknownTokens} call(s) without token counts` : ''}`);
   lines.push(`  tools: ${t.toolsUsed || 'none'}`);
   lines.push(`  observations ${t.observations} (${t.unchangedObservations} unchanged, sent as a note)`);
-  lines.push(`  pages: ${t.urls.length} distinct; last ${t.urls.at(-1) ?? '\u2014'}`);
+  lines.push(`  pages: ${t.urls.length} distinct; last ${t.urls.at(-1) ?? '—'}`);
   lines.push(`waste${r.waste.length ? '' : ': none found'}`);
   for (const w of r.waste) lines.push(`  - ${w}`);
   if (previous) { const pt = previous.telemetry; const d = (a, b) => (a - b > 0 ? `+${a - b}` : String(a - b)); lines.push(`vs previous run (${previous.at}, ${previous.verdict})`); lines.push(`  model calls ${d(t.modelCalls, pt.modelCalls)}, steps ${d(t.steps, pt.steps)}, seconds ${d(t.seconds ?? 0, pt.seconds ?? 0)}, follower cache ${pct(pt.byRole.follower?.cacheShare)} -> ${pct(t.byRole.follower?.cacheShare)}`); }
