@@ -198,6 +198,43 @@ describe('ensureInjected', () => {
     }
   });
 
+  it('injects into the replacement when the tab id changes during executeScript', async () => {
+    resetTabReplacements();
+    const injected = new Set<number>();
+    const api: ChromeApi = {
+      scripting: {
+        async executeScript(injection) {
+          const id = injection.target.tabId;
+          if (id === 1) recordTabReplaced(2, 1);
+          injected.add(id);
+          return [];
+        },
+      },
+      tabs: {
+        async sendMessage(tabId, message) {
+          if (message.op === 'ping') {
+            if (!injected.has(tabId) || tabId === 1) throw new Error('Could not establish connection.');
+            return { ok: true, pong: true, url: '', title: '', devicePixelRatio: 1, width: 0, height: 0 };
+          }
+          if (tabId === 1) throw new Error('No tab with id: 1');
+          return { ok: true };
+        },
+        update: async () => ({}),
+        get: async () => {
+          throw new Error('No tab with id');
+        },
+        captureVisibleTab: async () => 'data:image/png;base64,AAAA',
+        onUpdated: { addListener: () => {}, removeListener: () => {} },
+      },
+    };
+    try {
+      expect(await new PageDriver(api).ensureInjected(1)).toEqual({ ok: true });
+      expect([...injected]).toEqual([1, 2]);
+    } finally {
+      resetTabReplacements();
+    }
+  });
+
   it('re-injects after invalidate(), which navigation triggers', async () => {
     const f = fake();
     const driver = new PageDriver(f.api);
