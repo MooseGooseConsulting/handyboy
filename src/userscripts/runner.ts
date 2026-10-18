@@ -497,10 +497,9 @@ export async function runUserscript(options: RunUserscriptOptions): Promise<User
   if (progressToken) activeProgress.set(progressToken, scriptId);
   const started = now();
   const source = options.code ?? script.code;
-  let results: chrome.userScripts.InjectionResult<WrappedOutcome>[];
-  try {
-    results = await api.execute<WrappedOutcome>({
-      target: { tabId },
+  const inject = (id: number) =>
+    api.execute<WrappedOutcome>({
+      target: { tabId: id },
       js: [
         {
           code: wrapUserscript(source, {
@@ -514,6 +513,44 @@ export async function runUserscript(options: RunUserscriptOptions): Promise<User
       worldId: USERSCRIPT_WORLD_ID,
       injectImmediately: true,
     });
+  // The id can be replaced after the check above and before execute uses it.
+  // Recheck immediately, and if that call still aimed at a removed tab, retry once.
+  let results: chrome.userScripts.InjectionResult<WrappedOutcome>[];
+  const aim = async (): Promise<UserscriptRunResult | number> => {
+    const id = currentTabId(tabId);
+    if (id !== tabId) {
+      tabId = id;
+      const reRefusal = await refused(tabId, true);
+      if (reRefusal) return reRefusal;
+    }
+    return tabId;
+  };
+  try {
+    const aimed = await aim();
+    if (typeof aimed !== 'number') return aimed;
+    let used = aimed;
+    let retried = false;
+    try {
+      results = await inject(used);
+    } catch (error) {
+      const next = currentTabId(used);
+      if (next === used) return failure(scriptId, describe(error), now() - started);
+      const reRefusal = await refused(next, true);
+      if (reRefusal) return reRefusal;
+      tabId = next;
+      used = next;
+      retried = true;
+      results = await inject(next);
+    }
+    if (!retried) {
+      const replaced = currentTabId(used);
+      if (replaced !== used) {
+        const reRefusal = await refused(replaced, true);
+        if (reRefusal) return reRefusal;
+        tabId = replaced;
+        results = await inject(replaced);
+      }
+    }
   } catch (error) {
     return failure(scriptId, describe(error), now() - started);
   } finally {
