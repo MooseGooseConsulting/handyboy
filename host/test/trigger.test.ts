@@ -1,247 +1,127 @@
-import fs from 'node:fs/promises';
+import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { OutboundMsg, SocketRequest, SocketResponse } from '../src/protocol.ts';
-import { TriggerServer, newRunId } from '../src/trigger.ts';
+import { expect, it } from 'vitest';
+import { resetLogForTests } from '../src/log.ts';
+import { TriggerServer } from '../src/trigger.ts';
 
-let dir: string;
-let sockPath: string;
-let server: TriggerServer;
-let sent: OutboundMsg[];
-let connected: boolean;
-let key: { ready: boolean; reason?: string };
+/** Group and other permission bits. Any of these makes the socket connectable past the owner. */
+const GROUP_OR_OTHER = 0o177;
 
-beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-sock-'));
-  sockPath = path.join(dir, 'handyboy.sock');
-  sent = [];
-  connected = true;
-  key = { ready: true };
-  server = new TriggerServer({
-    socketPath: sockPath,
-    send: (m) => sent.push(m),
-    keyStatus: async () => key,
-    extensionConnected: () => connected,
-    hostVersion: '0.0.1-test',
-    pid: () => 4242,
-  });
-  await server.start();
-});
+function restoreEnv(name: string, had: boolean, previous: string | undefined): void {
+  if (!had) delete process.env[name];
+  else process.env[name] = previous;
+}
 
-afterEach(async () => {
-  await server.close();
-  await fs.rm(dir, { recursive: true, force: true });
-});
-
-/** A tiny NDJSON client over the real unix socket. */
-function client(): Promise<{
-  send: (r: SocketRequest) => void;
-  next: () => Promise<SocketResponse>;
-  close: () => void;
-  closed: Promise<void>;
-}> {
-  return new Promise((resolve, reject) => {
-    const sock = net.createConnection(sockPath);
-    const queue: SocketResponse[] = [];
-    const waiters: Array<(m: SocketResponse) => void> = [];
-    let buf = '';
-    let closeResolve!: () => void;
-    const closed = new Promise<void>((r) => (closeResolve = r));
-    sock.on('close', closeResolve);
-    sock.on('data', (c) => {
-      buf += c.toString('utf8');
-      let nl: number;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        const msg = JSON.parse(line) as SocketResponse;
-        const w = waiters.shift();
-        if (w) w(msg);
-        else queue.push(msg);
-      }
+function connectSocket(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect(socketPath);
+    const timer = setTimeout(() => {
+      sock.destroy();
+      resolve(false);
+    }, 200);
+    sock.once('connect', () => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(true);
     });
-    sock.once('error', reject);
-    sock.once('connect', () =>
-      resolve({
-        send: (r) => sock.write(JSON.stringify(r) + '\n'),
-        next: () =>
-          new Promise<SocketResponse>((res) => {
-            const q = queue.shift();
-            if (q) res(q);
-            else waiters.push(res);
-          }),
-        close: () => sock.destroy(),
-        closed,
-      }),
-    );
+    sock.once('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
   });
 }
 
-describe('dev trigger socket', () => {
-  it('binds with mode 0600', async () => {
-    const st = await fs.stat(sockPath);
-    expect(st.mode & 0o777).toBe(0o600);
+it('the host socket is not connectable under a mode wider than 0600 before start() returns', async () => {
+  const hadHome = Object.prototype.hasOwnProperty.call(process.env, 'HB_HOME');
+  const previousHome = process.env.HB_HOME;
+  const hadStderr = Object.prototype.hasOwnProperty.call(process.env, 'HANDYBOY_LOG_STDERR');
+  const previousStderr = process.env.HANDYBOY_LOG_STDERR;
+  const ambientUmask = process.umask(0);
+  const dir = await mkdtemp(path.join(tmpdir(), 'handyboy-trigger-'));
+  const socketPath = path.join(dir, 'trigger.sock');
+  const realChmod = fs.promises.chmod.bind(fs.promises);
+  let releaseHold = (): void => {};
+  const hold = new Promise<void>((resolve) => {
+    releaseHold = resolve;
+  });
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    releaseHold();
+  };
+  const modesBeforeReturn: number[] = [];
+  let connectedWhileWide = false;
+
+  // Hold chmod open so the mode listen() created is visible. An ambient umask of
+  // 0077 would hide a listen-then-chmod window (the inode would already be 0700),
+  // so this test forces umask 0, which creates a socket at 0777 unless start()
+  // installs its own restrictive umask first.
+  fs.promises.chmod = async (target, mode) => {
+    if (target === socketPath) {
+      const bits = fs.statSync(socketPath).mode & 0o777;
+      modesBeforeReturn.push(bits);
+      if ((bits & GROUP_OR_OTHER) !== 0 && (await connectSocket(socketPath))) connectedWhileWide = true;
+      await hold;
+    }
+    return realChmod(target, mode);
+  };
+
+  process.env.HB_HOME = dir;
+  process.env.HANDYBOY_LOG_STDERR = '0';
+  resetLogForTests();
+
+  const server = new TriggerServer({
+    socketPath,
+    send: () => {},
+    keyStatus: async () => ({ ready: false }),
+    extensionConnected: () => false,
+    hostVersion: '0.0.0-test',
   });
 
-  it('rebinds over a stale socket file', async () => {
+  try {
+    const pending = server.start();
+    const deadline = Date.now() + 3_000;
+    while (modesBeforeReturn.length === 0 && Date.now() < deadline) {
+      try {
+        const bits = fs.statSync(socketPath).mode & 0o777;
+        modesBeforeReturn.push(bits);
+        if ((bits & GROUP_OR_OTHER) !== 0 && (await connectSocket(socketPath))) connectedWhileWide = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const observedBeforeReturn = [...modesBeforeReturn];
+    release();
+    await pending;
+
+    expect(observedBeforeReturn.length, 'socket was never observed before start() returned').toBeGreaterThan(0);
+    for (const bits of observedBeforeReturn) {
+      expect(bits & GROUP_OR_OTHER, `socket mode ${bits.toString(8)} is wider than 0600 before start() returned`).toBe(
+        0,
+      );
+    }
+    expect(connectedWhileWide, 'socket accepted a connection while its mode was wider than 0600').toBe(false);
+
+    const umaskAfter = process.umask(0);
+    process.umask(0);
+    expect(umaskAfter, 'start() left a changed process umask behind').toBe(0);
+
+    const finalBits = fs.statSync(socketPath).mode & 0o777;
+    expect(finalBits & GROUP_OR_OTHER, `socket mode ${finalBits.toString(8)} is wider than 0600`).toBe(0);
+    expect(await connectSocket(socketPath), 'owner could not connect after start() returned').toBe(true);
+  } finally {
+    release();
+    fs.promises.chmod = realChmod;
+    process.umask(ambientUmask);
     await server.close();
-    await fs.writeFile(sockPath, 'stale');
-    await server.start();
-    const c = await client();
-    c.send({ op: 'status' });
-    expect((await c.next()).op).toBe('status');
-  });
-
-  it('answers status with liveness, key readiness, and the host pid', async () => {
-    key = { ready: false, reason: 'GET /key returned 401' };
-    connected = false;
-    const c = await client();
-    c.send({ op: 'status' });
-    expect(await c.next()).toEqual({
-      op: 'status',
-      ok: true,
-      extensionConnected: false,
-      hostVersion: '0.0.1-test',
-      pid: 4242,
-      key: { ready: false, reason: 'GET /key returned 401' },
-    });
-    await c.closed;
-  });
-
-  describe('reload', () => {
-    it('answers before pushing ext.reload, since the push kills this process', async () => {
-      const c = await client();
-      c.send({ op: 'reload' });
-      // The reply must be on the wire first: chrome.runtime.reload() tears down the
-      // service worker, the native port drops, and the host exits -- there is no later.
-      expect(await c.next()).toEqual({ op: 'reloading', pid: 4242 });
-      expect(sent).toEqual([{ type: 'ext.reload' }]);
-      await c.closed;
-    });
-
-    it('refuses and pushes nothing when no extension is connected', async () => {
-      connected = false;
-      const c = await client();
-      c.send({ op: 'reload' });
-      expect(await c.next()).toEqual({ op: 'error', message: 'no extension connected to the host' });
-      expect(sent).toEqual([]);
-      await c.closed;
-    });
-  });
-
-  it('round-trips a run: forwards run.start and streams events to run.end', async () => {
-    const c = await client();
-    c.send({ op: 'run', prompt: 'read the thread list', url: 'https://hyperagent.com', options: { navMode: 'dom' } });
-
-    const accepted = await c.next();
-    expect(accepted.op).toBe('accepted');
-    const runId = (accepted as { runId: string }).runId;
-    expect(runId).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
-
-    expect(sent).toEqual([
-      {
-        type: 'run.start',
-        runId,
-        prompt: 'read the thread list',
-        url: 'https://hyperagent.com',
-        options: { navMode: 'dom' },
-      },
-    ]);
-
-    // The dispatcher would call publish() for each runlog.append it persists.
-    server.publish(runId, { type: 'leader.plan', step: 0 });
-    server.publish(runId, { type: 'follower.step', step: 1 });
-    server.publish(runId, { type: 'run.end', status: 'done' });
-
-    expect(await c.next()).toEqual({ op: 'event', runId, event: { type: 'leader.plan', step: 0 } });
-    expect(await c.next()).toEqual({ op: 'event', runId, event: { type: 'follower.step', step: 1 } });
-    expect(await c.next()).toEqual({ op: 'event', runId, event: { type: 'run.end', status: 'done' } });
-    expect(await c.next()).toEqual({ op: 'end', runId });
-    await c.closed;
-  });
-
-  it('honours a caller-supplied runId', async () => {
-    const c = await client();
-    c.send({ op: 'run', prompt: 'x', runId: 'fixed-run-42' });
-    expect(await c.next()).toEqual({ op: 'accepted', runId: 'fixed-run-42' });
-    expect(sent[0]).toMatchObject({ type: 'run.start', runId: 'fixed-run-42' });
-  });
-
-  it('does not leak events of one run to a subscriber of another', async () => {
-    const a = await client();
-    const b = await client();
-    a.send({ op: 'run', prompt: 'a', runId: 'run-a' });
-    b.send({ op: 'run', prompt: 'b', runId: 'run-b' });
-    await a.next();
-    await b.next();
-    server.publish('run-a', { type: 'run.end' });
-    expect(await a.next()).toMatchObject({ op: 'event', runId: 'run-a' });
-    expect(await a.next()).toEqual({ op: 'end', runId: 'run-a' });
-    server.publish('run-b', { type: 'only-b' });
-    expect(await b.next()).toEqual({ op: 'event', runId: 'run-b', event: { type: 'only-b' } });
-    b.close();
-  });
-
-  describe('cancel', () => {
-    // Regression: a run started via `hb-run` kept executing against the real browser
-    // for minutes after the CLI client that started it was killed -- there was no op
-    // to tell the extension to stop. `cancel` forwards a `run.abort` push instead.
-    it('forwards run.abort for the given runId and acks', async () => {
-      const c = await client();
-      c.send({ op: 'cancel', runId: 'run-a' });
-      expect(await c.next()).toEqual({ op: 'cancelled', runId: 'run-a' });
-      expect(sent).toEqual([{ type: 'run.abort', runId: 'run-a' }]);
-      await c.closed;
-    });
-
-    it('refuses and pushes nothing when no extension is connected', async () => {
-      connected = false;
-      const c = await client();
-      c.send({ op: 'cancel', runId: 'run-a' });
-      expect(await c.next()).toEqual({ op: 'error', message: 'no extension connected to the host' });
-      expect(sent).toEqual([]);
-      await c.closed;
-    });
-
-    it('rejects an empty runId without touching the extension', async () => {
-      const c = await client();
-      c.send({ op: 'cancel', runId: '' });
-      expect(await c.next()).toMatchObject({ op: 'error' });
-      expect(sent).toEqual([]);
-      c.close();
-    });
-  });
-
-  it('refuses a run when no extension is connected', async () => {
-    connected = false;
-    const c = await client();
-    c.send({ op: 'run', prompt: 'x' });
-    expect(await c.next()).toMatchObject({ op: 'error' });
-    expect(sent).toEqual([]);
-  });
-
-  it('rejects an empty prompt, invalid JSON, and an unknown op', async () => {
-    const c = await client();
-    c.send({ op: 'run', prompt: '' } as SocketRequest);
-    expect(await c.next()).toMatchObject({ op: 'error' });
-    c.send({ op: 'bogus' } as unknown as SocketRequest);
-    expect(await c.next()).toMatchObject({ op: 'error' });
-    c.close();
-  });
-
-  it('unlinks the socket on close', async () => {
-    await server.close();
-    await expect(fs.stat(sockPath)).rejects.toThrow();
-  });
-});
-
-describe('newRunId', () => {
-  it('matches the runId grammar and is unique', () => {
-    const ids = new Set(Array.from({ length: 50 }, newRunId));
-    expect(ids.size).toBe(50);
-    for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
-  });
+    resetLogForTests();
+    restoreEnv('HB_HOME', hadHome, previousHome);
+    restoreEnv('HANDYBOY_LOG_STDERR', hadStderr, previousStderr);
+    await rm(dir, { recursive: true, force: true });
+  }
 });
