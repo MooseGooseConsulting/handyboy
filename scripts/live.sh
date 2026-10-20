@@ -78,6 +78,23 @@ wait_for_extension() {
   done
 }
 
+# A worker loaded before the host rename still connects to com.nanobrowser.host and
+# only opens nanobrowser.sock. Waking its page does not reload it, and hb-reload
+# speaks only to handyboy.sock, which that worker never binds. Ask the previous
+# host to reload once; the build copied above is what comes back.
+legacy_host_reload() {
+  local sock="${XDG_RUNTIME_DIR:-$HOME/.local/share/nanobrowser/run}/nanobrowser.sock"
+  [ -S "$sock" ] || return 1
+  node --input-type=module -e '
+    import net from "node:net";
+    const sock = net.createConnection(process.argv[1]);
+    const timer = setTimeout(() => process.exit(0), 2000);
+    sock.on("connect", () => sock.write("{\"op\":\"reload\"}\n"));
+    sock.on("data", () => { clearTimeout(timer); sock.end(); process.exit(0); });
+    sock.on("error", () => process.exit(1));
+  ' "$sock"
+}
+
 cmd_setup() {
   step "prerequisites"
   for bin in node jq doppler python3 rsync; do
@@ -144,6 +161,10 @@ cmd_setup() {
   fi
 
   step "extension"
+  if ! host_up && legacy_host_reload; then
+    echo "asked the previous host to reload so this build can connect as Handyboy"
+    wait_for_extension 45 || true
+  fi
   if host_up; then
     host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "hb-reload failed (host/bin/hb-logs)"
     echo "reloaded in place"

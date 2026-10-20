@@ -58,7 +58,8 @@ usage: scripts/e2e.sh [options]
   --reload-timeout <s>   seconds to wait for the reloaded extension
   --skip-build           reuse .output/chrome-mv3 as it stands
   --expect <status>      run.ended status to require (default done; e.g. blocked)
-  --expect-file <name>   require ~/.local/share/handyboy/artifacts/<runId>/<name> to exist
+  --expect-file <name>   require <data>/handyboy/artifacts/<runId>/<name> to exist
+                         (data is $HB_HOME/.local/share, else $XDG_DATA_HOME or ~/.local/share)
                          (a .json file must also be nonempty: not null, "", [], or {})
   --expect-result <jq>   jq filter the done summary, parsed as JSON, must satisfy
                          (env HB_E2E_EXPECT_RESULT; default: three {title,status} rows for
@@ -261,7 +262,11 @@ fi
 if [ -n "$EXPECT_FILE" ]; then
   step "saved file"
   RUN_ID="$(jq -rs '[.[] | .runId // empty] | last // empty' "$STREAM" 2>/dev/null)"
-  ART="${XDG_DATA_HOME:-$HOME/.local/share}/handyboy/artifacts/$RUN_ID/$EXPECT_FILE"
+  if [ -n "${HB_HOME:-}" ]; then
+    ART="$HB_HOME/.local/share/handyboy/artifacts/$RUN_ID/$EXPECT_FILE"
+  else
+    ART="${XDG_DATA_HOME:-$HOME/.local/share}/handyboy/artifacts/$RUN_ID/$EXPECT_FILE"
+  fi
   if [ -n "$RUN_ID" ] && [ -s "$ART" ]; then
     echo "$ART ($(wc -c <"$ART") bytes)"
     if [[ "$EXPECT_FILE" == *.json ]]; then
