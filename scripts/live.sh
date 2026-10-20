@@ -83,7 +83,8 @@ wait_for_extension() {
 # speaks only to handyboy.sock, which that worker never binds. Ask the previous
 # host to reload once; the build copied above is what comes back.
 legacy_host_reload() {
-  local sock="${XDG_RUNTIME_DIR:-$HOME/.local/share/nanobrowser/run}/nanobrowser.sock"
+  # Same fallback the previous host used: runtime dir, else <data dir>/run.
+  local sock="${XDG_RUNTIME_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nanobrowser/run}/nanobrowser.sock"
   [ -S "$sock" ] || return 1
   node --input-type=module -e '
     import net from "node:net";
