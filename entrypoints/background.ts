@@ -30,12 +30,12 @@ export default defineBackground(() => {
   // The toolbar action opens the side panel (R-05). Chrome 114+, needs the sidePanel permission.
   void chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((error: unknown) => console.error('[nanobrowser] setPanelBehavior failed', error));
+    .catch((error: unknown) => console.error('[handyboy] setPanelBehavior failed', error));
 
   chrome.runtime.onInstalled.addListener(() => {
     // The bundled example userscripts land on first install (R-09).
     void seedDefaults().catch((error: unknown) =>
-      console.error('[nanobrowser] seedDefaults failed', error),
+      console.error('[handyboy] seedDefaults failed', error),
     );
   });
 
@@ -95,7 +95,7 @@ export default defineBackground(() => {
     onUserScriptMessage?: { addListener(cb: (message: { type?: string; level?: unknown; text?: unknown; at?: unknown }) => void): void };
   };
   runtime.onUserScriptMessage?.addListener((message) => {
-    if (message?.type === 'nanobrowser.userscript.progress') notifyUserscriptProgress(message);
+    if (message?.type === 'handyboy.userscript.progress') notifyUserscriptProgress(message);
   });
 
   chrome.runtime.onConnect.addListener((port) => {

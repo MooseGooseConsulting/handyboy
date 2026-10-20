@@ -1,6 +1,6 @@
 /**
  * Preloaded into the HARNESS's own host process only (`node --import` in the wrapper the
- * harness writes into its temp dir; host/bin/nanobrowser-host is never touched). Replaces
+ * harness writes into its temp dir; host/bin/handyboy-host is never touched). Replaces
  * `globalThis.fetch`, which is the host's only way out to a model.
  *
  * OpenRouter-shaped requests are answered by a scripted Leader and Follower defined
@@ -13,12 +13,12 @@
  * land, or a page read that came back empty produces a wrong answer or `blocked`, and
  * the harness verdict fails.
  *
- * Every request/response pair is appended to NB_HARNESS_UPSTREAM_LOG when set.
+ * Every request/response pair is appended to HB_HARNESS_UPSTREAM_LOG when set.
  */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 
-const logPath = process.env.NB_HARNESS_UPSTREAM_LOG;
+const logPath = process.env.HB_HARNESS_UPSTREAM_LOG;
 
 const ROW_RE = /\b([A-Z]{2}-\d{4})\s*·\s*([^·\n]+?)\s*·\s*(\d+) in stock/g;
 const REVEAL_RE = /button "Reveal inventory" \[ref=(e\d+)\]/;
@@ -179,7 +179,7 @@ globalThis.fetch = async (input, init = {}) => {
     throw new Error(`harness: scripted upstream refuses ${u.origin}`);
   }
   if (u.pathname.endsWith('/key')) {
-    return json(200, { data: { label: 'nanobrowser harness scripted upstream' } });
+    return json(200, { data: { label: 'Handyboy harness scripted upstream' } });
   }
   if (u.pathname.endsWith('/models')) {
     const model = (id) => ({ id, name: id, context_length: 32768, pricing: { prompt: '0', completion: '0' }, supported_parameters: ['tools'] });

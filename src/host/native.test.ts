@@ -451,10 +451,10 @@ describe('saveArtifact', () => {
       runId: 'run-1',
       filename: 'result.json',
       bytes: 7,
-      path: '/home/user/.local/share/nanobrowser/artifacts/run-1/result.json',
+      path: '/home/user/.local/share/handyboy/artifacts/run-1/result.json',
     });
     await expect(promise).resolves.toEqual({
-      path: '/home/user/.local/share/nanobrowser/artifacts/run-1/result.json',
+      path: '/home/user/.local/share/handyboy/artifacts/run-1/result.json',
       bytes: 7,
     });
   });

@@ -45,7 +45,7 @@ describe('runUserscript', () => {
 
     expect(api.worldConfigs).toEqual([
       { messaging: false, csp: undefined },
-      { worldId: 'nanobrowser', messaging: true, csp: undefined },
+      { worldId: 'handyboy', messaging: true, csp: undefined },
     ]);
   });
 

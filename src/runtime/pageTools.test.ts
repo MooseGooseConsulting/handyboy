@@ -508,7 +508,7 @@ describe('read-only runs (M9 #13)', () => {
       runId: 'run-1',
       filename: 'data.json',
       bytes: 7,
-      path: 'nanobrowser/data.json',
+      path: 'handyboy/data.json',
       at: expect.any(Number),
     });
   });
@@ -519,7 +519,7 @@ describe('read-only runs (M9 #13)', () => {
       runId: 'run-2',
       saveArtifact: async (filename, content) => {
         calls.push([filename, content]);
-        return { path: `/home/user/.local/share/nanobrowser/artifacts/run-2/${filename}`, bytes: content.length };
+        return { path: `/home/user/.local/share/handyboy/artifacts/run-2/${filename}`, bytes: content.length };
       },
     });
     const result = await h.tools.saveFile('out.csv', 'a,b\n1,2', false);

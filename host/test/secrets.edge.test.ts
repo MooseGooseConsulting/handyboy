@@ -28,8 +28,8 @@ async function loadSecrets() {
 
 beforeEach(() => {
   execFileMock.mockReset();
-  delete process.env.NANOBROWSER_DOPPLER_PROJECT;
-  delete process.env.NANOBROWSER_DOPPLER_CONFIG;
+  delete process.env.HANDYBOY_DOPPLER_PROJECT;
+  delete process.env.HANDYBOY_DOPPLER_CONFIG;
 });
 
 describe('DopplerSecretProvider.get', () => {
@@ -44,7 +44,7 @@ describe('DopplerSecretProvider.get', () => {
 
   it('resolves null with a categorical reason, never echoing the child error text', async () => {
     // Node folds the child's stderr into err.message, so the message is untrusted
-    // input: it must not reach the reason (host.log, nb-status) even when it looks
+    // input: it must not reach the reason (host.log, hb-status) even when it looks
     // like a helpful diagnostic.
     execFileMock.mockImplementation((_cmd, _args, _opts, cb) =>
       cb(Object.assign(new Error('doppler: not logged in'), { code: 1 }), ''),
@@ -151,8 +151,8 @@ describe('DopplerSecretProvider.get', () => {
   });
 
   it('shells out to doppler with the secret name and the project/config from env, as an argument array', async () => {
-    process.env.NANOBROWSER_DOPPLER_PROJECT = 'my-project';
-    process.env.NANOBROWSER_DOPPLER_CONFIG = 'prod';
+    process.env.HANDYBOY_DOPPLER_PROJECT = 'my-project';
+    process.env.HANDYBOY_DOPPLER_CONFIG = 'prod';
     execFileMock.mockImplementation((_cmd, _args, _opts, cb) => cb(null, 'v'));
     const { DopplerSecretProvider } = await loadSecrets();
 

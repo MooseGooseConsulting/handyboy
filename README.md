@@ -1,4 +1,4 @@
-# nanobrowser-v2
+# Handyboy
 
 A browser agent that drives **your** real Chrome, in **your** real logged-in session, and
 tries very hard not to look like a robot while doing it.
@@ -46,7 +46,7 @@ the LangGraph state machine, and speaks one typed message contract
 **The native messaging host** (`host/`) is the daemon. There is no listening TCP port and no
 auth token, because Chrome's `allowed_origins` already decides who may talk to it. It reads
 the OpenRouter key from Doppler so the extension never holds a credential, streams model
-responses back in chunks, appends run logs to `~/.local/share/nanobrowser/runs/`, writes
+responses back in chunks, appends run logs to `~/.local/share/handyboy/runs/`, writes
 saved artifacts, forwards extension errors to `ext.log`, and can reload the extension in
 place. In dev it also listens on a unix socket so the CLI can start a run.
 
@@ -145,10 +145,10 @@ After that the loop is closed and needs no clicking:
 
 ```bash
 scripts/e2e.sh                    # build → reload → readiness → run → assert
-host/bin/nb-run "<prompt>" --url https://example.com
-host/bin/nb-status                # host up? key ready? extension connected?
-host/bin/nb-reload                # reload the extension in place
-host/bin/nb-logs                  # errors the extension forwarded
+host/bin/hb-run "<prompt>" --url https://example.com
+host/bin/hb-status                # host up? key ready? extension connected?
+host/bin/hb-reload                # reload the extension in place
+host/bin/hb-logs                  # errors the extension forwarded
 ```
 
 Tests:

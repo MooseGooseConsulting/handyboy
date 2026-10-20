@@ -173,7 +173,7 @@ export async function ensureWorldConfigured(api: UserScriptsApi): Promise<void> 
  * Everything in it is JSON-safe: Chrome JSON-serializes the return value.
  */
 export interface WrappedOutcome {
-  __nanobrowserUserscript: 1;
+  __handyboyUserscript: 1;
   ok: boolean;
   value?: unknown;
   error: { name: string; message: string; stack: string | null } | null;
@@ -192,7 +192,7 @@ export interface WrappedOutcome {
  * returns its result with a top-level `return`.
  */
 /** World that may message the extension. The default world stays messaging-off. */
-export const USERSCRIPT_WORLD_ID = 'nanobrowser';
+export const USERSCRIPT_WORLD_ID = 'handyboy';
 
 /** Default ceiling so a hung fetch cannot hold the agent forever. */
 export const DEFAULT_DEADLINE_MS = 120_000;
@@ -242,7 +242,7 @@ const WRAPPER_PREFIX_TAIL = `;
     try {
       const rt = __nbG.chrome && __nbG.chrome.runtime;
       if (__nbProgressToken && rt && typeof rt.sendMessage === 'function') {
-        const sent = rt.sendMessage({ type: 'nanobrowser.userscript.progress', token: __nbProgressToken, level: line.level, text: line.text, at: line.at });
+        const sent = rt.sendMessage({ type: 'handyboy.userscript.progress', token: __nbProgressToken, level: line.level, text: line.text, at: line.at });
         if (sent && typeof sent.then === 'function') sent.then(undefined, function () {});
       }
     } catch (e) {}
@@ -325,7 +325,7 @@ const WRAPPER_SUFFIX = `
     }
   }
   return {
-    __nanobrowserUserscript: 1,
+    __handyboyUserscript: 1,
     ok: __nbOk,
     value: __nbValue,
     error: __nbError,
@@ -494,7 +494,7 @@ export async function runUserscript(options: RunUserscriptOptions): Promise<User
   if (first.error) return failure(scriptId, rebaseInjectionError(first.error), elapsed);
 
   const outcome = first.result;
-  if (!outcome || outcome.__nanobrowserUserscript !== 1) {
+  if (!outcome || outcome.__handyboyUserscript !== 1) {
     return failure(scriptId, 'unrecognised injection result', elapsed);
   }
 
@@ -579,7 +579,7 @@ export function setUserscriptProgressListener(
   progressListener = listener;
 }
 
-/** Called from the extension when a userscript world messages `nanobrowser.userscript.progress`. */
+/** Called from the extension when a userscript world messages `handyboy.userscript.progress`. */
 export function notifyUserscriptProgress(message: {
   token?: unknown;
   level?: unknown;

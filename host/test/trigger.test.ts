@@ -15,7 +15,7 @@ let key: { ready: boolean; reason?: string };
 
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-sock-'));
-  sockPath = path.join(dir, 'nanobrowser.sock');
+  sockPath = path.join(dir, 'handyboy.sock');
   sent = [];
   connected = true;
   key = { ready: true };
@@ -186,7 +186,7 @@ describe('dev trigger socket', () => {
   });
 
   describe('cancel', () => {
-    // Regression: a run started via `nb-run` kept executing against the real browser
+    // Regression: a run started via `hb-run` kept executing against the real browser
     // for minutes after the CLI client that started it was killed -- there was no op
     // to tell the extension to stop. `cancel` forwards a `run.abort` push instead.
     it('forwards run.abort for the given runId and acks', async () => {

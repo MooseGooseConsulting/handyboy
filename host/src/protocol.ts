@@ -3,7 +3,7 @@
  * See docs/host-protocol.md for the normative description.
  */
 
-export const HOST_NAME = 'com.nanobrowser.host';
+export const HOST_NAME = 'com.handyboy.host';
 export const OPENROUTER_BASE = 'https://openrouter.ai/api/v1/';
 /** Kilo AI Gateway: OpenAI-compatible, bearer-authed (docs/host-protocol.md). */
 export const KILO_BASE = 'https://api.kilo.ai/api/gateway/';
@@ -245,7 +245,7 @@ export type SocketResponse =
       ok: true;
       extensionConnected: boolean;
       hostVersion: string;
-      /** This host process. nb-reload watches it change to prove a NEW host came up. */
+      /** This host process. hb-reload watches it change to prove a NEW host came up. */
       pid: number;
       key: { ready: boolean; reason?: string };
     }

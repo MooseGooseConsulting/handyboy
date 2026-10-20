@@ -29,7 +29,7 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col bg-paper text-ink">
       <header className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <h1 className="text-base font-semibold tracking-tight">nanobrowser</h1>
+        <h1 className="text-base font-semibold tracking-tight">Handyboy</h1>
         <div className="flex items-center gap-2 text-xs text-muted" title={panel.hub.status}>
           <span className={`size-2 rounded-full ${DOT[panel.hub.status]}`} aria-hidden />
           <span data-testid="hub-status">{panel.hub.status}</span>

@@ -441,7 +441,7 @@ export function createPageToolset(page: PageTools, options: { readOnly?: boolean
       {
         name: 'save_file',
         description:
-          'Save data to a file in the user\'s Downloads/nanobrowser folder. Give it a filename ' +
+          'Save data to a file in the user\'s Downloads/handyboy folder. Give it a filename ' +
           'ending .json, .txt or .csv and either content, or fromLastUserscript:true to save the ' +
           'full result of the most recent run_userscript call losslessly.',
         schema: z.object({

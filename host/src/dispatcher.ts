@@ -19,9 +19,9 @@ export interface DispatcherDeps {
   send: (msg: OutboundMsg) => void;
   llm: LlmProxy;
   runsDir: string;
-  /** Where extension-forwarded diagnostics land. Defaults to ~/.local/share/nanobrowser/ext.log. */
+  /** Where extension-forwarded diagnostics land. Defaults to ~/.local/share/handyboy/ext.log. */
   extLogPath?: string;
-  /** Base directory for `artifact.save`. Defaults to ~/.local/share/nanobrowser/artifacts. */
+  /** Base directory for `artifact.save`. Defaults to ~/.local/share/handyboy/artifacts. */
   artifactsDir?: string;
   /** Mirrors run-log events to dev unix-socket subscribers. */
   onRunEvent?: (runId: string, event: unknown) => void;
@@ -38,7 +38,7 @@ export class Dispatcher {
   /**
    * The tail of each run's append chain. main.ts handles frames concurrently, and two
    * awaited appendFile calls can land in either order -- run.end overtaking run.ended
-   * made the trigger close nb-run's stream before the run's own terminal event.
+   * made the trigger close hb-run's stream before the run's own terminal event.
    */
   readonly #runLogTails = new Map<string, Promise<void>>();
 

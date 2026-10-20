@@ -6,7 +6,7 @@
  *
  * Issue #5: the store validates every provider value as a single token, so a
  * malformed backend can never smuggle a multi-line blob into an Authorization
- * header -- the key stays null and the reason says why (what `nb-status`
+ * header -- the key stays null and the reason says why (what `hb-status`
  * reports instead of attempting the live GET /key that used to 401).
  */
 import { describe, expect, it } from 'vitest';
@@ -97,7 +97,7 @@ describe('SecretStore.load rejects non-token values (issue #5)', () => {
     expect(store.missingReason).not.toContain('aaa bbb');
   });
 
-  it('surfaces a provider-supplied failure reason verbatim (what nb-status prints)', async () => {
+  it('surfaces a provider-supplied failure reason verbatim (what hb-status prints)', async () => {
     const failing: SecretProvider = {
       name: 'doppler',
       get: async () => ({ value: null, reason: 'OPENROUTER_API_KEY from doppler failed: doppler: not logged in' }),

@@ -11,15 +11,15 @@
 #   --skip-build     reuse .output/chrome-mv3 as it stands
 #   --keep           keep the /tmp dir (profiles, wrappers, sockets) for inspection
 #   --headed         show the harness's browser windows
-#   --seed N         fixture seed (env NB_HARNESS_SEED; default random, printed)
-#   --run-timeout S  per-run cap on nb-run (env NB_HARNESS_RUN_TIMEOUT; default 180)
+#   --seed N         fixture seed (env HB_HARNESS_SEED; default random, printed)
+#   --run-timeout S  per-run cap on hb-run (env HB_HARNESS_RUN_TIMEOUT; default 180)
 #   --live           run the live tier after the scripted tier (real Doppler key, real
 #                    Nemotron pair on OpenRouter, real ebay.com plus local fixtures)
 #   --live-only      run only the live tier
 #   --scripted-only  run only the scripted tier (the default)
-#   --live-tasks csv comma-separated live tasks (env NB_HARNESS_LIVE_TASKS; default all 9:
+#   --live-tasks csv comma-separated live tasks (env HB_HARNESS_LIVE_TASKS; default all 9:
 #                    ebay,userscript_debug,inventory,download,escalation,readonly,login,redaction,stall)
-#   --live-timeout S per-run cap on live nb-run (env NB_HARNESS_LIVE_TIMEOUT; default 600)
+#   --live-timeout S per-run cap on live hb-run (env HB_HARNESS_LIVE_TIMEOUT; default 600)
 #
 # What one invocation does:
 #
@@ -34,14 +34,14 @@
 #          --load-extension/--disable-extensions-except), so the extension is loaded at
 #          process start and there is no Allow or Load-unpacked click.
 #        - That wrapper sets XDG_CONFIG_HOME to a temp dir. The native-messaging manifest
-#          com.nanobrowser.host.json is written into <profile>/NativeMessagingHosts (where
+#          com.handyboy.host.json is written into <profile>/NativeMessagingHosts (where
 #          Chrome on Linux looks when --user-data-dir is set) and into the temp XDG dirs,
 #          allowed_origins chrome-extension://dnicmmdhogcepeiooangkhhmdgphmonb/ (the id
 #          pinned by the key in wxt.config.ts). ~/.config/google-chrome and
 #          ~/.config/chromium are never read or written, and port 9222 is never used:
 #          the browser's CDP endpoint is its own --remote-debugging-port=0.
 #        - The manifest points at a wrapper in the temp dir that runs THIS repo's
-#          host/src/main.ts with NB_HOME and NANOBROWSER_SOCK inside the run's own
+#          host/src/main.ts with HB_HOME and HANDYBOY_SOCK inside the run's own
 #          directories, a `doppler` shim first on PATH (the real Doppler is never
 #          called), and `node --import scripts/harness/scripted-upstream.mjs`.
 #      The phase is `scripted`: a fresh profile against the main fixture, expected to
@@ -56,7 +56,7 @@
 #          Target.getTargets, then Runtime.evaluate chrome.runtime.id inside the worker)
 #        - the native host was spawned by that browser, is this repo's host/src/main.ts,
 #          and reports extensionConnected
-#        - nb-run over the host socket (inputFidelity=in-page, observe=dom) completes, and
+#        - hb-run over the host socket (inputFidelity=in-page, observe=dom) completes, and
 #          the stream it prints equals the run log the host persisted, event for event
 #        - scripts/harness/verdict.mjs over that persisted run JSONL: run.started first;
 #          run.ended and the host's run.end both `done`; a Leader->Follower handoff and a
@@ -71,7 +71,7 @@
 #      tampered 10 ways (wrong stock, wrong SKU, [], {}, prose, reordered rows, handoffs
 #      removed, status error, click failed, page read removed); every tampered copy must
 #      FAIL the verdict.
-#   6. The user's own host socket ($XDG_RUNTIME_DIR/nanobrowser.sock) is unchanged.
+#   6. The user's own host socket ($XDG_RUNTIME_DIR/handyboy.sock) is unchanged.
 #
 # Everything lands in runs/harness-<UTC stamp>/: harness.log, and under scripted/
 # run.jsonl (stream), runlog.jsonl (persisted), verdict.txt, host.log, ext.log,
@@ -90,7 +90,7 @@
 # per task (scripts/harness/ui-inspect.mjs, screenshot stored per task), and
 # scripts/harness/scorecard.mjs prints one line per task plus a total, exiting 0 only
 # on a full pass. If GET /key is not ready the tier fails closed with `live blocked`
-# before any task runs. `NB_E2E_*` (scripts/e2e.sh overrides) are never read here.
+# before any task runs. `HB_E2E_*` (scripts/e2e.sh overrides) are never read here.
 #
 # Needs: node (>= 22, host runs .ts directly), jq, agent-browser with its Chrome for Testing
 # (`agent-browser install`). Exit 0 = every asserted check passed; 1 = anything else;
@@ -102,21 +102,21 @@ cd "$ROOT"
 
 EXT_ID=dnicmmdhogcepeiooangkhhmdgphmonb
 EXT_DIR="$ROOT/.output/chrome-mv3"
-HOST_NAME=com.nanobrowser.host
+HOST_NAME=com.handyboy.host
 HARNESS="$ROOT/scripts/harness"
 
 SKIP_BUILD=0
 HEADED=0
 KEEP=0
-SEED="${NB_HARNESS_SEED:-$(( (RANDOM << 15 | RANDOM) % 1000000 + 1 ))}"
-RUN_TIMEOUT="${NB_HARNESS_RUN_TIMEOUT:-180}"
+SEED="${HB_HARNESS_SEED:-$(( (RANDOM << 15 | RANDOM) % 1000000 + 1 ))}"
+RUN_TIMEOUT="${HB_HARNESS_RUN_TIMEOUT:-180}"
 LIVE=0
 LIVE_ONLY=0
 SCRIPTED_ONLY=0
-LIVE_TASKS="${NB_HARNESS_LIVE_TASKS:-ebay,userscript_debug,inventory,download,escalation,readonly,login,redaction,stall}"
-LIVE_TIMEOUT="${NB_HARNESS_LIVE_TIMEOUT:-600}"
-LIVE_LEADER="${NB_HARNESS_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
-LIVE_FOLLOWER="${NB_HARNESS_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
+LIVE_TASKS="${HB_HARNESS_LIVE_TASKS:-ebay,userscript_debug,inventory,download,escalation,readonly,login,redaction,stall}"
+LIVE_TIMEOUT="${HB_HARNESS_LIVE_TIMEOUT:-600}"
+LIVE_LEADER="${HB_HARNESS_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
+LIVE_FOLLOWER="${HB_HARNESS_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
 
 usage() { awk 'NR == 1 { next } /^[^#]/ { exit } { print }' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -183,7 +183,7 @@ echo "node:         $NODE_BIN ($("$NODE_BIN" --version))"
 echo "agent-browser $(agent-browser --version 2>/dev/null | awk '{print $2}'), browser: $CFT_BIN"
 
 # The user's own host socket, if any. The harness must leave it exactly as it found it.
-REAL_SOCK="${XDG_RUNTIME_DIR:-$HOME/.local/share/nanobrowser/run}/nanobrowser.sock"
+REAL_SOCK="${XDG_RUNTIME_DIR:-$HOME/.local/share/handyboy/run}/handyboy.sock"
 real_sock_id() { stat -c '%i %Y' "$REAL_SOCK" 2>/dev/null || echo absent; }
 REAL_SOCK_BEFORE="$(real_sock_id)"
 
@@ -245,21 +245,21 @@ run_phase() { # <name> <fixture url> <fixture dir>
 
   step "phase $name: fixture=$url"
 
-  cat >"$D/nanobrowser-host" <<WRAP
+  cat >"$D/handyboy-host" <<WRAP
 #!/bin/sh
 # Written by scripts/harness.sh for one phase. Spawned by the harness's own browser only.
-NANOBROWSER_DEV=1
-NANOBROWSER_SOCK=$D/nb.sock
-NB_HOME=$D/home
-NB_HARNESS_UPSTREAM_LOG=$OUT/upstream.jsonl
+HANDYBOY_DEV=1
+HANDYBOY_SOCK=$D/nb.sock
+HB_HOME=$D/home
+HB_HARNESS_UPSTREAM_LOG=$OUT/upstream.jsonl
 PATH=$TMP/bin:\$PATH
-export NANOBROWSER_DEV NANOBROWSER_SOCK NB_HOME NB_HARNESS_UPSTREAM_LOG PATH
+export HANDYBOY_DEV HANDYBOY_SOCK HB_HOME HB_HARNESS_UPSTREAM_LOG PATH
 exec "$NODE_BIN" --import "$HARNESS/scripted-upstream.mjs" "$ROOT/host/src/main.ts" "\$@"
 WRAP
-  chmod 0755 "$D/nanobrowser-host"
+  chmod 0755 "$D/handyboy-host"
   local manifest
-  manifest="$(jq -n --arg path "$D/nanobrowser-host" --arg origin "chrome-extension://$EXT_ID/" \
-    '{name: "com.nanobrowser.host", description: "nanobrowser harness host", path: $path, type: "stdio", allowed_origins: [$origin]}')"
+  manifest="$(jq -n --arg path "$D/handyboy-host" --arg origin "chrome-extension://$EXT_ID/" \
+    '{name: "com.handyboy.host", description: "Handyboy harness host", path: $path, type: "stdio", allowed_origins: [$origin]}')"
   local mdir
   for mdir in "$D/profile/NativeMessagingHosts" "$D"/xdg/*/NativeMessagingHosts; do
     printf '%s\n' "$manifest" >"$mdir/$HOST_NAME.json"
@@ -339,12 +339,12 @@ CHROME
   local status="" i
   for i in $(seq 1 60); do
     if [ -S "$D/nb.sock" ]; then
-      status="$(NANOBROWSER_SOCK="$D/nb.sock" host/bin/nb-status 2>/dev/null)"
+      status="$(HANDYBOY_SOCK="$D/nb.sock" host/bin/hb-status 2>/dev/null)"
       jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1 && break
     fi
     sleep 0.5
   done
-  printf '%s\n' "$status" >"$OUT/nb-status.json"
+  printf '%s\n' "$status" >"$OUT/hb-status.json"
   if jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1; then
     local host_pid; host_pid="$(jq -r .pid <<<"$status")"
     local host_cmd; host_cmd="$(tr '\0' ' ' </proc/"$host_pid"/cmdline 2>/dev/null)"
@@ -362,8 +362,8 @@ CHROME
   # A dev run acts on the active tab; make sure it is the fixture, not a new-tab page.
   ab open "$url" >/dev/null 2>&1 || true
   local stream="$OUT/run.jsonl"
-  echo "  run: nb-run (timeout ${RUN_TIMEOUT}s) -> $stream"
-  NANOBROWSER_SOCK="$D/nb.sock" timeout "$RUN_TIMEOUT" host/bin/nb-run "$PROMPT" \
+  echo "  run: hb-run (timeout ${RUN_TIMEOUT}s) -> $stream"
+  HANDYBOY_SOCK="$D/nb.sock" timeout "$RUN_TIMEOUT" host/bin/hb-run "$PROMPT" \
     --url "$url" \
     --option leaderModel=harness/scripted-leader \
     --option followerModel=harness/scripted-follower \
@@ -371,15 +371,15 @@ CHROME
     --option inputFidelity=in-page \
     --option planningInterval=5 \
     --option maxSteps=12 \
-    >"$stream" 2>"$OUT/nb-run.stderr"
+    >"$stream" 2>"$OUT/hb-run.stderr"
   local rc=$?
-  echo "  nb-run exit $rc, $(wc -l <"$stream") events, $(tr '\n' ' ' <"$OUT/nb-run.stderr")"
+  echo "  hb-run exit $rc, $(wc -l <"$stream") events, $(tr '\n' ' ' <"$OUT/hb-run.stderr")"
 
   # The product's own run log, persisted by the host. The verdict judges this file; the
-  # nb-run stream must carry exactly the same events in the same order.
+  # hb-run stream must carry exactly the same events in the same order.
   local run_id runlog="$OUT/runlog.jsonl"
-  run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$OUT/nb-run.stderr" | head -n1 | cut -d= -f2)"
-  if [ -n "$run_id" ] && cp "$D/home/.local/share/nanobrowser/runs/$run_id.jsonl" "$runlog" 2>/dev/null; then
+  run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$OUT/hb-run.stderr" | head -n1 | cut -d= -f2)"
+  if [ -n "$run_id" ] && cp "$D/home/.local/share/handyboy/runs/$run_id.jsonl" "$runlog" 2>/dev/null; then
     ok "host persisted run log $run_id.jsonl ($(wc -l <"$runlog") events)"
   else
     bad "no persisted run log for runId=${run_id:-<none>}"; : >"$runlog"
@@ -388,9 +388,9 @@ CHROME
            (if .result then "ok=\(.result.ok)" else empty end), .status // empty] | map(select(. != "")) | join(" ")' "$runlog" \
     | sed 's/^/    /'
   if [ -s "$runlog" ] && [ "$(jq -c . "$stream")" = "$(jq -c . "$runlog")" ]; then
-    ok "the nb-run stream delivered every run-log event, in order"
+    ok "the hb-run stream delivered every run-log event, in order"
   else
-    bad "the nb-run stream ($(wc -l <"$stream") events) differs from the persisted run log ($(wc -l <"$runlog") events)"
+    bad "the hb-run stream ($(wc -l <"$stream") events) differs from the persisted run log ($(wc -l <"$runlog") events)"
   fi
 
   # --- page state after the run, straight from the browser
@@ -399,8 +399,8 @@ CHROME
   ab snapshot >"$OUT/page-after.txt" 2>&1 || true
   tail -n +"$((hits_before + 1))" "$fixdir/hits.jsonl" >"$OUT/fixture-hits.jsonl" 2>/dev/null || true
 
-  cp "$D/home/.local/share/nanobrowser/host.log" "$OUT/host.log" 2>/dev/null || true
-  cp "$D/home/.local/share/nanobrowser/ext.log" "$OUT/ext.log" 2>/dev/null || : >"$OUT/ext.log"
+  cp "$D/home/.local/share/handyboy/host.log" "$OUT/host.log" 2>/dev/null || true
+  cp "$D/home/.local/share/handyboy/ext.log" "$OUT/ext.log" 2>/dev/null || : >"$OUT/ext.log"
 
   # --- verdict
   echo "  verdict:"
@@ -464,20 +464,20 @@ run_live() {
   step "live browser + host (real Doppler key, real network)"
   local doppler_dir=""
   if command -v doppler >/dev/null 2>&1; then doppler_dir="$(dirname "$(command -v doppler)"):"; fi
-  cat >"$D/nanobrowser-host" <<WRAP
+  cat >"$D/handyboy-host" <<WRAP
 #!/bin/sh
 # Written by scripts/harness.sh for the live tier. Spawned by the harness's own browser only.
-NANOBROWSER_DEV=1
-NANOBROWSER_SOCK=$D/nb.sock
-NB_HOME=$D/home
+HANDYBOY_DEV=1
+HANDYBOY_SOCK=$D/nb.sock
+HB_HOME=$D/home
 PATH=${doppler_dir}\$PATH
-export NANOBROWSER_DEV NANOBROWSER_SOCK NB_HOME PATH
+export HANDYBOY_DEV HANDYBOY_SOCK HB_HOME PATH
 exec "$NODE_BIN" "$ROOT/host/src/main.ts" "\$@"
 WRAP
-  chmod 0755 "$D/nanobrowser-host"
+  chmod 0755 "$D/handyboy-host"
   local manifest
-  manifest="$(jq -n --arg path "$D/nanobrowser-host" --arg origin "chrome-extension://$EXT_ID/" \
-    '{name: "com.nanobrowser.host", description: "nanobrowser harness host (live)", path: $path, type: "stdio", allowed_origins: [$origin]}')"
+  manifest="$(jq -n --arg path "$D/handyboy-host" --arg origin "chrome-extension://$EXT_ID/" \
+    '{name: "com.handyboy.host", description: "Handyboy harness host (live)", path: $path, type: "stdio", allowed_origins: [$origin]}')"
   local mdir
   for mdir in "$D/profile/NativeMessagingHosts" "$D"/xdg/*/NativeMessagingHosts; do
     printf '%s\n' "$manifest" >"$mdir/$HOST_NAME.json"
@@ -548,12 +548,12 @@ CHROME
   local status="" i
   for i in $(seq 1 60); do
     if [ -S "$D/nb.sock" ]; then
-      status="$(NANOBROWSER_SOCK="$D/nb.sock" host/bin/nb-status 2>/dev/null)"
+      status="$(HANDYBOY_SOCK="$D/nb.sock" host/bin/hb-status 2>/dev/null)"
       jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1 && break
     fi
     sleep 0.5
   done
-  printf '%s\n' "$status" >"$OUT/nb-status.json"
+  printf '%s\n' "$status" >"$OUT/hb-status.json"
   if ! jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1; then
     bad "live native host never reported extensionConnected at $D/nb.sock"; return
   fi
@@ -561,8 +561,8 @@ CHROME
 
   # Fail closed: no key, no tasks, no pass. The scorecard prints `live blocked`.
   local key_ready key_reason
-  key_ready="$(jq -r .key.ready "$OUT/nb-status.json")"
-  key_reason="$(jq -r '.key.reason // "GET /key is not ready"' "$OUT/nb-status.json")"
+  key_ready="$(jq -r .key.ready "$OUT/hb-status.json")"
+  key_reason="$(jq -r '.key.reason // "GET /key is not ready"' "$OUT/hb-status.json")"
   if [ "$key_ready" != "true" ]; then
     echo "live blocked: $key_reason"
     jq -n --arg reason "$key_reason" --arg leader "$LIVE_LEADER" --arg follower "$LIVE_FOLLOWER" \
@@ -599,10 +599,10 @@ CHROME
     echo "  url: $url"
 
     hits_total="$(wc -l <"$WORK/fixture-live/hits.jsonl" 2>/dev/null || echo 0)"
-    host_lines="$(wc -l <"$D/home/.local/share/nanobrowser/host.log" 2>/dev/null || echo 0)"
-    ext_lines="$(wc -l <"$D/home/.local/share/nanobrowser/ext.log" 2>/dev/null || echo 0)"
+    host_lines="$(wc -l <"$D/home/.local/share/handyboy/host.log" 2>/dev/null || echo 0)"
+    ext_lines="$(wc -l <"$D/home/.local/share/handyboy/ext.log" 2>/dev/null || echo 0)"
 
-    # read-only needs stored readOnly on: nb-run --option values are strings and the
+    # read-only needs stored readOnly on: hb-run --option values are strings and the
     # worker only honours a boolean readOnly, so the option cannot carry it. The Setup
     # toggle is the real path, and the plan expects it on for this task anyway.
     if [ "$task" = "readonly" ] && [ -n "$panel_target" ]; then
@@ -616,7 +616,7 @@ CHROME
 
     ab_live open "$url" >/dev/null 2>&1 || true
     # The panel target stole focus when it was created; the worker refuses to run on
-    # an extension page, so the task tab must be frontmost before nb-run.
+    # an extension page, so the task tab must be frontmost before hb-run.
     if node "$HARNESS/ui-inspect.mjs" --mode activate --ws "$ws" --match "${url%%\?*}" >"$OUT/$task-activate.json" 2>&1; then
       ok "task tab is frontmost ($(jq -r .url "$OUT/$task-activate.json" | cut -c1-80))"
     else
@@ -626,19 +626,19 @@ CHROME
     local opt_args=()
     while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
       < <(jq -r '.options | to_entries[] | select(.key != "readOnly") | "\(.key)=\(.value)"' "$TJSON")
-    echo "  run: nb-run (timeout ${LIVE_TIMEOUT}s) -> $stream"
-    NANOBROWSER_SOCK="$D/nb.sock" timeout "$LIVE_TIMEOUT" host/bin/nb-run "$prompt" \
-      --url "$url" "${opt_args[@]}" >"$stream" 2>"$OUT/$task-nb-run.stderr"
+    echo "  run: hb-run (timeout ${LIVE_TIMEOUT}s) -> $stream"
+    HANDYBOY_SOCK="$D/nb.sock" timeout "$LIVE_TIMEOUT" host/bin/hb-run "$prompt" \
+      --url "$url" "${opt_args[@]}" >"$stream" 2>"$OUT/$task-hb-run.stderr"
     local rc=$?
-    echo "  nb-run exit $rc, $(wc -l <"$stream") events"
+    echo "  hb-run exit $rc, $(wc -l <"$stream") events"
 
     local run_id runlog="$OUT/$task-runlog.jsonl"
-    run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$OUT/$task-nb-run.stderr" | head -n1 | cut -d= -f2)"
+    run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$OUT/$task-hb-run.stderr" | head -n1 | cut -d= -f2)"
     if [ "$rc" -eq 124 ] && [ -n "$run_id" ]; then
-      echo "  nb-run timed out; cancelling $run_id so the next task starts clean"
-      NANOBROWSER_SOCK="$D/nb.sock" host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true
+      echo "  hb-run timed out; cancelling $run_id so the next task starts clean"
+      HANDYBOY_SOCK="$D/nb.sock" host/bin/hb-cancel "$run_id" >/dev/null 2>&1 || true
     fi
-    if [ -n "$run_id" ] && cp "$D/home/.local/share/nanobrowser/runs/$run_id.jsonl" "$runlog" 2>/dev/null; then
+    if [ -n "$run_id" ] && cp "$D/home/.local/share/handyboy/runs/$run_id.jsonl" "$runlog" 2>/dev/null; then
       ok "host persisted run log $run_id.jsonl ($(wc -l <"$runlog") events)"
     else
       bad "no persisted run log for runId=${run_id:-<none>}"; : >"$runlog"
@@ -648,8 +648,8 @@ CHROME
     # below (the inspection requires it on); it is reset after aggregation.
 
     tail -n +"$((hits_total + 1))" "$WORK/fixture-live/hits.jsonl" >"$OUT/$task-hits.jsonl" 2>/dev/null || true
-    tail -n +"$((host_lines + 1))" "$D/home/.local/share/nanobrowser/host.log" >"$OUT/$task-host.log" 2>/dev/null || : >"$OUT/$task-host.log"
-    tail -n +"$((ext_lines + 1))" "$D/home/.local/share/nanobrowser/ext.log" >"$OUT/$task-ext.log" 2>/dev/null || : >"$OUT/$task-ext.log"
+    tail -n +"$((host_lines + 1))" "$D/home/.local/share/handyboy/host.log" >"$OUT/$task-host.log" 2>/dev/null || : >"$OUT/$task-host.log"
+    tail -n +"$((ext_lines + 1))" "$D/home/.local/share/handyboy/ext.log" >"$OUT/$task-ext.log" 2>/dev/null || : >"$OUT/$task-ext.log"
 
     # eBay ground truth, scraped independently from the results DOM (not the userscript).
     local page_arg=()

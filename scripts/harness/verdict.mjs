@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The harness verdict over one run stream (the JSONL nb-run prints).
+ * The harness verdict over one run stream (the JSONL hb-run prints).
  *
  *   node scripts/harness/verdict.mjs --stream <run.jsonl> --expected <expected.json>
  *        [--hits <fixture hits.jsonl>] [--ext-log <ext.log>] [--tamper <kind>]

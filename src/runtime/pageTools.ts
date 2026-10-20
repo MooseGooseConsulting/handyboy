@@ -208,7 +208,7 @@ export class EscalatableInput {
       this.#emit({ kind: 'input.fidelity', fidelity: 'escalated', attached: true, at: this.#now() });
     } catch (error) {
       this.#fidelity = 'in-page';
-      console.warn('[nanobrowser] debugger attach failed; staying on the in-page tier', error);
+      console.warn('[handyboy] debugger attach failed; staying on the in-page tier', error);
       this.#emit({ kind: 'input.fidelity', fidelity: 'in-page', attached: false, at: this.#now() });
     }
   }
@@ -221,7 +221,7 @@ export class EscalatableInput {
     try {
       await this.#debuggerTier.detach();
     } catch (error) {
-      console.warn('[nanobrowser] debugger detach failed', error);
+      console.warn('[handyboy] debugger detach failed', error);
     }
   }
 
@@ -232,7 +232,7 @@ export class EscalatableInput {
   handleDetach(reason: string): void {
     if (this.#fidelity !== 'escalated') return;
     this.#fidelity = 'in-page';
-    console.warn(`[nanobrowser] debugger detached (${reason}); falling back to the in-page tier`);
+    console.warn(`[handyboy] debugger detached (${reason}); falling back to the in-page tier`);
     this.#emit({ kind: 'input.fidelity', fidelity: 'in-page', attached: false, at: this.#now() });
   }
 
@@ -636,7 +636,7 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
         lastUserscriptValue = result.value;
         hasLastUserscriptValue = true;
         void options.userscriptValueStore?.save(result.value).catch((error: unknown) => {
-          console.warn('[nanobrowser] could not persist the last userscript value', error);
+          console.warn('[handyboy] could not persist the last userscript value', error);
         });
       }
       if (!result.ok) {
@@ -685,7 +685,7 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
           // The closure is empty but a store exists: this tool instance was
           // born in a restart. Adopt the durable value when there is one.
           const stored = await options.userscriptValueStore.load().catch((error: unknown) => {
-            console.warn('[nanobrowser] could not load the last userscript value', error);
+            console.warn('[handyboy] could not load the last userscript value', error);
             return { found: false as const };
           });
           if (stored.found) {
@@ -738,7 +738,7 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
       }
       const downloadNote = downloadRes.ok
         ? ''
-        : `; could not save to Downloads/nanobrowser: ${downloadRes.error ?? 'unknown error'}`;
+        : `; could not save to Downloads/handyboy: ${downloadRes.error ?? 'unknown error'}`;
 
       // R-07: one run-log entry the panel renders as a file-saved card, regardless
       // of which of the two save mechanisms actually succeeded.
@@ -747,7 +747,7 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
         runId: options.runId ?? '',
         filename,
         bytes,
-        path: artifactPath ?? `nanobrowser/${filename}`,
+        path: artifactPath ?? `handyboy/${filename}`,
         at: now(),
       });
 

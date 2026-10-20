@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
  * Live-tier task definitions: the nine tasks from the plan, each with its URL,
- * its prompt, and the nb-run options it needs.
+ * its prompt, and the hb-run options it needs.
  *
  *   node scripts/harness/live-tasks.mjs --list
  *   node scripts/harness/live-tasks.mjs --task <id> --expected <expected.json> --base-url <url>
  *     [--leader <model>] [--follower <model>]
  *
  * The second form prints one JSON object: {id, title, url, prompt, options}.
- * The harness feeds it straight to nb-run. Prompts are written for small free
+ * The harness feeds it straight to hb-run. Prompts are written for small free
  * models: numbered steps, the exact done schema, and "no other text".
  */
 import fs from 'node:fs';
@@ -113,7 +113,7 @@ function stallPrompt() {
 }
 
 /**
- * Builds the nb-run invocation for one task. `expected` is the live fixture's
+ * Builds the hb-run invocation for one task. `expected` is the live fixture's
  * expected.json; `baseUrl` is its base URL (no trailing slash).
  */
 export function buildTask(id, expected, baseUrl, models = {}) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** nb-status -- host liveness plus validated key readiness (R-11). Exit 0 only if both. */
+/** hb-status -- host liveness plus validated key readiness (R-11). Exit 0 only if both. */
 import { connect, onResponses, send } from './socket-client.ts';
 
 const sock = await connect();

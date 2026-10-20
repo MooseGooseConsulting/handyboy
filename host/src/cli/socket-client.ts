@@ -10,7 +10,7 @@ export function connect(p: string = socketPath()): Promise<net.Socket> {
     sock.once('error', (err: NodeJS.ErrnoException) => {
       reject(
         err.code === 'ENOENT' || err.code === 'ECONNREFUSED'
-          ? new Error(`no host listening at ${p} (is Chrome running with the dev host? NANOBROWSER_DEV=1)`)
+          ? new Error(`no host listening at ${p} (is Chrome running with the dev host? HANDYBOY_DEV=1)`)
           : err,
       );
     });

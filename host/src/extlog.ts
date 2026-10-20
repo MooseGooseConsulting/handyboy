@@ -3,7 +3,7 @@
  *
  * Extension errors are otherwise only visible on chrome://extensions, which defeats an
  * unattended loop. The worker and the panel forward them here; the host writes one JSON
- * object per line to ~/.local/share/nanobrowser/ext.log and mirrors errors into host.log
+ * object per line to ~/.local/share/handyboy/ext.log and mirrors errors into host.log
  * so a single tail shows both sides of a failure.
  *
  * The extension redacts on the way out; `redact()` runs again here. Neither side trusts

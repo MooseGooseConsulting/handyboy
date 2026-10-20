@@ -41,9 +41,9 @@ function setup(options: { send?: (entry: ExtLogEntry) => void } = {}) {
 describe('console wrapping', () => {
   it('forwards console.error and still makes the original call', () => {
     const h = setup();
-    h.con.error('[nanobrowser] boom', 42);
-    expect(h.originalError).toHaveBeenCalledWith('[nanobrowser] boom', 42);
-    expect(h.sent).toEqual([{ level: 'error', source: 'worker', message: '[nanobrowser] boom 42', at: 111 }]);
+    h.con.error('[handyboy] boom', 42);
+    expect(h.originalError).toHaveBeenCalledWith('[handyboy] boom', 42);
+    expect(h.sent).toEqual([{ level: 'error', source: 'worker', message: '[handyboy] boom 42', at: 111 }]);
   });
 
   it('forwards console.warn at warn level', () => {

@@ -261,7 +261,7 @@ export class RunManager {
   async restoreReplay(runId: RunId): Promise<void> {
     if (this.#ring.has(runId)) return;
     const stored = await this.#deps.replayStore?.load(runId).catch((error: unknown) => {
-      console.warn('[nanobrowser] could not load persisted replay', error);
+      console.warn('[handyboy] could not load persisted replay', error);
       return undefined;
     });
     if (!stored) return;
@@ -287,7 +287,7 @@ export class RunManager {
           at: now(),
         });
       } catch (error) {
-        console.warn('[nanobrowser] could not publish the restarted run end', error);
+        console.warn('[handyboy] could not publish the restarted run end', error);
       }
       return;
     }
@@ -297,7 +297,7 @@ export class RunManager {
     try {
       this.#deps.host.appendRunLog(runId, { type: 'run.end', runId, status: 'error', message, steps, at: now() });
     } catch (error) {
-      console.warn('[nanobrowser] could not publish the restarted run end', error);
+      console.warn('[handyboy] could not publish the restarted run end', error);
     }
   }
 
@@ -390,7 +390,7 @@ export class RunManager {
 
     const listAvailable = this.#deps.listAvailableUserscripts ?? defaultListAvailableUserscripts;
     const availableUserscripts = await listAvailable(await this.#liveUrl(tab)).catch((error: unknown) => {
-      console.warn('[nanobrowser] could not list available userscripts', error);
+      console.warn('[handyboy] could not list available userscripts', error);
       return [];
     });
 
@@ -432,7 +432,7 @@ export class RunManager {
 
     this.#active = { runId, handle, input };
     void this.#deps.saveLastRunId?.(runId).catch((error: unknown) => {
-      console.warn('[nanobrowser] could not persist session:lastRunId', error);
+      console.warn('[handyboy] could not persist session:lastRunId', error);
     });
 
     const done = handle.done
@@ -449,7 +449,7 @@ export class RunManager {
         setUserscriptProgressListener(undefined);
         // R-13 hygiene: the escalated session is held for exactly one run.
         await input.detach().catch((error: unknown) => {
-          console.warn('[nanobrowser] input detach failed', error);
+          console.warn('[handyboy] input detach failed', error);
         });
         // Durability: done resolves only once the terminal snapshot has landed,
         // so a worker restart right after success cannot restore a stale prefix
@@ -517,13 +517,13 @@ export class RunManager {
       try {
         listener(runId, event);
       } catch (error) {
-        console.warn('[nanobrowser] run-event listener threw', error);
+        console.warn('[handyboy] run-event listener threw', error);
       }
     }
     try {
       this.#deps.host.appendRunLog(runId, event);
     } catch (error) {
-      console.warn('[nanobrowser] appendRunLog failed', error);
+      console.warn('[handyboy] appendRunLog failed', error);
     }
   }
 
@@ -554,7 +554,7 @@ export class RunManager {
     const protect = this.#active ? [this.#active.runId] : [];
     const save = prev.catch(() => {}).then(() => this.#deps.replayStore?.save(runId, snapshot, { protect }));
     const tail = save.catch((error: unknown) => {
-      console.warn('[nanobrowser] could not persist replay event', error);
+      console.warn('[handyboy] could not persist replay event', error);
     });
     this.#persistTails.set(runId, tail);
     if (event.kind === 'run.ended') {

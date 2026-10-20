@@ -3,7 +3,7 @@ import { dataDir, hostLogPath } from './paths.ts';
 
 /**
  * Diagnostics only. Chrome owns stdout, so everything human-readable goes to
- * ~/.local/share/nanobrowser/host.log and to stderr.
+ * ~/.local/share/handyboy/host.log and to stderr.
  *
  * Nothing that could carry the API key is ever passed in, and as a second line of
  * defence every line is run through redact() before it is written.
@@ -48,7 +48,7 @@ export function log(level: 'info' | 'warn' | 'error', message: string, fields?: 
     JSON.stringify({ ts: new Date().toISOString(), level, message, ...(fields ?? {}) }),
   );
   sink()?.write(line + '\n');
-  if (process.env.NANOBROWSER_LOG_STDERR !== '0') process.stderr.write(line + '\n');
+  if (process.env.HANDYBOY_LOG_STDERR !== '0') process.stderr.write(line + '\n');
 }
 
 /** Test seam: forget the cached stream and registered secrets. */

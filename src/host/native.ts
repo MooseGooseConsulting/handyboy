@@ -16,7 +16,7 @@ import type { ModelInfo, PanelToWorker, Readiness, RunEvent } from '@/src/messag
 import type { ModelSource } from '@/src/storage';
 import { redactEvent, redactText } from './redact';
 
-export const HOST_NAME = 'com.nanobrowser.host';
+export const HOST_NAME = 'com.handyboy.host';
 
 /** Initial reconnect delay; doubles on each consecutive disconnect, capped below. */
 export const INITIAL_BACKOFF_MS = 250;
@@ -461,7 +461,7 @@ export class HostClient {
     }
     if (body.errors) {
       for (const [source, message] of Object.entries(body.errors)) {
-        console.warn(`[nanobrowser] ${source} model catalog fetch failed: ${message}`);
+        console.warn(`[handyboy] ${source} model catalog fetch failed: ${message}`);
       }
     }
     return models;

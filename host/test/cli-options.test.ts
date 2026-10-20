@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseRunOptions } from '../src/cli/options.ts';
 
-describe('nb-run --option parsing', () => {
+describe('hb-run --option parsing', () => {
   it('turns true and false into booleans so readOnly can override the stored toggle', () => {
     expect(parseRunOptions(['go', '--option', 'readOnly=false', '--option', 'x=true'])).toEqual({
       readOnly: false,

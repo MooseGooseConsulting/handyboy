@@ -1,9 +1,9 @@
 {
-  "name": "@nanobrowser/host",
+  "name": "@handyboy/host",
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "Native-messaging host + local daemon for the nanobrowser extension.",
+  "description": "Native-messaging host + local daemon for the Handyboy extension.",
   "scripts": {
     "start": "node src/main.ts",
     "test": "vitest run",

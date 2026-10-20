@@ -17,7 +17,7 @@ import { TriggerServer } from './trigger.ts';
 
 export const HOST_VERSION = '0.0.1';
 
-const dev = process.env.NANOBROWSER_DEV === '1' || process.argv.includes('--dev');
+const dev = process.env.HANDYBOY_DEV === '1' || process.argv.includes('--dev');
 
 function send(msg: OutboundMsg): void {
   try {

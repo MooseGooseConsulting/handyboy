@@ -1,13 +1,13 @@
 # Host protocol
 
 The native-messaging host **is** the daemon. One process, one channel: Chrome spawns
-`host/bin/nanobrowser-host` over stdio when the extension calls `chrome.runtime.connectNative`,
+`host/bin/handyboy-host` over stdio when the extension calls `chrome.runtime.connectNative`,
 and everything the host does happens on that channel. There is no listening TCP port and no
 auth token, because `allowed_origins` in the host manifest already restricts who may talk to
 it — only our extension ID, no wildcards.
 
-Host name: `com.nanobrowser.host`.
-Manifest: `~/.config/{google-chrome,chromium}/NativeMessagingHosts/com.nanobrowser.host.json`,
+Host name: `com.handyboy.host`.
+Manifest: `~/.config/{google-chrome,chromium}/NativeMessagingHosts/com.handyboy.host.json`,
 written by `host/install.sh`.
 
 What it provides:
@@ -39,7 +39,7 @@ A frame declaring more than the inbound limit is a protocol violation: the host 
 exits. An outbound message over 1 MB throws before it is written — this is why response bodies
 are chunked (below) rather than buffered.
 
-stdout belongs to the protocol. Diagnostics go to `~/.local/share/nanobrowser/host.log` and
+stdout belongs to the protocol. Diagnostics go to `~/.local/share/handyboy/host.log` and
 stderr. The API key is never logged: nothing secret-shaped is passed to the logger, and every
 line is additionally run through a redactor before it is written.
 
@@ -65,7 +65,7 @@ Sent once, immediately after startup.
 { "type": "hello", "hostVersion": "0.0.1", "dev": false }
 ```
 
-`dev` reflects `NANOBROWSER_DEV=1` / `--dev`.
+`dev` reflects `HANDYBOY_DEV=1` / `--dev`.
 
 ### `key.status` → `key.status.result`
 
@@ -173,7 +173,7 @@ Aborts the in-flight request with that `id`; the stream terminates with
 ```
 
 Appends `JSON.stringify(event) + "\n"` to
-`~/.local/share/nanobrowser/runs/<runId>.jsonl`.
+`~/.local/share/handyboy/runs/<runId>.jsonl`.
 
 `runId` **must** match `[A-Za-z0-9_-]{1,64}`; anything else is rejected with `bad_request` and
 nothing is written. The validation runs before the string touches a path, so no `runId` can
@@ -189,17 +189,17 @@ run misbehaves (R-12).
 ### `artifact.save` → `artifact.save.result`
 
 The Follower tool `save_file`'s native-messaging half (the other half is
-`chrome.downloads.download` straight to the user's Downloads/nanobrowser folder — see
+`chrome.downloads.download` straight to the user's Downloads/handyboy folder — see
 `src/agent/tools.ts` and `src/runtime/pageTools.ts`).
 
 ```json
 { "type": "artifact.save", "id": "f1", "runId": "run-mgh1-9f3c", "filename": "ddr5-sold.json", "content": "…" }
 { "type": "artifact.save.result", "id": "f1", "runId": "run-mgh1-9f3c", "filename": "ddr5-sold.json", "bytes": 4821,
-  "path": "/home/user/.local/share/nanobrowser/artifacts/run-mgh1-9f3c/ddr5-sold.json" }
+  "path": "/home/user/.local/share/handyboy/artifacts/run-mgh1-9f3c/ddr5-sold.json" }
 ```
 
 Writes `content` verbatim to
-`~/.local/share/nanobrowser/artifacts/<runId>/<filename>`, creating both directories as
+`~/.local/share/handyboy/artifacts/<runId>/<filename>`, creating both directories as
 needed, mode `0600`. The extension already validated `filename` (basename only, an
 allowed extension, no separators, no `..`) before it ever sent this, but the host never
 trusts a client-supplied path: `filename` is re-validated from scratch (`bad_request` on a
@@ -215,7 +215,7 @@ than written partially.
 { "type": "log.ack", "id": "g1", "ok": true }
 ```
 
-Appends one JSON line to `~/.local/share/nanobrowser/ext.log`, and mirrors `error` entries
+Appends one JSON line to `~/.local/share/handyboy/ext.log`, and mirrors `error` entries
 into `host.log` prefixed `[ext:<source>]` so one tail shows both sides of a failure.
 
 `level` is `error` | `warn` | `info`; `source` is `worker` | `panel`. Anything else is
@@ -230,7 +230,7 @@ The extension redacts (`redactText`, `src/host/redact.ts`) before it posts, and 
 redacts the serialized line again before it writes: neither side trusts the other with a
 secret (R-12). Nothing matching `sk-or-` survives either pass.
 
-Read it with `host/bin/nb-logs [--since <iso>] [--level error|warn|info] [--json]`, which
+Read it with `host/bin/hb-logs [--since <iso>] [--level error|warn|info] [--json]`, which
 reads the file directly rather than the socket — the log outlives every host process, and
 after a reload the host that saw the error is already gone.
 
@@ -281,9 +281,9 @@ which kills the host process that sent it. Nothing after the push runs, on eithe
 
 ## Dev trigger (unix socket)
 
-Bound only when `NANOBROWSER_DEV=1` (or `--dev`, which `install.sh --dev` bakes into the wrapper).
-Path: `$XDG_RUNTIME_DIR/nanobrowser.sock`, mode `0600`, unlinked on exit and re-bound over a
-stale file. Override with `NANOBROWSER_SOCK`.
+Bound only when `HANDYBOY_DEV=1` (or `--dev`, which `install.sh --dev` bakes into the wrapper).
+Path: `$XDG_RUNTIME_DIR/handyboy.sock`, mode `0600`, unlinked on exit and re-bound over a
+stale file. Override with `HANDYBOY_SOCK`.
 
 A unix socket rather than a loopback TCP port: it is filesystem-permissioned, outside the network
 namespace, and unreachable from any page in the browser. It is a control channel that drives the
@@ -314,7 +314,7 @@ Host → client:
 
 `reload` answers `reloading` **before** it pushes `ext.reload`, because the push kills this
 host: there is no "after". `pid` is this host process, and it is how a caller tells a new
-host from the one it just asked to die — `nb-reload` polls `status` until the pid has
+host from the one it just asked to die — `hb-reload` polls `status` until the pid has
 changed *and* `extensionConnected` is true again.
  After `accepted`, the client receives one
 `event` per `runlog.append` for that run, then `end` once an event with `type: "run.end"` passes
@@ -325,10 +325,10 @@ CLIs:
 
 | CLI | What it does |
 | --- | --- |
-| `nb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]` | streams the run log to stdout |
-| `nb-status` | prints the status object; exits non-zero unless the key is ready |
-| `nb-reload [--timeout <s>]` | reloads the extension in place; exits 0 with the new host pid, 2 if no extension is connected, 1 on timeout (default 30 s) |
-| `nb-logs [--since <iso>] [--level <level>] [--json] [--file <path>]` | prints `ext.log` entries |
+| `hb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]` | streams the run log to stdout |
+| `hb-status` | prints the status object; exits non-zero unless the key is ready |
+| `hb-reload [--timeout <s>]` | reloads the extension in place; exits 0 with the new host pid, 2 if no extension is connected, 1 on timeout (default 30 s) |
+| `hb-logs [--since <iso>] [--level <level>] [--json] [--file <path>]` | prints `ext.log` entries |
 
 `scripts/e2e.sh` chains the first four into one unattended loop; see
 `docs/research/live-testing-real-chrome.md` § Unattended testing.
@@ -337,7 +337,7 @@ CLIs:
 
 `OPENROUTER_API_KEY` and `KILO_CODE_API_KEY` are each fetched once at startup, in parallel, with
 `doppler secrets get <NAME> --plain -p ai-automation -c dev`
-(project/config overridable via `NANOBROWSER_DOPPLER_PROJECT` / `NANOBROWSER_DOPPLER_CONFIG` —
+(project/config overridable via `HANDYBOY_DOPPLER_PROJECT` / `HANDYBOY_DOPPLER_CONFIG` —
 one project/config pair covers both secrets, matching where the user's Doppler already keeps
 them). Either one being absent is independent of the other: neither crashes the host, and each
 source's readiness is tracked separately (`SecretStore.status('openrouter' | 'kilo')` in
@@ -357,9 +357,9 @@ presence-only (`SecretStore.status('kilo')`), not a round trip.
 
 | Variable | Effect |
 | --- | --- |
-| `NANOBROWSER_DEV=1` | bind the dev trigger socket (also `--dev`) |
-| `NANOBROWSER_SOCK` | override the socket path |
-| `NANOBROWSER_DOPPLER_PROJECT` / `_CONFIG` | override `ai-automation` / `dev` |
-| `NANOBROWSER_LOG_STDERR=0` | log to file only |
-| `NB_RELOAD_TIMEOUT` | nb-reload's default wait in seconds (30) |
-| `NB_HOME` | move the whole home-relative tree (install.sh, tests) |
+| `HANDYBOY_DEV=1` | bind the dev trigger socket (also `--dev`) |
+| `HANDYBOY_SOCK` | override the socket path |
+| `HANDYBOY_DOPPLER_PROJECT` / `_CONFIG` | override `ai-automation` / `dev` |
+| `HANDYBOY_LOG_STDERR=0` | log to file only |
+| `HB_RELOAD_TIMEOUT` | hb-reload's default wait in seconds (30) |
+| `HB_HOME` | move the whole home-relative tree (install.sh, tests) |

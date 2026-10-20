@@ -203,7 +203,7 @@ async function checkPanel() {
   const runLogExists = await exists('[data-testid="run-log"]');
   push('Run tab shows the run log', runLogExists);
   if (taskId !== 'stall') {
-    // Harness runs go through nb-run options, so the stored config still has no models
+    // Harness runs go through hb-run options, so the stored config still has no models
     // picked and the gate bar shows a model-pick reason. That is expected; what must
     // never appear is a host/key/worker reason when the gate's infrastructure is green.
     const blockedReason = await textOf('[data-testid="run-blocked-reason"]');
@@ -346,7 +346,7 @@ async function checkPanel() {
 
 /**
  * Flips a Setup toggle in the open panel (the read-only task needs stored
- * readOnly on: nb-run's --option values are strings, and the worker only honours
+ * readOnly on: hb-run's --option values are strings, and the worker only honours
  * a boolean readOnly, so the option cannot carry it -- the toggle is the real path).
  */
 async function toggleSetup() {
@@ -379,7 +379,7 @@ async function toggleSetup() {
 /**
  * Brings the task tab to the front. The panel target created by `open` becomes the
  * active tab, and the worker refuses to run on an extension page -- so every task
- * activates its own page (by URL prefix) after navigating and before nb-run.
+ * activates its own page (by URL prefix) after navigating and before hb-run.
  */
 async function activateTab() {
   const match = flag('match');

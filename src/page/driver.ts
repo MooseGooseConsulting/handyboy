@@ -328,7 +328,7 @@ export class PageDriver {
 
   /**
    * `save_file`'s Downloads-folder half: a `data:` URL straight to
-   * `nanobrowser/<filename>`, never overwriting an existing file (`conflictAction:
+   * `handyboy/<filename>`, never overwriting an existing file (`conflictAction:
    * 'uniquify'` renames instead) and never prompting the user (`saveAs: false`).
    */
   async saveFile(dataUrl: string, filename: string): Promise<ActionResult & { downloadId?: number }> {
@@ -342,7 +342,7 @@ export class PageDriver {
     try {
       const downloadId = await downloads.download({
         url: dataUrl,
-        filename: `nanobrowser/${filename}`,
+        filename: `handyboy/${filename}`,
         saveAs: false,
         conflictAction: 'uniquify',
       });
