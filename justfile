@@ -11,7 +11,7 @@ default:
 setup:
     bash scripts/live.sh setup
 
-# Run fixture tasks (comma-separated; default: every local one) in real Chrome and score each.
+# Retired. The fixture tasks do not prove a requirement.
 test-live tasks="":
     bash scripts/live.sh test "{{tasks}}"
 

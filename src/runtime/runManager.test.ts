@@ -328,6 +328,31 @@ describe('RunManager.restoreReplay (M6)', () => {
     expect(runManager.replay('run-1')).toHaveLength(3);
   });
 
+  it('keeps acting on the tab that was open when the run started after another tab becomes active (R-01)', async () => {
+    let lookups = 0;
+    const scripted = scriptedStart([], endedOk);
+    const { runManager } = manager({
+      start: scripted.start,
+      tabs: {
+        activeTab: async () => {
+          lookups += 1;
+          return lookups === 1
+            ? { id: 3, url: 'https://example.test/cart' }
+            : { id: 9, url: 'https://other.test/' };
+        },
+        get: async (tabId) => (tabId === 3 ? { id: 3, url: 'https://example.test/cart' } : undefined),
+      },
+    });
+
+    const result = await runManager.start({ prompt: 'what is in the cart', config });
+
+    expect(lookups).toBe(1);
+    expect(scripted.seen[0]?.tabId).toBe(3);
+    expect(scripted.seen[0]?.url).toBe('https://example.test/cart');
+    scripted.finish();
+    await result.done;
+  });
+
   it('acts on the active tab of the last focused window and names it in run.started (R-01)', async () => {
     const scripted = scriptedStart([], endedOk);
     const { runManager, events } = manager({ start: scripted.start });
