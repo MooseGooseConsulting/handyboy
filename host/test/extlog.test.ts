@@ -16,15 +16,15 @@ beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-extlog-'));
   file = path.join(dir, 'ext.log');
   // Keep the host.log mirror (and every other log() call) out of the real profile.
-  prevHome = process.env.NB_HOME;
-  process.env.NB_HOME = dir;
-  process.env.NANOBROWSER_LOG_STDERR = '0';
+  prevHome = process.env.HB_HOME;
+  process.env.HB_HOME = dir;
+  process.env.HANDYBOY_LOG_STDERR = '0';
   resetLogForTests();
 });
 afterEach(async () => {
   resetLogForTests();
-  if (prevHome === undefined) delete process.env.NB_HOME;
-  else process.env.NB_HOME = prevHome;
+  if (prevHome === undefined) delete process.env.HB_HOME;
+  else process.env.HB_HOME = prevHome;
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -112,7 +112,7 @@ describe('log.append', () => {
     // The stream is async; end it so everything is flushed before we read.
     resetLogForTests();
 
-    const hostLog = await fs.readFile(path.join(dir, '.local', 'share', 'nanobrowser', 'host.log'), 'utf8');
+    const hostLog = await fs.readFile(path.join(dir, '.local', 'share', 'handyboy', 'host.log'), 'utf8');
     expect(hostLog).toContain('[ext:panel] panel blew up');
     expect(hostLog).not.toContain('merely odd');
     await h.cleanup();
@@ -146,7 +146,7 @@ describe('appendExtLog', () => {
   });
 });
 
-describe('nb-logs filtering', () => {
+describe('hb-logs filtering', () => {
   const entries = [
     { level: 'info', source: 'worker', message: 'a', at: Date.parse('2026-01-01T00:00:00.000Z') },
     { level: 'warn', source: 'panel', message: 'b', at: Date.parse('2026-01-02T00:00:00.000Z') },

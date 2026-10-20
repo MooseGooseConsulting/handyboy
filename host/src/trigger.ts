@@ -11,7 +11,7 @@ import type { OutboundMsg, SocketRequest, SocketResponse } from './protocol.ts';
  * outside the network namespace, and invisible to every page in the browser --
  * unlike a loopback TCP listener, which any page could reach.
  *
- * Gated on NANOBROWSER_DEV=1 (or --dev in the manifest wrapper); never bound otherwise.
+ * Gated on HANDYBOY_DEV=1 (or --dev in the manifest wrapper); never bound otherwise.
  */
 
 export interface TriggerDeps {
@@ -21,7 +21,7 @@ export interface TriggerDeps {
   keyStatus: () => Promise<{ ready: boolean; reason?: string }>;
   extensionConnected: () => boolean;
   hostVersion: string;
-  /** Test seam over `process.pid`. nb-reload watches it change to prove a new host came up. */
+  /** Test seam over `process.pid`. hb-reload watches it change to prove a new host came up. */
   pid?: () => number;
 }
 

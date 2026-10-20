@@ -108,7 +108,7 @@ describe('llm.request', () => {
     expect(call.init.method).toBe('POST');
     expect(call.headers['authorization']).toBe('Bearer sk-or-v1-secretvalue');
     expect(call.headers['http-referer']).toBeTruthy();
-    expect(call.headers['x-title']).toBe('nanobrowser');
+    expect(call.headers['x-title']).toBe('Handyboy');
     expect(JSON.parse(String(call.init.body))).toMatchObject({ model: 'm' });
   });
 
@@ -119,7 +119,7 @@ describe('llm.request', () => {
 
     const call = h.fetch.calls[0]!;
     expect(call.headers['authorization']).toBe('Bearer sk-or-v1-secretvalue');
-    expect(call.headers['x-title']).toBe('nanobrowser');
+    expect(call.headers['x-title']).toBe('Handyboy');
     expect(call.headers['x-keep']).toBe('yes');
   });
 
@@ -219,7 +219,7 @@ describe('runlog.append', () => {
   it('keeps arrival order when frames are handled concurrently, so run.end is never published before the events ahead of it', async () => {
     // main.ts fires `void dispatcher.handle(m)` per frame without awaiting. The harness
     // (scripts/harness.sh) caught run.end overtaking run.ended: the trigger closed the
-    // nb-run socket on run.end and the stream lost the run's own terminal event.
+    // hb-run socket on run.end and the stream lost the run's own terminal event.
     h = await makeHarness();
     const events = Array.from({ length: 40 }, (_, n) => ({ kind: 'step', n }));
     events.push({ kind: 'run.ended', n: 40 } as never, { type: 'run.end', n: 41 } as never);

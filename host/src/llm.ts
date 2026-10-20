@@ -165,8 +165,8 @@ export class LlmProxy {
 
   #brandHeaders(): Record<string, string> {
     return {
-      'HTTP-Referer': this.deps.referer ?? 'https://github.com/nanobrowser-v2',
-      'X-Title': this.deps.title ?? 'nanobrowser',
+      'HTTP-Referer': this.deps.referer ?? 'https://github.com/MooseGooseConsulting/handyboy',
+      'X-Title': this.deps.title ?? 'Handyboy',
     };
   }
 

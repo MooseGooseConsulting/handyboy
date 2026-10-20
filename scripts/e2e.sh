@@ -4,9 +4,9 @@
 # One human action is still required, exactly once ever: load .output/chrome-mv3 unpacked
 # at chrome://extensions. After that this script closes the whole loop --
 #
-#   pnpm build  ->  nb-reload  ->  nb-status  ->  nb-run  ->  assert + collect errors
+#   pnpm build  ->  hb-reload  ->  hb-status  ->  hb-run  ->  assert + collect errors
 #
-# -- with no click on chrome://extensions and no DevTools window, because nb-reload drives
+# -- with no click on chrome://extensions and no DevTools window, because hb-reload drives
 # chrome.runtime.reload() through the host and every extension-side error is forwarded to
 # ext.log (docs/host-protocol.md).
 #
@@ -27,46 +27,47 @@ THREADS_SCHEMA='type == "array" and length == 3
     and (.title | type == "string" and (gsub("\\s"; "") | length) > 0)
     and (.status | type == "string" and (gsub("\\s"; "") | length) > 0))'
 
-PROMPT="${NB_E2E_PROMPT:-$DEFAULT_PROMPT}"
-URL="${NB_E2E_URL:-https://hyperagent.com}"
-LEADER="${NB_E2E_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
-FOLLOWER="${NB_E2E_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
-LEADER_SOURCE="${NB_E2E_LEADER_SOURCE:-}"
-FOLLOWER_SOURCE="${NB_E2E_FOLLOWER_SOURCE:-}"
-OBSERVE="${NB_E2E_OBSERVE:-dom}"
-FIDELITY="${NB_E2E_FIDELITY:-in-page}"
-RELOAD_TIMEOUT="${NB_E2E_RELOAD_TIMEOUT:-30}"
-SKIP_BUILD="${NB_E2E_SKIP_BUILD:-0}"
-EXPECT="${NB_E2E_EXPECT:-done}"
-EXPECT_FILE="${NB_E2E_EXPECT_FILE:-}"
-EXPECT_RESULT="${NB_E2E_EXPECT_RESULT-__default__}"
-EXPECT_FILE_SCHEMA="${NB_E2E_EXPECT_FILE_SCHEMA:-}"
-STREAM_IN="${NB_E2E_STREAM:-}"
+PROMPT="${HB_E2E_PROMPT:-$DEFAULT_PROMPT}"
+URL="${HB_E2E_URL:-https://hyperagent.com}"
+LEADER="${HB_E2E_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
+FOLLOWER="${HB_E2E_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
+LEADER_SOURCE="${HB_E2E_LEADER_SOURCE:-}"
+FOLLOWER_SOURCE="${HB_E2E_FOLLOWER_SOURCE:-}"
+OBSERVE="${HB_E2E_OBSERVE:-dom}"
+FIDELITY="${HB_E2E_FIDELITY:-in-page}"
+RELOAD_TIMEOUT="${HB_E2E_RELOAD_TIMEOUT:-30}"
+SKIP_BUILD="${HB_E2E_SKIP_BUILD:-0}"
+EXPECT="${HB_E2E_EXPECT:-done}"
+EXPECT_FILE="${HB_E2E_EXPECT_FILE:-}"
+EXPECT_RESULT="${HB_E2E_EXPECT_RESULT-__default__}"
+EXPECT_FILE_SCHEMA="${HB_E2E_EXPECT_FILE_SCHEMA:-}"
+STREAM_IN="${HB_E2E_STREAM:-}"
 
 usage() {
   cat <<'USAGE'
 usage: scripts/e2e.sh [options]
 
-  --prompt <text>        task prompt            (env NB_E2E_PROMPT)
-  --url <url>            page to start on       (env NB_E2E_URL)
-  --leader <model>       leader model id        (env NB_E2E_LEADER)
-  --follower <model>     follower model id      (env NB_E2E_FOLLOWER)
-  --leader-source <s>    openrouter|kilo        (env NB_E2E_LEADER_SOURCE)
-  --follower-source <s>  openrouter|kilo        (env NB_E2E_FOLLOWER_SOURCE)
-  --observe <dom|pixels|both>                   (env NB_E2E_OBSERVE)
-  --fidelity <in-page|escalated>                (env NB_E2E_FIDELITY)
+  --prompt <text>        task prompt            (env HB_E2E_PROMPT)
+  --url <url>            page to start on       (env HB_E2E_URL)
+  --leader <model>       leader model id        (env HB_E2E_LEADER)
+  --follower <model>     follower model id      (env HB_E2E_FOLLOWER)
+  --leader-source <s>    openrouter|kilo        (env HB_E2E_LEADER_SOURCE)
+  --follower-source <s>  openrouter|kilo        (env HB_E2E_FOLLOWER_SOURCE)
+  --observe <dom|pixels|both>                   (env HB_E2E_OBSERVE)
+  --fidelity <in-page|escalated>                (env HB_E2E_FIDELITY)
   --reload-timeout <s>   seconds to wait for the reloaded extension
   --skip-build           reuse .output/chrome-mv3 as it stands
   --expect <status>      run.ended status to require (default done; e.g. blocked)
-  --expect-file <name>   require ~/.local/share/nanobrowser/artifacts/<runId>/<name> to exist
+  --expect-file <name>   require <data>/handyboy/artifacts/<runId>/<name> to exist
+                         (data is $HB_HOME/.local/share, else $XDG_DATA_HOME or ~/.local/share)
                          (a .json file must also be nonempty: not null, "", [], or {})
   --expect-result <jq>   jq filter the done summary, parsed as JSON, must satisfy
-                         (env NB_E2E_EXPECT_RESULT; default: three {title,status} rows for
+                         (env HB_E2E_EXPECT_RESULT; default: three {title,status} rows for
                          the default prompt, none for a custom prompt; "" disables)
   --expect-file-schema <jq>
-                         jq filter the --expect-file JSON must satisfy (env NB_E2E_EXPECT_FILE_SCHEMA)
+                         jq filter the --expect-file JSON must satisfy (env HB_E2E_EXPECT_FILE_SCHEMA)
   --stream <file>        verdict an existing run stream only: no build, reload, run, or
-                         extension-log check (env NB_E2E_STREAM)
+                         extension-log check (env HB_E2E_STREAM)
   -h, --help
 
 Exit codes: 0 run ended with the expected status (default `done`), a done run left the
@@ -134,7 +135,7 @@ fi
 
 # ---------------------------------------------------------------- 2. reload
 step "reload the extension in place"
-host/bin/nb-reload --timeout "$RELOAD_TIMEOUT"
+host/bin/hb-reload --timeout "$RELOAD_TIMEOUT"
 case $? in
   0) ;;
   2)
@@ -143,12 +144,12 @@ e2e: no extension is connected to the host.
      Load .output/chrome-mv3 unpacked once at chrome://extensions, then re-run.
 MSG
     exit 1 ;;
-  *) echo "e2e: nb-reload failed" >&2; exit 1 ;;
+  *) echo "e2e: hb-reload failed" >&2; exit 1 ;;
 esac
 
 # ---------------------------------------------------------------- 3. readiness
 step "host status"
-if ! host/bin/nb-status; then
+if ! host/bin/hb-status; then
   echo "e2e: the host is up but the OpenRouter key is not ready (R-11); see the status above" >&2
   exit 1
 fi
@@ -165,11 +166,11 @@ SOURCE_OPTS=()
 [ -n "$LEADER_SOURCE" ] && SOURCE_OPTS+=(--option "leaderModelSource=$LEADER_SOURCE")
 [ -n "$FOLLOWER_SOURCE" ] && SOURCE_OPTS+=(--option "followerModelSource=$FOLLOWER_SOURCE")
 
-# Killing nb-run does not stop the run in the extension. Ctrl-C reaches nb-run and then
+# Killing hb-run does not stop the run in the extension. Ctrl-C reaches hb-run and then
 # this trap, which cancels the run by the id chosen up front.
 RUN_ID="e2e-$(date +%s)-$RANDOM"
-trap 'echo "cancelling $RUN_ID" >&2; host/bin/nb-cancel "$RUN_ID" >/dev/null 2>&1; exit 130' INT TERM
-host/bin/nb-run "$PROMPT" \
+trap 'echo "cancelling $RUN_ID" >&2; host/bin/hb-cancel "$RUN_ID" >/dev/null 2>&1; exit 130' INT TERM
+host/bin/hb-run "$PROMPT" \
   --url "$URL" \
   --run-id "$RUN_ID" \
   "${SOURCE_OPTS[@]}" \
@@ -211,7 +212,7 @@ if [ "$STATUS" = "$EXPECT" ]; then
   echo "run.ended.status = $STATUS (as expected)"
 else
   echo "run.ended.status = ${STATUS:-<none>} (expected $EXPECT)" >&2
-  [ "$RUN_RC" -ne 0 ] && echo "nb-run exited $RUN_RC" >&2
+  [ "$RUN_RC" -ne 0 ] && echo "hb-run exited $RUN_RC" >&2
   MESSAGE="$(jq -rs '[.[] | select(.kind == "run.ended" or .type == "run.end")] | last | .message // empty' "$STREAM" 2>/dev/null)"
   [ -n "$MESSAGE" ] && echo "message: $MESSAGE" >&2
   FAILED=1
@@ -261,7 +262,11 @@ fi
 if [ -n "$EXPECT_FILE" ]; then
   step "saved file"
   RUN_ID="$(jq -rs '[.[] | .runId // empty] | last // empty' "$STREAM" 2>/dev/null)"
-  ART="${XDG_DATA_HOME:-$HOME/.local/share}/nanobrowser/artifacts/$RUN_ID/$EXPECT_FILE"
+  if [ -n "${HB_HOME:-}" ]; then
+    ART="$HB_HOME/.local/share/handyboy/artifacts/$RUN_ID/$EXPECT_FILE"
+  else
+    ART="${XDG_DATA_HOME:-$HOME/.local/share}/handyboy/artifacts/$RUN_ID/$EXPECT_FILE"
+  fi
   if [ -n "$RUN_ID" ] && [ -s "$ART" ]; then
     echo "$ART ($(wc -c <"$ART") bytes)"
     if [[ "$EXPECT_FILE" == *.json ]]; then
@@ -284,7 +289,7 @@ fi
 # ---------------------------------------------------------------- 6. extension errors
 step "extension errors during this run"
 ERRORS=""
-[ -z "$STREAM_IN" ] && ERRORS="$(host/bin/nb-logs --since "$SINCE" --level error 2>/dev/null)"
+[ -z "$STREAM_IN" ] && ERRORS="$(host/bin/hb-logs --since "$SINCE" --level error 2>/dev/null)"
 if [ -n "$STREAM_IN" ]; then
   echo "(not checked: --stream verdicts a saved run, and its log window is unknown)"
 elif [ -n "$ERRORS" ]; then

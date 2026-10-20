@@ -274,7 +274,7 @@ export const FOLLOWER_SYSTEM = [
   'Element refs like "e12" come from the page snapshot you are shown. Never invent a ref.',
   'For a long list or article, prefer extract_text over reading it out of the snapshot.',
   'Read a userscript with read_userscript before you change it. run_userscript takes an id and optional args.',
-  'A run_userscript result can be saved with save_file(fromLastUserscript:true) instead of retyping it; saved files land in the user\'s Downloads/nanobrowser folder.',
+  'A run_userscript result can be saved with save_file(fromLastUserscript:true) instead of retyping it; saved files land in the user\'s Downloads/handyboy folder.',
   'When a page holds more data than you can reach by clicking, write_userscript a small reader for it, run_userscript it, and fix it from the error and console lines you get back.',
   // Authentication is ordinary task work, not a blanket stop. This guidance
   // does not invent a credential source or expose a tool we have not built.

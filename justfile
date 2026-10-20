@@ -1,4 +1,4 @@
-# nanobrowser-v2. `just` lists every recipe.
+# Handyboy. `just` lists every recipe.
 # Live recipes act in your real Chrome, as you, with the free Nemotron pair.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]

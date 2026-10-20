@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * nb-logs [--since <iso>] [--level error|warn|info] [--json] [--file <path>]
+ * hb-logs [--since <iso>] [--level error|warn|info] [--json] [--file <path>]
  *
  * Prints what the extension forwarded over `log.append` -- errors that would otherwise
  * only exist on the chrome://extensions page nobody is watching during an unattended run.
@@ -20,7 +20,7 @@ function flag(name: string): string | undefined {
 
 const level = flag('level');
 if (level !== undefined && !['error', 'warn', 'info'].includes(level)) {
-  process.stderr.write(`usage: nb-logs [--since <iso>] [--level error|warn|info] [--json] [--file <path>]\n`);
+  process.stderr.write(`usage: hb-logs [--since <iso>] [--level error|warn|info] [--json] [--file <path>]\n`);
   process.exit(2);
 }
 

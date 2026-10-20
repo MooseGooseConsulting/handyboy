@@ -1,6 +1,6 @@
 # Working agreements for this repo
 
-Guidance for Claude and any subagent working on nanobrowser-v2. These are rules about
+Guidance for Claude and any subagent working on Handyboy. These are rules about
 **how agents behave**, not constraints to hard-code into the product. If a rule here would
 also make sense as a runtime check, ask before building it: the user does not want their own
 tool telling them no.

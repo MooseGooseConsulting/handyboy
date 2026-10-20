@@ -112,7 +112,7 @@ export function handle(request: unknown): PageResponse {
  * object, which the page cannot see or enumerate — it is not a page global, and R-02's
  * "no globals on the page" rule is intact.
  */
-const INSTALLED = '__nanobrowserPageListener' as const;
+const INSTALLED = '__handyboyPageListener' as const;
 let installedInThisModule = false;
 
 interface MessageApi {

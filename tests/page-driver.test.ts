@@ -330,14 +330,14 @@ describe('download', () => {
 });
 
 describe('saveFile', () => {
-  it('downloads to nanobrowser/<filename>, never prompting, never overwriting', async () => {
+  it('downloads to handyboy/<filename>, never prompting, never overwriting', async () => {
     const f = fake({ withDownloads: true });
     const result = await new PageDriver(f.api).saveFile('data:application/octet-stream;base64,eyJhIjoxfQ==', 'result.json');
     expect(result).toEqual({ ok: true, downloadId: 99 });
     expect(f.downloads).toEqual([
       {
         url: 'data:application/octet-stream;base64,eyJhIjoxfQ==',
-        filename: 'nanobrowser/result.json',
+        filename: 'handyboy/result.json',
         saveAs: false,
         conflictAction: 'uniquify',
       },

@@ -1,5 +1,5 @@
 /**
- * `--option k=v` pairs for nb-run. `true` and `false` become booleans because the worker
+ * `--option k=v` pairs for hb-run. `true` and `false` become booleans because the worker
  * only honours a boolean `readOnly`: as a string it was silently ignored, and the stored
  * panel toggle won. Everything else stays a string; the worker parses numbers itself.
  */

@@ -97,7 +97,7 @@ export function findDownloadedBytes(dirs, wantSha) {
 
 /**
  * @param {object} ctx
- * @param {Array} ctx.events run-log events (nb-run stream / persisted runlog)
+ * @param {Array} ctx.events run-log events (hb-run stream / persisted runlog)
  * @param {string} ctx.taskId one of live-tasks.mjs TASK_IDS
  * @param {object} ctx.expected live-fixture expected.json
  * @param {Array} [ctx.pageListings] independently scraped eBay [{title, price}]

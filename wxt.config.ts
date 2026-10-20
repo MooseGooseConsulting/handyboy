@@ -19,7 +19,7 @@ export default defineConfig({
     plugins: [tailwindcss()],
   }),
   manifest: () => ({
-    name: 'nanobrowser',
+    name: 'Handyboy',
     description: 'Leader/Follower browser agent in the side panel.',
     key: EXTENSION_KEY,
     permissions: [

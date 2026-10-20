@@ -15,9 +15,9 @@
 # against this Chrome instead of a harness-owned one. Fixture pages are served on
 # 127.0.0.1. The eBay task runs from the harness tier (see below).
 #
-# Environment: NB_LIVE_CHROME, NB_LIVE_CHROME_DIR (browser and its config dir),
-# NB_LIVE_LEADER, NB_LIVE_FOLLOWER (model ids), NB_LIVE_TIMEOUT (seconds per run),
-# NB_LIVE_CONNECT_WAIT, and NB_LIVE_REINSTALL_HOST=1 to point the registered dev host at
+# Environment: HB_LIVE_CHROME, HB_LIVE_CHROME_DIR (browser and its config dir),
+# HB_LIVE_LEADER, HB_LIVE_FOLLOWER (model ids), HB_LIVE_TIMEOUT (seconds per run),
+# HB_LIVE_CONNECT_WAIT, and HB_LIVE_REINSTALL_HOST=1 to point the registered dev host at
 # this checkout when setup reports it runs from another one.
 set -uo pipefail
 
@@ -25,15 +25,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 HARNESS="$ROOT/scripts/harness"
 # Same rule as host/src/paths.ts dataDir(), so the verdict reads the logs the host wrote.
-if [ -n "${NB_HOME:-}" ]; then DATA="$NB_HOME/.local/share/nanobrowser"
-else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/nanobrowser"; fi
+if [ -n "${HB_HOME:-}" ]; then DATA="$HB_HOME/.local/share/handyboy"
+else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/handyboy"; fi
 EXT_DIR="$ROOT/.output/chrome-mv3"
-CHROME="${NB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google-chrome || true)}"
-CHROME_DIR="${NB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
-LEADER="${NB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
-FOLLOWER="${NB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
-RUN_TIMEOUT="${NB_LIVE_TIMEOUT:-600}"
-CONNECT_WAIT="${NB_LIVE_CONNECT_WAIT:-300}"
+CHROME="${HB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google-chrome || true)}"
+CHROME_DIR="${HB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
+LEADER="${HB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
+FOLLOWER="${HB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
+RUN_TIMEOUT="${HB_LIVE_TIMEOUT:-600}"
+CONNECT_WAIT="${HB_LIVE_CONNECT_WAIT:-300}"
 # The local fixture tasks. ebay runs from `just harness`, which can read the page itself.
 DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,stall,download"
 
@@ -64,10 +64,10 @@ PY
 }
 
 # True once the extension's service worker has spawned the dev host and it answers.
-# nb-status exits 1 both for "key not ready" and "no host", so read what it printed instead.
+# hb-status exits 1 both for "key not ready" and "no host", so read what it printed instead.
 # Captured rather than piped: `grep -q` exits early, and under pipefail the SIGPIPE it
-# leaves on nb-status would read as "no host".
-host_up() { local out; out="$(timeout 30 host/bin/nb-status 2>/dev/null)"; [[ "$out" == *'"op"'* ]]; }
+# leaves on hb-status would read as "no host".
+host_up() { local out; out="$(timeout 30 host/bin/hb-status 2>/dev/null)"; [[ "$out" == *'"op"'* ]]; }
 
 wait_for_extension() {
   local limit="$1" waited=0
@@ -78,12 +78,35 @@ wait_for_extension() {
   done
 }
 
+# A worker loaded before the host rename still connects to com.nanobrowser.host and
+# only opens nanobrowser.sock. Waking its page does not reload it, and hb-reload
+# speaks only to handyboy.sock, which that worker never binds. Ask the previous
+# host to reload once; the build copied above is what comes back.
+legacy_host_reload() {
+  # Locate the previous host only. The new host does not read these names.
+  # NB_HOME ignored XDG_DATA_HOME, and NANOBROWSER_SOCK won over both.
+  local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
+  if [ -n "${NB_HOME:-}" ]; then
+    data_dir="$NB_HOME/.local/share"
+  fi
+  local sock="${NANOBROWSER_SOCK:-${XDG_RUNTIME_DIR:-$data_dir/nanobrowser/run}/nanobrowser.sock}"
+  [ -S "$sock" ] || return 1
+  node --input-type=module -e '
+    import net from "node:net";
+    const sock = net.createConnection(process.argv[1]);
+    const timer = setTimeout(() => process.exit(0), 2000);
+    sock.on("connect", () => sock.write("{\"op\":\"reload\"}\n"));
+    sock.on("data", () => { clearTimeout(timer); sock.end(); process.exit(0); });
+    sock.on("error", () => process.exit(1));
+  ' "$sock"
+}
+
 cmd_setup() {
   step "prerequisites"
   for bin in node jq doppler python3 rsync; do
     command -v "$bin" >/dev/null || die "$bin is not on PATH"
   done
-  [ -n "$CHROME" ] || die "no google-chrome-stable on PATH (set NB_LIVE_CHROME)"
+  [ -n "$CHROME" ] || die "no google-chrome-stable on PATH (set HB_LIVE_CHROME)"
   pgrep -x 'chrome|chromium|chromium-browser' >/dev/null || die "Chrome is not running; start it normally, then re-run"
   echo "node $(node --version), chrome $("$CHROME" --version | awk '{print $NF}')"
 
@@ -109,9 +132,9 @@ cmd_setup() {
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still
-      # holds a nanobrowser build. A stale registration may now point at something else.
+      # holds a Handyboy build. A stale registration may now point at something else.
       if [ "$(jq -r .key "$path/manifest.json" 2>/dev/null)" != "$(jq -r .key "$EXT_DIR/manifest.json")" ]; then
-        echo "   NOTE: $path no longer holds a nanobrowser build; not touching it. Load unpacked again from $EXT_DIR"
+        echo "   NOTE: $path no longer holds a Handyboy build; not touching it. Load unpacked again from $EXT_DIR"
         continue
       fi
       rsync -a --delete "$EXT_DIR/" "$path/" || die "could not copy the build to $path"
@@ -123,19 +146,19 @@ cmd_setup() {
   step "native host"
   # The wrapper bakes in an absolute path, so only install when it is missing or is not the
   # dev build: reinstalling from a worktree would point Chrome at a tree that may vanish.
-  local manifest="$CHROME_DIR/NativeMessagingHosts/com.nanobrowser.host.json" wrapper
+  local manifest="$CHROME_DIR/NativeMessagingHosts/com.handyboy.host.json" wrapper
   wrapper="$(jq -r .path "$manifest" 2>/dev/null || true)"
-  if [ -z "${NB_LIVE_REINSTALL_HOST:-}" ] && [ -x "$wrapper" ] && grep -q NANOBROWSER_DEV=1 "$wrapper"; then
+  if [ -z "${HB_LIVE_REINSTALL_HOST:-}" ] && [ -x "$wrapper" ] && grep -q HANDYBOY_DEV=1 "$wrapper"; then
     echo "already registered: $wrapper"
     # Host changes in this tree are not live until the wrapper points here; say so rather
     # than let a run silently exercise another checkout's host.
     grep -qF "\"$ROOT/host/src/main.ts\"" "$wrapper" \
-      || echo "   NOTE: the host runs from another checkout ($(grep -o '"[^"]*main.ts"' "$wrapper")). NB_LIVE_REINSTALL_HOST=1 points it at this one."
+      || echo "   NOTE: the host runs from another checkout ($(grep -o '"[^"]*main.ts"' "$wrapper")). HB_LIVE_REINSTALL_HOST=1 points it at this one."
   else
     bash host/install.sh --dev | sed 's/^/   /' || die "host/install.sh failed"
-    # install.sh writes only under ${NB_HOME:-$HOME}'s default Chrome and Chromium config
+    # install.sh writes only under ${HB_HOME:-$HOME}'s default Chrome and Chromium config
     # dirs; a Chrome with another config dir would otherwise keep a stale registration.
-    local installed="${NB_HOME:-$HOME}/.config/google-chrome/NativeMessagingHosts/com.nanobrowser.host.json"
+    local installed="${HB_HOME:-$HOME}/.config/google-chrome/NativeMessagingHosts/com.handyboy.host.json"
     if [ "$installed" != "$manifest" ]; then
       mkdir -p "$(dirname "$manifest")" && cp "$installed" "$manifest" \
         || die "could not register the host under $CHROME_DIR"
@@ -144,8 +167,12 @@ cmd_setup() {
   fi
 
   step "extension"
+  if ! host_up && legacy_host_reload; then
+    echo "asked the previous host to reload so this build can connect as Handyboy"
+    wait_for_extension 45 || true
+  fi
   if host_up; then
-    host/bin/nb-reload --timeout 30 >/dev/null 2>&1 || die "nb-reload failed (host/bin/nb-logs)"
+    host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "hb-reload failed (host/bin/hb-logs)"
     echo "reloaded in place"
   elif [ -n "$reg" ]; then
     # An idle MV3 worker does not run until something wakes it; one of its own pages does.
@@ -153,7 +180,7 @@ cmd_setup() {
     # The host binds the socket only after its Doppler lookups, which may take their full
     # 20 s timeout, so wait past that before calling the extension broken.
     if wait_for_extension 45; then
-      host/bin/nb-reload --timeout 30 >/dev/null 2>&1 || die "woke the extension but nb-reload failed, so it may still run the old build (host/bin/nb-logs)"
+      host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "woke the extension but hb-reload failed, so it may still run the old build (host/bin/hb-logs)"
       echo "woke the extension through its own page and reloaded it"
     else
       die "the extension is registered but did not start; it may be disabled or in an error state at chrome://extensions"
@@ -163,11 +190,11 @@ cmd_setup() {
     printf '%s' "$EXT_DIR" | wl-copy 2>/dev/null && copied=" (also on your clipboard)"
     "$CHROME" chrome://extensions >/dev/null 2>&1 &
     cat <<MSG
-   This Chrome profile has never loaded nanobrowser, and Chrome only allows that by hand:
+   This Chrome profile has never loaded Handyboy, and Chrome only allows that by hand:
      1. In the chrome://extensions tab that just opened, turn Developer mode ON.
      2. Click "Load unpacked" and choose this folder${copied}:
           $EXT_DIR
-     3. Open nanobrowser's Details and turn on "Allow User Scripts".
+     3. Open Handyboy's Details and turn on "Allow User Scripts".
    This is needed once per profile, ever.
 MSG
     wait_for_extension "$CONNECT_WAIT" || die "the extension never connected after ${CONNECT_WAIT}s"
@@ -176,7 +203,7 @@ MSG
 
   step "readiness"
   local status reason
-  status="$(host/bin/nb-status 2>&1)"; echo "$status"
+  status="$(host/bin/hb-status 2>&1)"; echo "$status"
   if jq -e '.key.ready' <<<"$status" >/dev/null 2>&1; then
     echo; echo "ready. Next: scripts/live.sh test"
   else
@@ -195,7 +222,7 @@ RUN_PID=""
 cleanup_test() {
   if [ -n "$ACTIVE_RUN" ]; then
     echo "cancelling in-flight run $ACTIVE_RUN"
-    host/bin/nb-cancel "$ACTIVE_RUN" >/dev/null 2>&1 || true
+    host/bin/hb-cancel "$ACTIVE_RUN" >/dev/null 2>&1 || true
   fi
   [ -n "$RUN_PID" ] && kill "$RUN_PID" 2>/dev/null
   [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null
@@ -215,18 +242,18 @@ cmd_test() {
     [ "$task" = ebay ] && die "ebay needs independent page ground truth; run it with: just harness --live-only --live-tasks ebay"
   done
   host_up || die "the extension is not connected; run scripts/live.sh setup first"
-  host/bin/nb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/nb-status)"
+  host/bin/hb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/hb-status)"
 
   # Chrome opens a command-line URL in its last-used profile. With one registration that
   # is pinned; with several, the CLI cannot tell which profile's worker owns the socket.
   local prof_args=() regs
   # Without --user-data-dir a non-default Chrome dir would get the URL in the default instance.
-  [ -n "${NB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")
+  [ -n "${HB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")
   regs="$(registrations)"
   if [ "$(grep -c . <<<"$regs")" -eq 1 ]; then
     prof_args+=(--profile-directory="$(cut -f1 <<<"$regs")")
   elif [ -n "$regs" ]; then
-    echo "NOTE: nanobrowser is in several Chrome profiles; keep the one you set up frontmost."
+    echo "NOTE: Handyboy is in several Chrome profiles; keep the one you set up frontmost."
   fi
 
   mkdir -p "$ROOT/runs"
@@ -235,7 +262,7 @@ cmd_test() {
   step "fixture server"
   node "$HARNESS/live-fixture-server.mjs" --seed "$RANDOM" --out "$out/fixture" >"$out/fixture.log" 2>&1 &
   FIXTURE_PID=$!
-  # Closing nb-run does not stop the run in the extension, so an interrupted test would
+  # Closing hb-run does not stop the run in the extension, so an interrupted test would
   # leave the agent acting in your browser. Cancel whatever run is in flight on the way out.
   trap cleanup_test EXIT
   trap 'exit 130' INT TERM
@@ -279,15 +306,15 @@ cmd_test() {
     fi
     sleep 2
 
-    # Chosen here rather than read back from nb-run, so an interrupt that lands before
-    # nb-run reports the id can still cancel the run the extension already accepted.
+    # Chosen here rather than read back from hb-run, so an interrupt that lands before
+    # hb-run reports the id can still cancel the run the extension already accepted.
     local run_id="live-$(date +%s)-$RANDOM-$task"
     ACTIVE_RUN="$run_id"
     # In the background and waited on: `timeout` puts itself in its own process group, so
     # Ctrl-C never reaches it, and bash runs no trap while a foreground child is running.
     # `wait` returns on the signal at once, so the trap cancels the run straight away.
-    timeout "$RUN_TIMEOUT" host/bin/nb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
-      >"$out/$task-stream.jsonl" 2>"$out/$task-nb-run.stderr" &
+    timeout "$RUN_TIMEOUT" host/bin/hb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
+      >"$out/$task-stream.jsonl" 2>"$out/$task-hb-run.stderr" &
     RUN_PID=$!
     wait "$RUN_PID"
     local rc=$?
@@ -295,7 +322,7 @@ cmd_test() {
     ACTIVE_RUN=""
     if [ "$rc" -eq 124 ]; then
       echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
-      host/bin/nb-cancel "$run_id" >/dev/null 2>&1 || true
+      host/bin/hb-cancel "$run_id" >/dev/null 2>&1 || true
     fi
     local runlog="$out/$task-runlog.jsonl"
     cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$task-stream.jsonl" "$runlog"
@@ -341,8 +368,8 @@ case "${1:-}" in
   run) shift
        exec scripts/e2e.sh --skip-build --leader "$LEADER" --follower "$FOLLOWER" \
          --leader-source openrouter --follower-source openrouter --prompt "$@" ;;
-  status) exec host/bin/nb-status ;;
-  logs) exec host/bin/nb-logs ;;
+  status) exec host/bin/hb-status ;;
+  logs) exec host/bin/hb-logs ;;
   -h|--help|"") usage ;;
   *) usage; exit 2 ;;
 esac

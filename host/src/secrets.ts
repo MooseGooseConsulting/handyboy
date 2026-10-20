@@ -9,7 +9,7 @@ import { protectSecret } from './log.ts';
  *
  * A lookup that yields no key carries a reason (never the secret itself, never
  * stdout verbatim): `SecretStore` surfaces it via `status()`/`missingReason`,
- * which is what `nb-status` and `key.status` report. A bare null with no reason
+ * which is what `hb-status` and `key.status` report. A bare null with no reason
  * falls back to "<NAME> not available from <provider>".
  */
 export interface SecretLookup {
@@ -21,7 +21,7 @@ export interface SecretProvider {
   readonly name: string;
   /**
    * Looks up one secret. A null value carries a reason that lands in host.log
-   * and nb-status — so reasons must be categorical (exit codes, signals, shapes),
+   * and hb-status — so reasons must be categorical (exit codes, signals, shapes),
    * never child-process output or anything secret-shaped. See `describeDopplerError`.
    */
   get(name: string): Promise<SecretLookup>;
@@ -49,7 +49,7 @@ export function parseSecretToken(stdout: unknown): { ok: true; token: string } |
 /**
  * Names a Doppler exec failure without repeating anything the child wrote. Node folds
  * the child's stderr into `err.message`, so the message is untrusted input that could
- * carry secret material into the reason (which lands in host.log and nb-status) —
+ * carry secret material into the reason (which lands in host.log and hb-status) —
  * only categorical fields (exit code, signal, errno, maxBuffer) are ever relayed.
  */
 function describeDopplerError(err: unknown): string {
@@ -68,8 +68,8 @@ function describeDopplerError(err: unknown): string {
   return 'doppler failed';
 }
 
-const DOPPLER_PROJECT = process.env.NANOBROWSER_DOPPLER_PROJECT || 'ai-automation';
-const DOPPLER_CONFIG = process.env.NANOBROWSER_DOPPLER_CONFIG || 'dev';
+const DOPPLER_PROJECT = process.env.HANDYBOY_DOPPLER_PROJECT || 'ai-automation';
+const DOPPLER_CONFIG = process.env.HANDYBOY_DOPPLER_CONFIG || 'dev';
 
 export class DopplerSecretProvider implements SecretProvider {
   readonly name = 'doppler';

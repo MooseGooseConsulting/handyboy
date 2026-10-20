@@ -312,7 +312,7 @@ export function createWorker(deps: WorkerDeps): Worker {
             void sessionUserscriptValueStore(activeRunId)
               ?.save(result.payload.value)
               .catch((error: unknown) => {
-                console.warn('[nanobrowser] could not persist the panel userscript value', error);
+                console.warn('[handyboy] could not persist the panel userscript value', error);
               });
           }
         }
@@ -442,7 +442,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     void getLastRunId()
       .then((runId) => (runId ? deps.runManager.restoreReplay(runId) : undefined))
       .catch((error: unknown) => {
-        console.warn('[nanobrowser] could not restore the last run at startup', error);
+        console.warn('[handyboy] could not restore the last run at startup', error);
       });
   }
 

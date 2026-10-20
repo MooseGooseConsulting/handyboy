@@ -1,5 +1,5 @@
 /** Name of the long-lived port the side panel opens to the service worker. */
-export const SIDEPANEL_PORT = 'nanobrowser:sidepanel';
+export const SIDEPANEL_PORT = 'handyboy:sidepanel';
 
 /** Messages the service worker sends to the side panel. */
 export type HubOutbound =

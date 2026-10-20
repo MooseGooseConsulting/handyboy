@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * nb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]...
+ * hb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]...
  *
  * Sends a run to the extension through the host's dev unix socket and streams the
  * run-log events back until run.end.
@@ -11,7 +11,7 @@ import { connect, onResponses, send } from './socket-client.ts';
 const argv = process.argv.slice(2);
 const prompt = argv.find((a) => !a.startsWith('--'));
 if (!prompt) {
-  process.stderr.write('usage: nb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]...\n');
+  process.stderr.write('usage: hb-run "<prompt>" [--url <url>] [--run-id <id>] [--option k=v]...\n');
   process.exit(2);
 }
 

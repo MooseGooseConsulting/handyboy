@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * nb-cancel <runId>
+ * hb-cancel <runId>
  *
- * Stops a run started via `nb-run`. Without this there was no way to cancel a
- * CLI-triggered run short of `nb-reload`, which tears down the whole extension/host
+ * Stops a run started via `hb-run`. Without this there was no way to cancel a
+ * CLI-triggered run short of `hb-reload`, which tears down the whole extension/host
  * and kills every in-flight run, not just the one you want to stop -- and killing the
- * `nb-run` client itself (Ctrl+C, a dead terminal) did nothing at all: the run kept
+ * `hb-run` client itself (Ctrl+C, a dead terminal) did nothing at all: the run kept
  * executing against the real browser, unattended, for as long as its step budget allowed.
  */
 import { connect, onResponses, send } from './socket-client.ts';
 
 const runId = process.argv[2];
 if (!runId) {
-  process.stderr.write('usage: nb-cancel <runId>\n');
+  process.stderr.write('usage: hb-cancel <runId>\n');
   process.exit(2);
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * nb-reload [--timeout <seconds>]
+ * hb-reload [--timeout <seconds>]
  *
  * Reloads the unpacked extension without a human clicking chrome://extensions.
  *
@@ -24,7 +24,7 @@ function flag(name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-const timeoutMs = Math.max(1, Number(flag('timeout') ?? process.env.NB_RELOAD_TIMEOUT ?? 30)) * 1000;
+const timeoutMs = Math.max(1, Number(flag('timeout') ?? process.env.HB_RELOAD_TIMEOUT ?? 30)) * 1000;
 const POLL_MS = 500;
 
 function delay(ms: number): Promise<void> {
