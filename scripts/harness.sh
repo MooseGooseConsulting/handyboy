@@ -13,13 +13,11 @@
 #   --headed         show the harness's browser windows
 #   --seed N         fixture seed (env HB_HARNESS_SEED; default random, printed)
 #   --run-timeout S  per-run cap on hb-run (env HB_HARNESS_RUN_TIMEOUT; default 180)
-#   --live           run the live tier after the scripted tier (real Doppler key, real
-#                    Nemotron pair on OpenRouter, real ebay.com plus local fixtures)
-#   --live-only      run only the live tier
+#   --live           retired. The fixture tasks do not prove a requirement; the flag exits 2.
+#   --live-only      retired. Same refusal as --live.
 #   --scripted-only  run only the scripted tier (the default)
-#   --live-tasks csv comma-separated live tasks (env HB_HARNESS_LIVE_TASKS; default all 9:
-#                    ebay,userscript_debug,inventory,download,escalation,readonly,login,redaction,stall)
-#   --live-timeout S per-run cap on live hb-run (env HB_HARNESS_LIVE_TIMEOUT; default 600)
+#   --live-tasks csv ignored; --live exits before any task runs
+#   --live-timeout S ignored; --live exits before any task runs
 #
 # What one invocation does:
 #
@@ -138,6 +136,13 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$LIVE" = "1" ] && [ "$SCRIPTED_ONLY" = "1" ] && { echo "harness: --live/--live-only and --scripted-only contradict" >&2; exit 2; }
+# The live tier runs the same fixture tasks as scripts/live.sh test: localhost pages,
+# a prompt that dictates the steps, and a score of the model's JSON. That is not a
+# requirement happening.
+if [ "$LIVE" = "1" ]; then
+  echo "harness: the live fixture tasks are not tests. They do not prove a requirement. Run: just check" >&2
+  exit 2
+fi
 
 for bin in node jq agent-browser timeout; do
   command -v "$bin" >/dev/null || { echo "harness: $bin is required" >&2; exit 2; }

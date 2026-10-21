@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Live testing in the user's real Chrome, in one command.
+# Drive Handyboy in the user's real Chrome.
 #
 #   scripts/live.sh setup              build, register the host, get the extension connected
-#   scripts/live.sh test [task,...]    run fixture tasks in real Chrome and score each one
 #   scripts/live.sh run "<prompt>" [--url <url>]   one ad-hoc run with the free pair
 #   scripts/live.sh status | logs
 #
@@ -11,31 +10,23 @@
 # which starts the service worker, which spawns the host. Only a profile that has never
 # loaded the extension falls back to chrome://extensions, which Chrome reserves for a human.
 #
-# `test` reuses the harness's fixture server, prompts and scorers (scripts/harness/), but
-# against this Chrome instead of a harness-owned one. Fixture pages are served on
-# 127.0.0.1. The eBay task runs from the harness tier (see below).
+# `test` is retired. The fixture tasks opened localhost pages, dictated the steps, and
+# scored a JSON blob. That is not a requirement happening. Proof is `just check`.
 #
 # Environment: HB_LIVE_CHROME, HB_LIVE_CHROME_DIR (browser and its config dir),
-# HB_LIVE_LEADER, HB_LIVE_FOLLOWER (model ids), HB_LIVE_TIMEOUT (seconds per run),
-# HB_LIVE_CONNECT_WAIT, and HB_LIVE_REINSTALL_HOST=1 to point the registered dev host at
-# this checkout when setup reports it runs from another one.
+# HB_LIVE_LEADER, HB_LIVE_FOLLOWER (model ids), HB_LIVE_CONNECT_WAIT, and
+# HB_LIVE_REINSTALL_HOST=1 to point the registered dev host at this checkout when
+# setup reports it runs from another one.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-HARNESS="$ROOT/scripts/harness"
-# Same rule as host/src/paths.ts dataDir(), so the verdict reads the logs the host wrote.
-if [ -n "${HB_HOME:-}" ]; then DATA="$HB_HOME/.local/share/handyboy"
-else DATA="${XDG_DATA_HOME:-$HOME/.local/share}/handyboy"; fi
 EXT_DIR="$ROOT/.output/chrome-mv3"
 CHROME="${HB_LIVE_CHROME:-$(command -v google-chrome-stable || command -v google-chrome || true)}"
 CHROME_DIR="${HB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
 LEADER="${HB_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
 FOLLOWER="${HB_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
-RUN_TIMEOUT="${HB_LIVE_TIMEOUT:-600}"
 CONNECT_WAIT="${HB_LIVE_CONNECT_WAIT:-300}"
-# The local fixture tasks. ebay runs from `just harness`, which can read the page itself.
-DEFAULT_TASKS="inventory,userscript_debug,escalation,readonly,login,redaction,stall,download"
 
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "live: $*" >&2; exit 1; }
@@ -205,7 +196,7 @@ MSG
   local status reason
   status="$(host/bin/hb-status 2>&1)"; echo "$status"
   if jq -e '.key.ready' <<<"$status" >/dev/null 2>&1; then
-    echo; echo "ready. Next: scripts/live.sh test"
+    echo; echo "ready."
   else
     reason="$(jq -r '.key.reason // empty' <<<"$status" 2>/dev/null)"
     case "$reason" in
@@ -215,151 +206,8 @@ MSG
   fi
 }
 
-FIXTURE_PID=""
-ACTIVE_RUN=""
-RUN_PID=""
-
-cleanup_test() {
-  if [ -n "$ACTIVE_RUN" ]; then
-    echo "cancelling in-flight run $ACTIVE_RUN"
-    host/bin/hb-cancel "$ACTIVE_RUN" >/dev/null 2>&1 || true
-  fi
-  [ -n "$RUN_PID" ] && kill "$RUN_PID" 2>/dev/null
-  [ -n "$FIXTURE_PID" ] && kill "$FIXTURE_PID" 2>/dev/null
-  return 0
-}
-
 cmd_test() {
-  local list=() task
-  # Deduplicated: per-task evidence files are named by task, so a repeat would score the
-  # first invocation's download. Repeated trials belong to #40.
-  read -ra list <<<"$(tr ',' '\n' <<<"${1:-$DEFAULT_TASKS}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
-  [ "${#list[@]}" -gt 0 ] || die "no tasks given (default: $DEFAULT_TASKS)"
-  # The eBay verdict compares against listings scraped independently of the agent, which
-  # needs a second reader of the page. The harness-owned Chrome has one (CDP); this one
-  # deliberately does not, so the task could only ever fail here.
-  for task in "${list[@]}"; do
-    [ "$task" = ebay ] && die "ebay needs independent page ground truth; run it with: just harness --live-only --live-tasks ebay"
-  done
-  host_up || die "the extension is not connected; run scripts/live.sh setup first"
-  host/bin/hb-status >/dev/null || die "the OpenRouter key is not ready (host/bin/hb-status)"
-
-  # Chrome opens a command-line URL in its last-used profile. With one registration that
-  # is pinned; with several, the CLI cannot tell which profile's worker owns the socket.
-  local prof_args=() regs
-  # Without --user-data-dir a non-default Chrome dir would get the URL in the default instance.
-  [ -n "${HB_LIVE_CHROME_DIR:-}" ] && prof_args+=(--user-data-dir="$CHROME_DIR")
-  regs="$(registrations)"
-  if [ "$(grep -c . <<<"$regs")" -eq 1 ]; then
-    prof_args+=(--profile-directory="$(cut -f1 <<<"$regs")")
-  elif [ -n "$regs" ]; then
-    echo "NOTE: Handyboy is in several Chrome profiles; keep the one you set up frontmost."
-  fi
-
-  mkdir -p "$ROOT/runs"
-  local out; out="$(mktemp -d "$ROOT/runs/live-$(date -u +%Y%m%dT%H%M%SZ)-XXXX")" || die "could not create a results dir"
-  mkdir -p "$out/fixture"
-  step "fixture server"
-  node "$HARNESS/live-fixture-server.mjs" --seed "$RANDOM" --out "$out/fixture" >"$out/fixture.log" 2>&1 &
-  FIXTURE_PID=$!
-  # Closing hb-run does not stop the run in the extension, so an interrupted test would
-  # leave the agent acting in your browser. Cancel whatever run is in flight on the way out.
-  trap cleanup_test EXIT
-  trap 'exit 130' INT TERM
-  for _ in $(seq 50); do [ -f "$out/fixture/ready.json" ] && break; sleep 0.1; done
-  [ -f "$out/fixture/ready.json" ] || die "fixture server did not start (see $out/fixture.log)"
-  local base; base="$(jq -r .baseUrl "$out/fixture/ready.json")"
-  echo "$base   results -> $out"
-  echo "models: leader=$LEADER follower=$FOLLOWER"
-  echo "Each task opens its own tab. Leave it frontmost until the task finishes:"
-  echo "a run acts on whichever tab is active."
-
-  : >"$out/summary.txt"
-  local pass=0 fail=0
-  for task in "${list[@]}"; do
-    step "task $task"
-    local tj="$out/$task-task.json"
-    node "$HARNESS/live-tasks.mjs" --task "$task" --expected "$out/fixture/expected.json" \
-      --base-url "$base" --leader "$LEADER" --follower "$FOLLOWER" >"$tj" || { echo "unknown task $task"; fail=$((fail + 1)); continue; }
-    local url prompt; url="$(jq -r .url "$tj")"; prompt="$(jq -r .prompt "$tj")"
-    echo "$(jq -r .title "$tj")  ($url)"
-
-    # Pin everything the panel also stores, or its last choice leaks in: a Kilo source
-    # would route the Nemotron ids to the wrong gateway, a read-only toggle would block
-    # the writes a task's verdict requires.
-    local opt_args=(--option leaderModelSource=openrouter --option followerModelSource=openrouter)
-    while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
-      < <(jq -r '.options | {readOnly: false} + . | to_entries[] | "\(.key)=\(.value)"' "$tj")
-
-    local hits0 host0 ext0
-    hits0="$(wc -l <"$out/fixture/hits.jsonl" 2>/dev/null || echo 0)"
-    host0="$(wc -l <"$DATA/host.log" 2>/dev/null || echo 0)"
-    ext0="$(wc -l <"$DATA/ext.log" 2>/dev/null || echo 0)"
-
-    # A fresh tab, so the run never takes over the page you were reading.
-    # With Chrome running, this hands the URL to it and exits; a failure here means the
-    # run would take over whatever tab is active instead, so the task is not started.
-    touch "$out/$task.start"
-    if ! timeout 15 "$CHROME" "${prof_args[@]}" "$url" >/dev/null 2>&1; then
-      echo "could not open a fresh tab for $task; not starting it"
-      fail=$((fail + 1)); echo "FAIL  $task  (no fresh tab)" >>"$out/summary.txt"; continue
-    fi
-    sleep 2
-
-    # Chosen here rather than read back from hb-run, so an interrupt that lands before
-    # hb-run reports the id can still cancel the run the extension already accepted.
-    local run_id="live-$(date +%s)-$RANDOM-$task"
-    ACTIVE_RUN="$run_id"
-    # In the background and waited on: `timeout` puts itself in its own process group, so
-    # Ctrl-C never reaches it, and bash runs no trap while a foreground child is running.
-    # `wait` returns on the signal at once, so the trap cancels the run straight away.
-    timeout "$RUN_TIMEOUT" host/bin/hb-run "$prompt" --url "$url" --run-id "$run_id" "${opt_args[@]}" \
-      >"$out/$task-stream.jsonl" 2>"$out/$task-hb-run.stderr" &
-    RUN_PID=$!
-    wait "$RUN_PID"
-    local rc=$?
-    RUN_PID=""
-    ACTIVE_RUN=""
-    if [ "$rc" -eq 124 ]; then
-      echo "timed out after ${RUN_TIMEOUT}s; cancelling $run_id"
-      host/bin/hb-cancel "$run_id" >/dev/null 2>&1 || true
-    fi
-    local runlog="$out/$task-runlog.jsonl"
-    cp "$DATA/runs/$run_id.jsonl" "$runlog" 2>/dev/null || cp "$out/$task-stream.jsonl" "$runlog"
-
-    tail -n +"$((hits0 + 1))" "$out/fixture/hits.jsonl" >"$out/$task-hits.jsonl" 2>/dev/null || : >"$out/$task-hits.jsonl"
-    tail -n +"$((host0 + 1))" "$DATA/host.log" >"$out/$task-host.log" 2>/dev/null || : >"$out/$task-host.log"
-    tail -n +"$((ext0 + 1))" "$DATA/ext.log" >"$out/$task-ext.log" 2>/dev/null || : >"$out/$task-ext.log"
-
-    # Only files this task wrote count: Downloads may already hold a matching report from
-    # an earlier run with the same seed. Give an in-progress Chrome download time to land.
-    # Only the fixture's file name (Chrome may add " (1)") is copied, so nothing else that
-    # lands in Downloads meanwhile ends up in the results bundle.
-    local dl="$out/$task-downloads" want stem
-    want="$(jq -r '.download.filename' "$out/fixture/expected.json")"; stem="${want%.*}"
-    mkdir -p "$dl"
-    for _ in $(seq 10); do
-      find "$HOME/Downloads" -maxdepth 1 -name '*.crdownload' -newer "$out/$task.start" 2>/dev/null | grep -q . || break
-      sleep 1
-    done
-    find "$HOME/Downloads" "$DATA/artifacts" -type f -newer "$out/$task.start" -name "$stem*.${want##*.}" \
-      -exec cp --backup=numbered -t "$dl" {} + 2>/dev/null || true
-
-    if node "$HARNESS/live-verdict.mjs" --task "$task" --stream "$runlog" \
-         --expected "$out/fixture/expected.json" \
-         --host-log "$out/$task-host.log" --ext-log "$out/$task-ext.log" \
-         --download-dirs "$dl" --hits "$out/$task-hits.jsonl" \
-         --json "$out/$task-verdict.json" | tee "$out/$task-verdict.txt"; then
-      pass=$((pass + 1)); echo "PASS  $task  run=$run_id" >>"$out/summary.txt"
-    else
-      fail=$((fail + 1)); echo "FAIL  $task  run=$run_id  ($out/$task-verdict.txt)" >>"$out/summary.txt"
-    fi
-  done
-
-  step "summary"
-  cat "$out/summary.txt"
-  echo "$pass passed, $fail failed"
-  [ "$fail" -eq 0 ]
+  die "fixture tasks are not tests. They do not prove a requirement. Run: just check"
 }
 
 case "${1:-}" in

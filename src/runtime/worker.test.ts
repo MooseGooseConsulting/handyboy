@@ -310,6 +310,36 @@ describe('createWorker: readiness.get', () => {
 });
 
 describe('createWorker: runs', () => {
+  it('a run the side panel starts acts on the tab already open, with the models and observe mode the panel saved, and does not navigate that tab', async () => {
+    const h = harness();
+    const panel = h.connect();
+    const saved = {
+      ...config,
+      leaderModel: 'nvidia/nemotron-ultra',
+      followerModel: 'meta/llama-4',
+      observe: 'pixels' as const,
+      inputFidelity: 'in-page' as const,
+    };
+
+    panel.send('run.start', { prompt: 'what is on this page', config: saved });
+    await settle();
+
+    expect(h.navigated).toEqual([]);
+    expect(h.scripted.seen[0]).toMatchObject({
+      prompt: 'what is on this page',
+      tabId: 3,
+      url: 'https://example.test/',
+      config: {
+        leaderModel: 'nvidia/nemotron-ultra',
+        followerModel: 'meta/llama-4',
+        observe: 'pixels',
+        inputFidelity: 'in-page',
+      },
+    });
+    h.scripted.finish();
+    await settle();
+  });
+
   it('fans every run event out to every panel and to the host run log (R-07)', async () => {
     const h = harness();
     const one = h.connect();
