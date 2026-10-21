@@ -34,9 +34,11 @@ import {
   createInPageTier,
   createInputPagePort,
   createPageTools,
+  rebindMissingTabDriver,
   type RunUserscript,
   type RuntimeDriver,
 } from './pageTools';
+import { currentTabId, recordTabReplaced } from '@/src/page/tabReplacement';
 
 /**
  * Default `listAvailableUserscripts` (R-09): seeds the bundled examples into an
@@ -78,6 +80,8 @@ export interface TabsPort {
   /** The active tab of the last focused normal window. */
   activeTab(): Promise<TargetTab | undefined>;
   get(tabId: number): Promise<TargetTab | undefined>;
+  /** Closes a tab. Optional: a port without it simply never closes one. */
+  remove?(tabId: number): Promise<void>;
 }
 
 /**
@@ -223,7 +227,7 @@ export class RunManager {
   /** The tab's URL now, so a navigate changes which scripts the list and the prompt show. */
   async #liveUrl(tab: TargetTab): Promise<string> {
     try {
-      const live = await this.#deps.tabs.get(tab.id);
+      const live = await this.#deps.tabs.get(currentTabId(tab.id));
       if (live?.url) return live.url;
     } catch {
       // The tab closed. The URL from start is the last one we have.
@@ -356,11 +360,29 @@ export class RunManager {
         ? this.#deps.makeDebuggerTier?.((reason) => input?.handleDetach(reason))
         : undefined;
 
+    // "No tab with id" retries only when Chrome already reported a replacement
+    // (`tabs.onReplaced`, followed by `currentTabId`). Adopting the active tab
+    // would keep acting on — and `closeTabWhenDone` could close — a page the run
+    // does not own. A missing id with no recorded replacement fails the op.
+    const driver = rebindMissingTabDriver(
+      this.#deps.driver,
+      async (missingTabId) => {
+        const mapped = currentTabId(missingTabId);
+        return mapped !== missingTabId ? mapped : undefined;
+      },
+      {
+        onRebind: (oldTabId, freshTabId) => {
+          recordTabReplaced(freshTabId, oldTabId);
+          console.warn(`[nanobrowser] run tab ${oldTabId} was replaced by tab ${freshTabId}`);
+        },
+      },
+    );
+
     input = new EscalatableInput({
       fidelity: config.inputFidelity,
-      inPageTier: createInPageTier(this.#deps.driver),
+      inPageTier: createInPageTier(driver),
       ...(debuggerTier ? { debuggerTier } : {}),
-      page: createInputPagePort(this.#deps.driver, tab.id),
+      page: createInputPagePort(driver, tab.id),
       emit,
       ...(this.#deps.now ? { now: this.#deps.now } : {}),
     });
@@ -370,7 +392,7 @@ export class RunManager {
     const readOnly = config.readOnly ?? false;
     const tools = createPageTools({
       tabId: tab.id,
-      driver: this.#deps.driver,
+      driver,
       input,
       observe: config.observe,
       runUserscript: this.#deps.runUserscript,
@@ -455,6 +477,15 @@ export class RunManager {
         // so a worker restart right after success cannot restore a stale prefix
         // and falsely mark the run interrupted.
         await (this.#persistTails.get(runId) ?? Promise.resolve());
+        if (config.closeTabWhenDone) {
+          // The run and its tab stay reserved until the removal settles: clearing
+          // `#active` first would let a start racing the close resolve the active
+          // tab to the very tab that is mid-remove. `currentTabId`: Chrome may have
+          // swapped the tab's id during the run.
+          await this.#deps.tabs.remove?.(currentTabId(tab.id)).catch((error: unknown) => {
+            console.warn('[nanobrowser] could not close the run tab', error);
+          });
+        }
         if (this.#active?.runId === runId) this.#active = undefined;
         return ended;
       });
@@ -598,6 +629,14 @@ export function chromeTabsPort(): TabsPort {
       } catch {
         return undefined;
       }
+    },
+    async remove(tabId) {
+      // Never close a window's last tab: with it goes the window, and with the last
+      // window goes the browser, taking the user's whole session with it.
+      const tab = await chrome.tabs.get(tabId);
+      const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+      if (siblings.length <= 1) return;
+      await chrome.tabs.remove(tabId);
     },
   };
 }
