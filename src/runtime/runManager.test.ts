@@ -166,6 +166,28 @@ describe('RunManager', () => {
     const refused = await empty.start({ prompt: 'read the note', config });
     expect(refused.ok).toBe(false);
     expect(read).toBeUndefined();
+
+    chrome.windows.getLastFocused = (async () => {
+      throw new Error('no window');
+    }) as typeof chrome.windows.getLastFocused;
+    const thrown = new RunManager({
+      driver: pageDriver(textFor),
+      tabs: chromeTabsPort(),
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      start: (options) => {
+        read = options.tools.snapshot().then((shot) => shot.text);
+        const run = controllableRun(options.runId ?? 'missing-run');
+        run.finish();
+        return run.handle;
+      },
+    });
+    const lookupFailed = await thrown.start({ prompt: 'read the note', config });
+    expect(lookupFailed.ok).toBe(false);
+    expect(read).toBeUndefined();
     const ended = await refused.done;
     expect(ended.status).toBe('error');
     expect(ended.steps).toBe(0);

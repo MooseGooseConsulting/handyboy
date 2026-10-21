@@ -63,7 +63,16 @@ export class TriggerServer {
           resolve();
         });
       });
-      await fs.promises.chmod(p, 0o600);
+      try {
+        await fs.promises.chmod(p, 0o600);
+      } catch (error) {
+        // listen() already succeeded. Leave the socket closed if we cannot
+        // confirm its mode, or main.ts drops the server and the listener stays up.
+        server.close();
+        this.#server = null;
+        await fs.promises.unlink(p).catch(() => {});
+        throw error;
+      }
     } finally {
       process.umask(previousUmask);
     }

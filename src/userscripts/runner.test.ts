@@ -42,6 +42,34 @@ test('forgetting the injection result drops the value a successful userscript re
   expect(result.console).toEqual([]);
 });
 
+test('a url outside the allow-list is refused before the script is injected', async () => {
+  let injected = false;
+  const script: Userscript = {
+    id: 'shelf-count',
+    name: 'Shelf count',
+    matches: ['https://shop.example/*'],
+    code: 'return 1;',
+    updatedAt: 0,
+  };
+  const api: UserScriptsApi = {
+    async execute() {
+      injected = true;
+      return [];
+    },
+  };
+
+  const result = await runUserscript({
+    tabId: 7,
+    script,
+    url: 'https://other.example/cart',
+    api,
+  });
+
+  expect(result.ok).toBe(false);
+  expect(result.error).toContain('not in this script\'s allow-list');
+  expect(injected).toBe(false);
+});
+
 test('dropping the caught error or the console buffer returns a failing script with neither', async () => {
   const script: Userscript = {
     id: 'bin-total',

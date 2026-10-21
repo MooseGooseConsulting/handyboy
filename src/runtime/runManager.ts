@@ -585,11 +585,10 @@ export function chromeTabsPort(): TabsPort {
         // different window; that is a refusal.
         return undefined;
       } catch {
-        // No focused normal window (all minimised, say).
+        // The lookup failed, or there is no focused normal window. Querying the
+        // last-focused tab without a window type can return a popup.
+        return undefined;
       }
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (tab?.id === undefined) return undefined;
-      return { id: tab.id, url: tab.url ?? '' };
     },
     async get(tabId) {
       try {
