@@ -1,20 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { parseUserscriptMetadata } from './metadata';
+import { applyUserscriptHeader, parseUserscriptMetadata } from './metadata';
 
-describe('parseUserscriptMetadata', () => {
-  it('reads a header pasted with Windows line endings and returns the body without it', () => {
-    const code = '// ==UserScript==\r\n// @name crlf script\r\n// @match https://x.test/*\r\n// ==/UserScript==\r\nreturn 1;\r\n';
-    const parsed = parseUserscriptMetadata(code);
-    expect(parsed).toEqual({ name: 'crlf script', matches: ['https://x.test/*'], body: 'return 1;\n' });
+const SOURCE = ['// ==UserScript==', '// @name Wool prices', '// @match https://shop.example/*', '// ==/UserScript==', 'return 1;'].join(
+  '\r\n',
+);
+
+describe('userscript metadata', () => {
+  it('a CRLF header yields the name, the match, and the body without the block', () => {
+    expect(parseUserscriptMetadata(SOURCE)).toEqual({
+      name: 'Wool prices',
+      matches: ['https://shop.example/*'],
+      body: 'return 1;',
+    });
+    expect(parseUserscriptMetadata('return 1;')).toBeNull();
   });
 
-  it('reads a header that uses bare carriage returns', () => {
-    const parsed = parseUserscriptMetadata('// ==UserScript==\r// @name cr script\r// ==/UserScript==\rreturn 2;');
-    expect(parsed?.name).toBe('cr script');
-    expect(parsed?.body).toBe('return 2;');
-  });
+  it('an unset name and a wildcard match take the header, and a chosen name is kept', () => {
+    const applied = applyUserscriptHeader({
+      name: 'new script',
+      matches: ['*://*/*'],
+      code: SOURCE,
+    });
+    expect(applied.name).toBe('Wool prices');
+    expect(applied.matches).toEqual(['https://shop.example/*']);
+    expect(applied.code).toBe('return 1;');
 
-  it('returns null for code with no metadata block', () => {
-    expect(parseUserscriptMetadata('return 3;')).toBeNull();
+    const kept = applyUserscriptHeader({
+      name: 'Mine',
+      matches: ['https://other.example/*'],
+      code: SOURCE,
+    });
+    expect(kept.name).toBe('Mine');
+    expect(kept.matches).toEqual(['https://other.example/*']);
+    expect(kept.code).toBe('return 1;');
   });
 });

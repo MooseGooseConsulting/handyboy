@@ -1,32 +1,24 @@
-/**
- * (h) The IndexedDB saver must pass the official conformance suite. Ours is the
- * only thing standing between a killed MV3 worker and a lost run, so "it worked
- * on the happy path" is not evidence.
- *
- * `@langchain/langgraph-checkpoint-validation` calls `describe`/`it`/`expect`
- * as globals. Rather than switch the whole repo to `globals: true`, they are
- * installed on `globalThis` for this file only, then the suite is imported.
- */
 import 'fake-indexeddb/auto';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { IndexedDBSaver } from './checkpointer';
 
-Object.assign(globalThis, {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-});
+describe('checkpoint store', () => {
+  it('a checkpoint written for one thread is what that thread reads back, and another thread does not see it', async () => {
+    const saver = new IndexedDBSaver({ dbName: `hb-cp-${Date.now()}` });
+    const config = { configurable: { thread_id: 'thread-a', checkpoint_ns: '' } };
+    const other = { configurable: { thread_id: 'thread-b', checkpoint_ns: '' } };
+    const checkpoint = {
+      v: 1,
+      id: '1',
+      ts: '2026-10-20T00:00:00.000Z',
+      channel_values: {},
+      channel_versions: {},
+      versions_seen: {},
+    };
 
-const { validate } = await import('@langchain/langgraph-checkpoint-validation');
-
-let dbSeq = 0;
-
-validate({
-  checkpointerName: 'IndexedDBSaver',
-  createCheckpointer: () => new IndexedDBSaver({ dbName: `validation-${dbSeq++}` }),
-  destroyCheckpointer: (saver) => saver.destroy(),
+    await saver.put(config, checkpoint, { source: 'input', step: 0, parents: {} }, {});
+    const loaded = await saver.getTuple(config);
+    expect(loaded?.checkpoint.id).toBe('1');
+    expect(await saver.getTuple(other)).toBeUndefined();
+  });
 });

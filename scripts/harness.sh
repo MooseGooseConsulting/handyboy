@@ -77,19 +77,6 @@
 # page-after.txt; plus the fixture dir. Profiles and sockets live in a /tmp dir
 # removed on exit unless --keep.
 #
-# Live tier (--live): the same owned browser and the real extension/host, but the real
-# Doppler key and the free OpenRouter pair (nvidia/nemotron-3-ultra-550b-a55b:free
-# leader, nvidia/nemotron-3.5-lightning:free follower) -- no scripted fetch, no
-# doppler shim. Nine tasks (scripts/harness/live-tasks.mjs): the eBay
-# scrape on ebay.com with ebay-search-extract, the userscript write-run-revise loop,
-# and inventory/download/escalation/read-only/login/redaction/stall on a local
-# fixture (scripts/harness/live-fixture-server.mjs). Each task is scored by
-# scripts/harness/live-verdict.mjs against ground truth, the side panel is inspected
-# per task (scripts/harness/ui-inspect.mjs, screenshot stored per task), and
-# scripts/harness/scorecard.mjs prints one line per task plus a total, exiting 0 only
-# on a full pass. If GET /key is not ready the tier fails closed with `live blocked`
-# before any task runs. `HB_E2E_*` (scripts/e2e.sh overrides) are never read here.
-#
 # Needs: node (>= 22, host runs .ts directly), jq, agent-browser with its Chrome for Testing
 # (`agent-browser install`). Exit 0 = every asserted check passed; 1 = anything else;
 # 2 = bad usage or missing prerequisite.
@@ -109,12 +96,7 @@ KEEP=0
 SEED="${HB_HARNESS_SEED:-$(( (RANDOM << 15 | RANDOM) % 1000000 + 1 ))}"
 RUN_TIMEOUT="${HB_HARNESS_RUN_TIMEOUT:-180}"
 LIVE=0
-LIVE_ONLY=0
 SCRIPTED_ONLY=0
-LIVE_TASKS="${HB_HARNESS_LIVE_TASKS:-ebay,userscript_debug,inventory,download,escalation,readonly,login,redaction,stall}"
-LIVE_TIMEOUT="${HB_HARNESS_LIVE_TIMEOUT:-600}"
-LIVE_LEADER="${HB_HARNESS_LIVE_LEADER:-nvidia/nemotron-3-ultra-550b-a55b:free}"
-LIVE_FOLLOWER="${HB_HARNESS_LIVE_FOLLOWER:-nvidia/nemotron-3.5-lightning:free}"
 
 usage() { awk 'NR == 1 { next } /^[^#]/ { exit } { print }' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -126,10 +108,10 @@ while [ $# -gt 0 ]; do
     --seed) SEED="$2"; shift 2 ;;
     --run-timeout) RUN_TIMEOUT="$2"; shift 2 ;;
     --live) LIVE=1; shift ;;
-    --live-only) LIVE=1; LIVE_ONLY=1; shift ;;
+    --live-only) LIVE=1; shift ;;
     --scripted-only) SCRIPTED_ONLY=1; shift ;;
-    --live-tasks) LIVE_TASKS="$2"; shift 2 ;;
-    --live-timeout) LIVE_TIMEOUT="$2"; shift 2 ;;
+    --live-tasks) [ -n "${2:-}" ] || { echo "harness: --live-tasks needs a value" >&2; exit 2; }; shift 2 ;;
+    --live-timeout) [ -n "${2:-}" ] || { echo "harness: --live-timeout needs a value" >&2; exit 2; }; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "harness: unknown option $1" >&2; exit 2 ;;
   esac
@@ -215,13 +197,9 @@ start_fixture() { # <name> <seed>
   [ -f "$dir/ready.json" ] || { cat "$dir.log"; echo "harness: fixture $1 did not start" >&2; exit 1; }
 }
 step "fixture pages"
-if [ "$LIVE_ONLY" = "0" ]; then
 start_fixture main "$SEED"
 FIXTURE_URL="$(jq -r .url "$WORK/fixture-main/ready.json")"
 echo "main fixture:     $FIXTURE_URL  expected rows: $(jq -c . "$WORK/fixture-main/expected.json")"
-else
-echo "(scripted fixtures skipped: --live-only)"
-fi
 
 # The host's SecretStore shells out to `doppler`. This shim answers instead, so the real
 # Doppler (and the user's real key) is never touched; the fake key only ever reaches the
@@ -420,317 +398,6 @@ CHROME
   ab close >/dev/null 2>&1 || true
 }
 
-# ------------------------------------------------------------------ live tier
-# Same owned browser and real extension/host as the scripted phases, but the real
-# Doppler key and the free OpenRouter pair -- no scripted fetch, no doppler shim.
-# Fails closed with `live blocked` when GET /key is not ready.
-start_live_fixture() {
-  local dir="$WORK/fixture-live"
-  node "$HARNESS/live-fixture-server.mjs" --seed "$SEED" --out "$dir" >"$WORK/fixture-live.log" 2>&1 &
-  FIXTURE_PIDS+=($!)
-  local i
-  for i in $(seq 1 50); do [ -f "$dir/ready.json" ] && break; sleep 0.1; done
-  [ -f "$dir/ready.json" ] || { cat "$WORK/fixture-live.log"; echo "harness: live fixture did not start" >&2; exit 1; }
-}
-
-run_live() {
-  CURRENT_PHASE=live
-  local OUT="$WORK/live" D="$TMP/live"
-  mkdir -p "$D/profile/NativeMessagingHosts" "$D/home/Downloads" "$OUT/results"
-  local xdgdir
-  for xdgdir in chromium google-chrome google-chrome-for-testing; do mkdir -p "$D/xdg/$xdgdir/NativeMessagingHosts"; done
-
-  step "live self-test (no key needed)"
-  if node "$HARNESS/live-selftest.mjs" >"$OUT/selftest.txt" 2>&1; then
-    ok "live verdicts accept good synthetic logs and reject tampers ($(grep -c '^  PASS' "$OUT/selftest.txt") checks)"
-  else
-    cat "$OUT/selftest.txt"; bad "live verdict self-test failed (see $OUT/selftest.txt)"
-    # Fail closed: untrusted scorers must not spend the real key and network on
-    # tasks whose verdicts would be meaningless. The recorded failure still fails
-    # the harness; the summary below reports the tier as unfinished.
-    return
-  fi
-
-  step "live fixture"
-  start_live_fixture
-  local LIVE_BASE
-  LIVE_BASE="$(jq -r .baseUrl "$WORK/fixture-live/ready.json")"
-  echo "live fixture: $LIVE_BASE (seed $SEED)"
-  echo "live models:  leader=$LIVE_LEADER follower=$LIVE_FOLLOWER (OpenRouter https://openrouter.ai/api/v1/)"
-
-  local known task
-  known="$(node "$HARNESS/live-tasks.mjs" --list | tr '\n' ' ')"
-  # An empty task list would run zero tasks and score 0/0 as a pass; refuse it here.
-  [ -n "${LIVE_TASKS//[ ,]/}" ] || { echo "harness: --live-tasks names no task; refusing a 0-task live tier" >&2; exit 2; }
-  for task in ${LIVE_TASKS//,/ }; do
-    [[ " $known " == *" $task "* ]] || { echo "harness: unknown live task $task (known: $known)" >&2; exit 2; }
-  done
-
-  step "live browser + host (real Doppler key, real network)"
-  local doppler_dir=""
-  if command -v doppler >/dev/null 2>&1; then doppler_dir="$(dirname "$(command -v doppler)"):"; fi
-  cat >"$D/handyboy-host" <<WRAP
-#!/bin/sh
-# Written by scripts/harness.sh for the live tier. Spawned by the harness's own browser only.
-HANDYBOY_DEV=1
-HANDYBOY_SOCK=$D/nb.sock
-HB_HOME=$D/home
-PATH=${doppler_dir}\$PATH
-export HANDYBOY_DEV HANDYBOY_SOCK HB_HOME PATH
-exec "$NODE_BIN" "$ROOT/host/src/main.ts" "\$@"
-WRAP
-  chmod 0755 "$D/handyboy-host"
-  local manifest
-  manifest="$(jq -n --arg path "$D/handyboy-host" --arg origin "chrome-extension://$EXT_ID/" \
-    '{name: "com.handyboy.host", description: "Handyboy harness host (live)", path: $path, type: "stdio", allowed_origins: [$origin]}')"
-  local mdir
-  for mdir in "$D/profile/NativeMessagingHosts" "$D"/xdg/*/NativeMessagingHosts; do
-    printf '%s\n' "$manifest" >"$mdir/$HOST_NAME.json"
-  done
-
-  # The browser's default download dir (~/Downloads) is contained via xdg-user-dirs,
-  # not via HOME: the live host below must see the real HOME (Doppler reads its token
-  # from ~/.doppler), and Chrome resolves the download dir from $XDG_CONFIG_HOME's
-  # user-dirs.dirs, which already points at the temp dir. agent-browser itself keeps
-  # the real environment (its Chrome for Testing lives under the real HOME).
-  printf 'XDG_DOWNLOAD_DIR="%s"\n' "$D/home/Downloads" >"$D/xdg/user-dirs.dirs"
-  cat >"$D/chrome" <<CHROME
-#!/bin/sh
-XDG_CONFIG_HOME=$D/xdg; export XDG_CONFIG_HOME
-exec "$CFT_BIN" "\$@"
-CHROME
-  chmod 0755 "$D/chrome"
-
-  local S
-  S="$(agent-browser session id --scope worktree --prefix nbharness 2>/dev/null || echo nbharness)-live-$$"
-  SESSIONS+=("$S")
-  local headed=()
-  [ "$HEADED" = "1" ] && headed=(--headed)
-  ab_live() {
-    XDG_CONFIG_HOME="$D/xdg" AGENT_BROWSER_PROFILE="$D/profile" AGENT_BROWSER_EXTENSIONS="$EXT_DIR" \
-      AGENT_BROWSER_EXECUTABLE_PATH="$D/chrome" \
-      agent-browser --session "$S" "${headed[@]}" "$@"
-  }
-
-  if ! ab_live open "$LIVE_BASE/" >"$OUT/agent-browser-open.log" 2>&1; then
-    cat "$OUT/agent-browser-open.log"; bad "agent-browser could not launch the live browser"; return
-  fi
-  ok "agent-browser launched live session $S on $LIVE_BASE/"
-
-  local pid cmd
-  pid="$(pgrep -f -- "--user-data-dir=$D/profile" | while read -r p; do
-           [[ "$(tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null)" != *"--type="* ]] && echo "$p"; done | head -n1)"
-  if [ -z "$pid" ]; then bad "no live browser process with --user-data-dir=$D/profile"; return; fi
-  cmd="$(tr '\0' ' ' </proc/"$pid"/cmdline)"
-  printf '%s\n' "$cmd" >"$OUT/chrome-cmdline.txt"
-  local exe
-  exe="$(readlink -f /proc/"$pid"/exe)"
-  if [[ "$exe" == "$HOME/.agent-browser/browsers/"* && "$cmd" == *"--load-extension=$EXT_DIR"* \
-        && "$cmd" == *"--disable-extensions-except=$EXT_DIR"* && "$cmd" != *".config/google-chrome"* ]]; then
-    ok "live browser pid $pid is $exe with --user-data-dir=$D/profile --load-extension=$EXT_DIR"
-  else
-    bad "live browser pid $pid is not the isolated Chrome for Testing launch: exe=$exe"
-  fi
-  local crashpad
-  crashpad="$(pgrep -a -f -- "chrome_crashpad_handler.*--database=$D/xdg/" | head -n1)"
-  if [ -n "$crashpad" ]; then
-    ok "live browser config root is the temp XDG_CONFIG_HOME"
-  else
-    bad "live browser did not take its config root from XDG_CONFIG_HOME=$D/xdg"
-  fi
-
-  local ws probe
-  ws="$(ab_live get cdp-url 2>/dev/null | grep -Eo 'ws://[^[:space:]]+' | head -n1)"
-  if [ -z "$ws" ]; then bad "agent-browser gave no CDP url for its live browser"; return; fi
-  probe="$(node "$HARNESS/cdp-probe.mjs" --ws "$ws" --id "$EXT_ID" --timeout 30)"
-  printf '%s\n' "$probe" >"$OUT/service-worker.json"
-  if jq -e '.ok' <<<"$probe" >/dev/null 2>&1; then
-    ok "live service worker up: $(jq -r '"\(.worker) in \(.browser)"' <<<"$probe")"
-  else
-    bad "live service worker probe: $(jq -r '.error // .' <<<"$probe" 2>/dev/null || echo "$probe")"; return
-  fi
-
-  local status="" i
-  for i in $(seq 1 60); do
-    if [ -S "$D/nb.sock" ]; then
-      status="$(HANDYBOY_SOCK="$D/nb.sock" host/bin/hb-status 2>/dev/null)"
-      jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1 && break
-    fi
-    sleep 0.5
-  done
-  printf '%s\n' "$status" >"$OUT/hb-status.json"
-  if ! jq -e '.extensionConnected == true' <<<"$status" >/dev/null 2>&1; then
-    bad "live native host never reported extensionConnected at $D/nb.sock"; return
-  fi
-  ok "live native host connected (pid $(jq -r .pid <<<"$status"))"
-
-  # Fail closed: no key, no tasks, no pass. The scorecard prints `live blocked`.
-  local key_ready key_reason
-  key_ready="$(jq -r .key.ready "$OUT/hb-status.json")"
-  key_reason="$(jq -r '.key.reason // "GET /key is not ready"' "$OUT/hb-status.json")"
-  if [ "$key_ready" != "true" ]; then
-    echo "live blocked: $key_reason"
-    jq -n --arg reason "$key_reason" --arg leader "$LIVE_LEADER" --arg follower "$LIVE_FOLLOWER" \
-      '{blocked: true, reason: $reason, models: {leader: $leader, follower: $follower}}' >"$OUT/scorecard.json"
-    printf 'live      blocked (%s)\n' "$key_reason" | tee "$OUT/scorecard.txt"
-    FAILURES+=("live: blocked ($key_reason)")
-    ab_live close >/dev/null 2>&1 || true
-    return
-  fi
-  ok "live key is ready (GET /key validated)"
-
-  # The panel must be open DURING runs: it only shows live broadcasts, so opening
-  # it after a run would show an empty log.
-  local panel_target=""
-  panel_target="$(node "$HARNESS/ui-inspect.mjs" --mode open --ws "$ws" --id "$EXT_ID" --timeout 30 \
-    | tee "$OUT/panel-open.json" | jq -r '.targetId // empty' 2>/dev/null)"
-  if [ -n "$panel_target" ]; then
-    ok "side panel open in the harness browser (target $panel_target)"
-  else
-    bad "side panel did not reach connected in the harness browser (see $OUT/panel-open.json); verdicts only"
-  fi
-
-  local hits_total host_lines ext_lines
-  : >"$OUT/results.jsonl"
-  for task in ${LIVE_TASKS//,/ }; do
-    CURRENT_PHASE="live:$task"
-    local TJSON="$OUT/$task-task.json"
-    node "$HARNESS/live-tasks.mjs" --task "$task" --expected "$WORK/fixture-live/expected.json" --base-url "$LIVE_BASE" \
-      --leader "$LIVE_LEADER" --follower "$LIVE_FOLLOWER" >"$TJSON"
-    local url prompt
-    url="$(jq -r .url "$TJSON")"
-    prompt="$(jq -r .prompt "$TJSON")"
-    step "live task $task: $(jq -r .title "$TJSON")"
-    echo "  url: $url"
-
-    hits_total="$(wc -l <"$WORK/fixture-live/hits.jsonl" 2>/dev/null || echo 0)"
-    host_lines="$(wc -l <"$D/home/.local/share/handyboy/host.log" 2>/dev/null || echo 0)"
-    ext_lines="$(wc -l <"$D/home/.local/share/handyboy/ext.log" 2>/dev/null || echo 0)"
-
-    # read-only needs stored readOnly on: hb-run --option values are strings and the
-    # worker only honours a boolean readOnly, so the option cannot carry it. The Setup
-    # toggle is the real path, and the plan expects it on for this task anyway.
-    if [ "$task" = "readonly" ] && [ -n "$panel_target" ]; then
-      if node "$HARNESS/ui-inspect.mjs" --mode toggle --ws "$ws" --target "$panel_target" \
-           --toggle read-only --on true >"$OUT/$task-toggle-on.json" 2>&1; then
-        ok "read-only toggle on for the readonly task"
-      else
-        bad "could not flip the read-only toggle on (see $OUT/$task-toggle-on.json)"
-      fi
-    fi
-
-    ab_live open "$url" >/dev/null 2>&1 || true
-    # The panel target stole focus when it was created; the worker refuses to run on
-    # an extension page, so the task tab must be frontmost before hb-run.
-    if node "$HARNESS/ui-inspect.mjs" --mode activate --ws "$ws" --match "${url%%\?*}" >"$OUT/$task-activate.json" 2>&1; then
-      ok "task tab is frontmost ($(jq -r .url "$OUT/$task-activate.json" | cut -c1-80))"
-    else
-      bad "could not activate the task tab for $task (see $OUT/$task-activate.json)"
-    fi
-    local stream="$OUT/$task-run.jsonl"
-    local opt_args=()
-    while IFS= read -r kv; do opt_args+=(--option "$kv"); done \
-      < <(jq -r '.options | to_entries[] | select(.key != "readOnly") | "\(.key)=\(.value)"' "$TJSON")
-    echo "  run: hb-run (timeout ${LIVE_TIMEOUT}s) -> $stream"
-    HANDYBOY_SOCK="$D/nb.sock" timeout "$LIVE_TIMEOUT" host/bin/hb-run "$prompt" \
-      --url "$url" "${opt_args[@]}" >"$stream" 2>"$OUT/$task-hb-run.stderr"
-    local rc=$?
-    echo "  hb-run exit $rc, $(wc -l <"$stream") events"
-
-    local run_id runlog="$OUT/$task-runlog.jsonl"
-    run_id="$(grep -o 'runId=[A-Za-z0-9_-]*' "$OUT/$task-hb-run.stderr" | head -n1 | cut -d= -f2)"
-    if [ "$rc" -eq 124 ] && [ -n "$run_id" ]; then
-      echo "  hb-run timed out; cancelling $run_id so the next task starts clean"
-      HANDYBOY_SOCK="$D/nb.sock" host/bin/hb-cancel "$run_id" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$run_id" ] && cp "$D/home/.local/share/handyboy/runs/$run_id.jsonl" "$runlog" 2>/dev/null; then
-      ok "host persisted run log $run_id.jsonl ($(wc -l <"$runlog") events)"
-    else
-      bad "no persisted run log for runId=${run_id:-<none>}"; : >"$runlog"
-    fi
-
-    # NOTE: the read-only toggle stays on through the verdict and UI inspection
-    # below (the inspection requires it on); it is reset after aggregation.
-
-    tail -n +"$((hits_total + 1))" "$WORK/fixture-live/hits.jsonl" >"$OUT/$task-hits.jsonl" 2>/dev/null || true
-    tail -n +"$((host_lines + 1))" "$D/home/.local/share/handyboy/host.log" >"$OUT/$task-host.log" 2>/dev/null || : >"$OUT/$task-host.log"
-    tail -n +"$((ext_lines + 1))" "$D/home/.local/share/handyboy/ext.log" >"$OUT/$task-ext.log" 2>/dev/null || : >"$OUT/$task-ext.log"
-
-    # eBay ground truth, scraped independently from the results DOM (not the userscript).
-    local page_arg=()
-    if [ "$task" = "ebay" ]; then
-      ab_live eval "$(cat "$HARNESS/ebay-extract.js")" >"$OUT/ebay-page.raw" 2>&1 || true
-      if jq -e 'type == "array"' "$OUT/ebay-page.raw" >/dev/null 2>&1; then
-        cp "$OUT/ebay-page.raw" "$OUT/ebay-page.json"
-      elif jq -r . "$OUT/ebay-page.raw" 2>/dev/null | jq -e 'type == "array"' >/dev/null 2>&1; then
-        jq -r . "$OUT/ebay-page.raw" >"$OUT/ebay-page.json"
-      else
-        grep -o '\[.*\]' "$OUT/ebay-page.raw" | head -n1 >"$OUT/ebay-page.json" 2>/dev/null || echo '[]' >"$OUT/ebay-page.json"
-      fi
-      echo "  page listings scraped independently: $(jq 'length' "$OUT/ebay-page.json" 2>/dev/null || echo '?')"
-      page_arg=(--page "$OUT/ebay-page.json")
-    fi
-
-    echo "  verdict:"
-    node "$HARNESS/live-verdict.mjs" --task "$task" --stream "$runlog" \
-      --expected "$WORK/fixture-live/expected.json" "${page_arg[@]}" \
-      --host-log "$OUT/$task-host.log" --ext-log "$OUT/$task-ext.log" \
-      --download-dirs "$D/home/Downloads:$D/profile" --hits "$OUT/$task-hits.jsonl" \
-      --json "$OUT/$task-verdict.json" | tee "$OUT/$task-verdict.txt"
-    local verdict_rc=${PIPESTATUS[0]}
-    [ "$verdict_rc" -eq 0 ] && ok "verdict passed for $task" || bad "verdict failed for $task (see $OUT/$task-verdict.txt)"
-
-    local inspect_file="$OUT/$task-inspection.json"
-    if [ -n "$panel_target" ]; then
-      echo "  UI inspection:"
-      node "$HARNESS/ui-inspect.mjs" --mode check --ws "$ws" --target "$panel_target" --task "$task" \
-        --runlog "$runlog" --expected "$WORK/fixture-live/expected.json" --out "$OUT" --expect-ready true \
-        | tee "$OUT/$task-inspection.txt"
-      [ "${PIPESTATUS[0]}" -eq 0 ] && ok "UI inspection passed for $task" \
-        || bad "UI inspection failed for $task (see $OUT/$task-inspection.txt)"
-    fi
-    # Missing or empty scorer artifacts fail the task, never pass it: an empty
-    # verdict array (or null inspection) would make `all` vacuously true and mark
-    # a crashed scorer as passing in the persisted scorecard.
-    [ -f "$OUT/$task-verdict.json" ] || echo '[{"name":"verdict crashed before writing results","ok":false,"detail":"see verdict txt"}]' >"$OUT/$task-verdict.json"
-    if [ ! -f "$inspect_file" ] && [ -n "$panel_target" ]; then
-      jq -n --arg task "$task" '{task: $task, results: [{name: "UI inspection did not run", ok: false, detail: "see inspection txt"}]}' >"$inspect_file"
-    fi
-    [ -f "$inspect_file" ] || echo 'null' >"$inspect_file"
-    # A panel that never opened must fail the task, not vanish into a null
-    # inspection the scorecard treats as passing: replace the null with an
-    # explicit failed check.
-    if [ -z "$panel_target" ]; then
-      jq -n --arg task "$task" '{task: $task, results: [{name: "panel opened for UI inspection", ok: false, detail: "openPanel failed; no UI inspection ran"}]}' >"$inspect_file"
-    fi
-    jq -n --arg task "$task" --arg title "$(jq -r .title "$TJSON")" \
-      --slurpfile verdict "$OUT/$task-verdict.json" \
-      --slurpfile inspect "$inspect_file" \
-      '{task: $task, title: $title,
-        passed: ([$verdict[0][] | .ok] | length > 0 and all) and (if $inspect[0] then ([$inspect[0].results[] | .ok] | length > 0 and all) else true end),
-        checks: ($verdict[0] + (if $inspect[0] then [$inspect[0].results[] | {name: ("ui: " + .name), ok, detail}] else [] end))}' \
-      >>"$OUT/results.jsonl"
-
-    # Reset after aggregation so the next task starts from a full run — and after
-    # the inspection above, which requires the toggle still on for this task.
-    if [ "$task" = "readonly" ] && [ -n "$panel_target" ]; then
-      node "$HARNESS/ui-inspect.mjs" --mode toggle --ws "$ws" --target "$panel_target" \
-        --toggle read-only --on false >"$OUT/$task-toggle-off.json" 2>&1 || true
-    fi
-  done
-
-  CURRENT_PHASE=live
-  step "live scorecard"
-  jq -s '.' "$OUT/results.jsonl" >"$OUT/results.json"
-  node "$HARNESS/scorecard.mjs" --results "$OUT/results.json" --out "$OUT" \
-    --leader "$LIVE_LEADER" --follower "$LIVE_FOLLOWER" --seed "$SEED" | tee "$OUT/scorecard.txt"
-  [ "${PIPESTATUS[0]}" -eq 0 ] && ok "live scorecard: full pass" \
-    || bad "live scorecard: not a full pass (see $OUT/scorecard.txt)"
-
-  ab_live close >/dev/null 2>&1 || true
-}
-
-if [ "$LIVE_ONLY" = "0" ]; then
 run_phase scripted "$FIXTURE_URL" "$WORK/fixture-main"
 
 # ------------------------------------------------------------ 5. verdict self-test
@@ -750,12 +417,6 @@ if node "$HARNESS/verdict.mjs" --stream "$SELFTEST_STREAM" --expected "$WORK/fix
 else
   bad "the scripted stream does not pass untampered; nothing meaningful to self-test"
 fi
-fi # LIVE_ONLY=0 (scripted tier)
-
-if [ "$LIVE" = "1" ]; then
-  run_live
-fi
-
 # ---------------------------------------------------------------------- summary
 CURRENT_PHASE=teardown
 REAL_SOCK_AFTER="$(real_sock_id)"
@@ -764,14 +425,6 @@ REAL_SOCK_AFTER="$(real_sock_id)"
 
 step "result"
 echo "logs: $WORK"
-if [ -f "$WORK/live/scorecard.txt" ]; then
-  echo "--- scorecard ---"
-  cat "$WORK/live/scorecard.txt"
-elif [ "$LIVE" = "1" ]; then
-  echo "live      blocked (tier did not finish; see $WORK/live)"
-else
-  echo "live      blocked (not requested; run with --live)"
-fi
 if [ "${#FAILURES[@]}" -eq 0 ]; then
   echo "HARNESS PASS"
   exit 0

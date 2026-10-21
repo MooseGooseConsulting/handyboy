@@ -50,14 +50,32 @@ export class TriggerServer {
     }
     const server = net.createServer((sock) => this.#onConnection(sock));
     this.#server = server;
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(p, () => {
-        server.removeListener('error', reject);
-        resolve();
+    // listen() creates the socket inode under the process umask, and only then
+    // can chmod run. A 0022 umask leaves that inode at 0755, and connectable,
+    // for the whole gap. Bind it 0600, and put the previous umask back even
+    // when listen fails.
+    const previousUmask = process.umask(0o177);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(p, () => {
+          server.removeListener('error', reject);
+          resolve();
+        });
       });
-    });
-    await fs.promises.chmod(p, 0o600);
+      try {
+        await fs.promises.chmod(p, 0o600);
+      } catch (error) {
+        // listen() already succeeded. Leave the socket closed if we cannot
+        // confirm its mode, or main.ts drops the server and the listener stays up.
+        server.close();
+        this.#server = null;
+        await fs.promises.unlink(p).catch(() => {});
+        throw error;
+      }
+    } finally {
+      process.umask(previousUmask);
+    }
     log('info', 'dev trigger socket listening', { path: p });
   }
 
