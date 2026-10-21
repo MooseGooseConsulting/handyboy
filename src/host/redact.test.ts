@@ -36,3 +36,15 @@ it('a dotted OpenRouter key sk-or-v1.<hex>.<hex> does not survive extension log 
     at: 1_720_000_000_000,
   });
 });
+
+it('a bearer token, a Doppler token, and a screenshot data URL do not survive redaction', () => {
+  const bearer = 'Bearer sk-live-secret-token';
+  const doppler = 'dp.ct.abcdef0123456789';
+  const png = 'data:image/png;base64,aaaa';
+  const line = redactText(`auth=${bearer} doppler=${doppler} shot=${png} tail`);
+  expect(line.includes(bearer)).toBe(false);
+  expect(line.includes('sk-live-secret-token')).toBe(false);
+  expect(line.includes(doppler)).toBe(false);
+  expect(line.includes(png)).toBe(false);
+  expect(line).toBe('auth=[redacted] doppler=[redacted] shot=[screenshot omitted] tail');
+});
