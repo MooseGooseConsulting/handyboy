@@ -34,6 +34,12 @@ export interface ToolResult {
    * same size in the log as a one-line click.
    */
   chars?: number;
+  /**
+   * Model-visible text of a successful read (snapshot, extract, userscript).
+   * Absent for clicks and other short results. The summary stays panel-sized;
+   * the harness scorer uses this so a reported price has to appear in the read.
+   */
+  text?: string;
 }
 
 /**
@@ -58,9 +64,9 @@ export type RunEvent =
   /**
    * `tokens` is the snapshot's own chars/4 estimate, not the size of the prompt it rides in.
    * `unchanged` means the snapshot matched the last one sent, so the model got a note
-   * naming that step instead of the snapshot.
+   * naming that step instead of the snapshot. `url` is the page it was taken of.
    */
-  | { kind: 'observation'; mode: ObserveMode; tokens?: number; hasScreenshot: boolean; unchanged?: boolean; at: number }
+  | { kind: 'observation'; mode: ObserveMode; tokens?: number; url?: string; hasScreenshot: boolean; unchanged?: boolean; text?: string; at: number }
   | { kind: 'input.fidelity'; fidelity: InputFidelity; attached: boolean; at: number }
   | { kind: 'userscript.output'; scriptId: string; level: 'log' | 'warn' | 'error'; text: string; at: number }
   | { kind: 'file.saved'; runId: RunId; filename: string; bytes: number; path: string; at: number }
