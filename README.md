@@ -163,6 +163,21 @@ bash scripts/check-invariants.sh
 
 ## Where things live
 
+### Model request deadlines
+
+Each model request attempt has a five-minute deadline, including reading the response
+body. A timeout uses the existing transient retry budget (two retries); after that,
+the run records an error and ends. User abort still cancels immediately.
+
+To allow slower providers, set `WXT_LLM_TIMEOUT_MS` when building the extension and
+`HANDYBOY_LLM_TIMEOUT_MS` in the native host's launch environment, then rebuild/reload
+the extension and restart the host. Both values are milliseconds; the earlier deadline
+wins. For example, set both to `600000` for ten minutes per attempt. Invalid values
+(non-integers, zero, negatives, or values over one day) fall back to five minutes.
+The SDK's outer timeout includes the complete retry budget so it does not cut off a
+fresh attempt. These deadlines do not change model selection or add approval steps.
+
+
 | Path | What |
 |---|---|
 | `REQUIREMENTS.md` | canonical requirements, never edited by an agent |
