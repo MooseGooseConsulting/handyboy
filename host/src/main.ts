@@ -8,7 +8,7 @@
  */
 import { Dispatcher } from './dispatcher.ts';
 import { encodeFrame, FrameParser } from './framing.ts';
-import { LlmProxy } from './llm.ts';
+import { LlmProxy, requestTimeoutMs } from './llm.ts';
 import { log } from './log.ts';
 import { artifactsDir, extLogPath, runsDir, socketPath } from './paths.ts';
 import type { OutboundMsg } from './protocol.ts';
@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     fetch: globalThis.fetch,
     secrets,
     send,
+    requestTimeoutMs: requestTimeoutMs(process.env.HANDYBOY_LLM_TIMEOUT_MS),
   });
 
   // Chrome spawns this process only on `connectNative`, so an open stdin IS the

@@ -89,6 +89,7 @@ export type ErrorCode =
   | 'unknown_type'
   | 'no_key'
   | 'upstream'
+  | 'timeout'
   | 'aborted'
   | 'io'
   | 'internal';
