@@ -46,4 +46,30 @@ describe('agent userscript cleanup', () => {
     await expect(deleteUserscript('missing', { requireAuthor: 'agent' })).resolves.toBe(false);
     expect(write).not.toHaveBeenCalled();
   });
+
+  it('waits for an in-flight panel save before checking deletion ownership and preserves concurrent additions', async () => {
+    const script = await saveUserscript({ ...draft, author: 'agent' });
+    let release!: () => void;
+    let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const writing = new Promise<void>((resolve) => { entered = resolve; });
+    const write = userscriptsItem.setValue.bind(userscriptsItem);
+    vi.spyOn(userscriptsItem, 'setValue').mockImplementationOnce(async (value) => {
+      entered();
+      await hold;
+      await write(value);
+    });
+    const save = saveUserscript({ ...draft, id: script.id, code: 'return "user edit";' });
+    await writing;
+    const removal = deleteUserscript(script.id, { requireAuthor: 'agent' });
+    const refused = expect(removal).rejects.toThrow('written by the user');
+    const addition = saveUserscript({ ...draft, name: 'another script' });
+    release();
+    await save;
+    await refused;
+    const added = await addition;
+    expect((await getUserscript(script.id))?.code).toBe('return "user edit";');
+    expect(await getUserscript(added.id)).toEqual(added);
+    expect(await listUserscripts()).toHaveLength(2);
+  });
 });

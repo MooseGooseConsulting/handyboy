@@ -18,6 +18,16 @@ export const userscriptsItem = storage.defineItem<Userscript[]>('local:userscrip
   version: 1,
 });
 
+// Panel messages and agent tools both mutate the catalog in the service worker.
+// Serialize the complete read/modify/write, not just setValue: otherwise a stale
+// deletion can discard a user edit or a concurrently created script.
+let mutationTail: Promise<unknown> = Promise.resolve();
+function mutateCatalog<T>(operation: () => Promise<T>): Promise<T> {
+  const result = mutationTail.then(operation);
+  mutationTail = result.catch(() => undefined);
+  return result;
+}
+
 /** A draft as it arrives from the panel: `id`/`updatedAt` may be absent on create. */
 export interface UserscriptDraft {
   id?: string;
@@ -115,8 +125,7 @@ export interface SaveOptions {
    * Checked against the same read the write is built from, which is the point:
    * `writeAgentUserscript` also checks ownership, but that check is separated from
    * the write by an await, so on its own a panel save landing in the gap would be
-   * silently overwritten. Nothing narrows this to zero without a real transaction,
-   * but this closes it to the same tick.
+   * silently overwritten. Catalog mutations serialize that read and write together.
    */
   requireAuthor?: 'agent';
 }
@@ -131,6 +140,10 @@ export async function saveUserscript(
   now: () => number = Date.now,
   options: SaveOptions = {},
 ): Promise<Userscript> {
+  return mutateCatalog(() => saveUserscriptExclusive(draft, now, options));
+}
+
+async function saveUserscriptExclusive(draft: UserscriptDraft, now: () => number, options: SaveOptions): Promise<Userscript> {
   const validated = validateUserscript(draft, now);
   if (!validated.ok) throw new Error(`invalid userscript: ${validated.errors.join('; ')}`);
 
@@ -162,6 +175,10 @@ export async function saveUserscript(
 
 /** Removes a script. Returns whether anything was actually removed. */
 export async function deleteUserscript(id: string, options: SaveOptions = {}): Promise<boolean> {
+  return mutateCatalog(() => deleteUserscriptExclusive(id, options));
+}
+
+async function deleteUserscriptExclusive(id: string, options: SaveOptions): Promise<boolean> {
   const current = await listUserscripts();
   // Check ownership on the same catalog snapshot used for removal, just as save does.
   const existing = current.find((script) => script.id === id);
@@ -175,7 +192,7 @@ export async function deleteUserscript(id: string, options: SaveOptions = {}): P
 }
 
 export async function clearUserscripts(): Promise<void> {
-  await userscriptsItem.removeValue();
+  await mutateCatalog(() => userscriptsItem.removeValue());
 }
 
 function seedToScript(seed: UserscriptSeed, now: () => number): Userscript {
@@ -210,6 +227,10 @@ export const seededNamesItem = storage.defineItem<string[]>('local:userscripts.s
  * in place.
  */
 export async function seedDefaults(now: () => number = Date.now): Promise<Userscript[]> {
+  return mutateCatalog(() => seedDefaultsExclusive(now));
+}
+
+async function seedDefaultsExclusive(now: () => number): Promise<Userscript[]> {
   const current = await listUserscripts();
   const offered = new Set(await seededNamesItem.getValue());
 
