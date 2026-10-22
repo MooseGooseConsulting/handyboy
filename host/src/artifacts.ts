@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { artifactsDir } from './paths.ts';
 import { assertRunId } from './runlog.ts';
+import { protectWindowsPath } from './permissions.ts';
 
 export class ArtifactError extends Error {}
 
@@ -61,6 +62,7 @@ export async function saveArtifact(
   const targetDir = runArtifactsDir(runId, dir);
   assertFilename(filename);
   await fs.mkdir(targetDir, { recursive: true });
+  await protectWindowsPath(targetDir, 'directory');
   const file = path.join(targetDir, filename);
   await fs.writeFile(file, content, { encoding: 'utf8', mode: 0o600 });
   return { path: file, bytes };
