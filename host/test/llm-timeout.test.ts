@@ -36,4 +36,19 @@ describe('host request deadlines', () => {
       expect(requestTimeoutMs(value)).toBe(300_000);
     }
   });
+
+  it('reports an explicit client abort as cancellation rather than a timeout', async () => {
+    const secrets = new SecretStore(new FakeSecretProvider({ OPENROUTER_API_KEY: 'fixture-only-key' }));
+    await secrets.load();
+    const sent: OutboundMsg[] = [];
+    const proxy = new LlmProxy({
+      secrets, send: (msg) => sent.push(msg), requestTimeoutMs: 300_000,
+      fetch: async (_url, init) => new Promise((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+        queueMicrotask(() => proxy.abort('cancelled'));
+      }),
+    });
+    await proxy.request({ type: 'llm.request', id: 'cancelled', url: 'chat/completions', body: {} });
+    expect(sent).toEqual([{ type: 'llm.error', id: 'cancelled', code: 'aborted', message: 'aborted by client' }]);
+  });
 });

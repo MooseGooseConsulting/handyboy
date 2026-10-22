@@ -162,9 +162,7 @@ bash scripts/check-invariants.sh
 
 ---
 
-## Where things live
-
-### Model request deadlines
+## Model request deadlines
 
 Each model request attempt has a five-minute deadline, including reading the response
 body. A timeout uses the existing transient retry budget (two retries); after that,
@@ -178,6 +176,7 @@ wins. For example, set both to `600000` for ten minutes per attempt. Invalid val
 The SDK's outer timeout includes the complete retry budget so it does not cut off a
 fresh attempt. These deadlines do not change model selection or add approval steps.
 
+## Where things live
 
 | Path | What |
 |---|---|
