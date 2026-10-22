@@ -161,8 +161,13 @@ export async function saveUserscript(
 }
 
 /** Removes a script. Returns whether anything was actually removed. */
-export async function deleteUserscript(id: string): Promise<boolean> {
+export async function deleteUserscript(id: string, options: SaveOptions = {}): Promise<boolean> {
   const current = await listUserscripts();
+  // Check ownership on the same catalog snapshot used for removal, just as save does.
+  const existing = current.find((script) => script.id === id);
+  if (existing && options.requireAuthor && existing.author !== options.requireAuthor) {
+    throw new Error(`${id} ("${existing.name}") was written by the user and cannot be deleted.`);
+  }
   const next = current.filter((script) => script.id !== id);
   if (next.length === current.length) return false;
   await userscriptsItem.setValue(next);

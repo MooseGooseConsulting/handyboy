@@ -22,6 +22,7 @@ import type { Config, ModelSource } from '@/src/storage';
 import type { InputTier } from '@/src/input';
 import {
   listUserscripts,
+  deleteUserscript,
   matchesAny,
   resolveUserscript,
   seedDefaults,
@@ -134,6 +135,7 @@ export interface RunManagerDeps {
    * live in `src/userscripts/authoring.ts`.
    */
   writeUserscript?: (request: WriteUserscriptRequest) => Promise<AgentWriteResult>;
+  deleteUserscript?: (scriptId: string) => Promise<boolean>;
   /** Seam for tests. */
   start?: typeof defaultStartRun;
   checkpointer?: BaseCheckpointSaver;
@@ -402,6 +404,7 @@ export class RunManager {
       // list above, it must see scripts matching wherever the run navigated to.
       resolveUserscript,
       writeUserscript: this.#deps.writeUserscript ?? ((request) => writeAgentUserscript(request)),
+      deleteUserscript: this.#deps.deleteUserscript ?? ((id) => deleteUserscript(id, { requireAuthor: 'agent' })),
       emit,
       runId,
       ...(readOnly ? { readOnly } : {}),

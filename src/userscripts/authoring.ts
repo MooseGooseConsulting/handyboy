@@ -167,7 +167,7 @@ export async function writeAgentUserscript(
     if (mine.length >= MAX_AGENT_SCRIPTS) {
       errors.push(
         `you already have ${mine.length} scripts saved (the limit is ${MAX_AGENT_SCRIPTS}). ` +
-          'Revise one of yours by passing its scriptId instead of creating another.',
+          'Revise one of yours by passing its scriptId, or use delete_userscript to remove an obsolete one.',
       );
     }
   }

@@ -31,6 +31,7 @@ export const READ_ONLY_BLOCKED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'select',
   'download',
   'write_userscript',
+  'delete_userscript',
 ]);
 
 /** True when `name` may be bound in a read-only run. */

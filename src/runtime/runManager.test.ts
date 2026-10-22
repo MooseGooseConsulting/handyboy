@@ -5,6 +5,8 @@ import { DebuggerInputTier, type DebuggerApi } from '@/src/input';
 import type { Config } from '@/src/storage';
 import { chromeTabsPort, RunManager, type RunLogSink, type TabsPort } from './runManager';
 import type { RuntimeDriver } from './pageTools';
+import { getUserscript, saveUserscript } from '@/src/userscripts/catalog';
+import type { PageTools } from '@/src/agent/tools';
 
 const CLOCK = 1_700_000_000_000;
 
@@ -104,6 +106,43 @@ function controllableRun(runId: string): {
 }
 
 describe('RunManager', () => {
+  it('wires agent cleanup to the real catalog and preserves a script taken over by the user', async () => {
+    const draft = { name: 'cleanup fixture', matches: ['https://notes.example/*'], code: 'return 1;' };
+    const obsolete = await saveUserscript({ ...draft, author: 'agent' });
+    const edited = await saveUserscript({ ...draft, author: 'agent' });
+    await saveUserscript({ ...draft, id: edited.id, code: 'return "user edit";' });
+    installChrome([{ id: 41, active: true, url: 'https://notes.example/today' }]);
+    let bound!: PageTools;
+    const manager = new RunManager({
+      driver: pageDriver(() => 'Notes'),
+      tabs: chromeTabsPort(),
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      start: (options) => {
+        bound = options.tools;
+        const run = controllableRun(options.runId!);
+        run.finish();
+        return run.handle;
+      },
+    });
+    const started = await manager.start({
+      prompt: 'remove my obsolete script',
+      config: {
+        leaderModel: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+        followerModel: 'nvidia/nemotron-3.5-lightning:free',
+        observe: 'dom', planningInterval: 5, maxSteps: 50, inputFidelity: 'in-page',
+      },
+    });
+    expect(started.ok).toBe(true);
+    await started.done;
+    await expect(bound.deleteUserscript(obsolete.id)).resolves.toContain(obsolete.id);
+    expect(await getUserscript(obsolete.id)).toBeUndefined();
+    await expect(bound.deleteUserscript(edited.id)).rejects.toThrow('written by the user');
+    expect((await getUserscript(edited.id))?.code).toBe('return "user edit";');
+  });
+
   it("chromeTabsPort uses the last focused normal window's active tab, and an empty result refuses the run instead of another tab", async () => {
     const textFor = (tabId: number): string | undefined => {
       if (tabId === 40) return 'Old note';

@@ -483,6 +483,7 @@ export interface CreatePageToolsOptions {
    * cannot author scripts; the tool says so rather than failing obscurely.
    */
   writeUserscript?: (request: WriteUserscriptRequest) => Promise<AgentWriteResult>;
+  deleteUserscript?: (scriptId: string) => Promise<boolean>;
   emit: (event: RunEvent) => void;
   maxNodes?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -834,6 +835,13 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
     async listUserscripts() {
       if (!options.listUserscripts) return 'The userscript catalog is not available in this run.';
       return formatUserscriptList(await options.listUserscripts());
+    },
+
+    async deleteUserscript(scriptId) {
+      refuseIfReadOnly('delete_userscript');
+      if (!options.deleteUserscript) throw new Error('deleting userscripts is not available in this run');
+      if (!await options.deleteUserscript(scriptId)) throw new Error(`unknown userscript: ${scriptId}`);
+      return `deleted userscript ${scriptId}`;
     },
 
     async writeUserscript(request) {

@@ -56,6 +56,7 @@ const page: PageTools = {
   listUserscripts: unused('listUserscripts'),
   readUserscript: unused('readUserscript'),
   writeUserscript: unused('writeUserscript'),
+  deleteUserscript: unused('deleteUserscript'),
   saveFile: unused('saveFile'),
   wait: unused('wait'),
   done: unused('done'),
