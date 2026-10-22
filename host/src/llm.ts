@@ -10,6 +10,15 @@ export interface LlmDeps {
   send: (msg: OutboundMsg) => void;
   referer?: string;
   title?: string;
+  /** Deadline for a complete upstream response, including the streamed body. */
+  requestTimeoutMs?: number;
+}
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
+export function requestTimeoutMs(value: unknown): number {
+  const ms = Number(value);
+  return Number.isInteger(ms) && ms > 0 && ms <= 86_400_000 ? ms : DEFAULT_REQUEST_TIMEOUT_MS;
 }
 
 /** Headers the client must not be able to set; the host owns them. */
@@ -209,13 +218,16 @@ export class LlmProxy {
 
     const controller = new AbortController();
     this.#inflight.set(msg.id, controller);
+    const timeoutMs = requestTimeoutMs(this.deps.requestTimeoutMs);
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = AbortSignal.any([controller.signal, deadline]);
 
     try {
       const res = await this.deps.fetch(url, {
         method: msg.method ?? (msg.body === undefined ? 'GET' : 'POST'),
         headers,
         body: msg.body === undefined ? undefined : JSON.stringify(msg.body),
-        signal: controller.signal,
+        signal,
       });
 
       const reader = res.body?.getReader();
@@ -235,12 +247,13 @@ export class LlmProxy {
       const outHeaders = headersToObject(res.headers);
       send({ type: 'llm.end', id: msg.id, status: res.status, headers: outHeaders });
     } catch (err) {
-      const aborted = controller.signal.aborted;
+      const aborted = signal.aborted && signal.reason === controller.signal.reason;
+      const timedOut = signal.aborted && !aborted;
       send({
         type: 'llm.error',
         id: msg.id,
-        code: aborted ? 'aborted' : 'upstream',
-        message: aborted ? 'aborted by client' : (err as Error).message,
+        code: aborted ? 'aborted' : timedOut ? 'timeout' : 'upstream',
+        message: aborted ? 'aborted by client' : timedOut ? `Model request timed out after ${timeoutMs}ms` : (err as Error).message,
       });
     } finally {
       this.#inflight.delete(msg.id);

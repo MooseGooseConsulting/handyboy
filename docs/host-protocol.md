@@ -52,7 +52,7 @@ Errors are `{ "type": "error", "id"?, "code", "message" }` — except in-flight 
 report `{ "type": "llm.error", "id", "code", "message" }` so a stream consumer has one terminal
 event type to watch for.
 
-`code` is one of: `bad_request`, `unknown_type`, `no_key`, `upstream`, `aborted`,
+`code` is one of: `bad_request`, `unknown_type`, `no_key`, `upstream`, `timeout`, `aborted`,
 `io`, `internal`.
 
 ## Messages
@@ -154,6 +154,7 @@ Failures emit `llm.error` instead of `llm.end`:
 | `no_key` | no OpenRouter key was loaded from the secret provider |
 | `bad_request` | missing/foreign `url` |
 | `upstream` | fetch threw (DNS, TLS, reset) |
+| `timeout` | the upstream response did not finish before the request deadline |
 | `aborted` | `llm.abort` was received for this `id` |
 
 ### `llm.abort`
