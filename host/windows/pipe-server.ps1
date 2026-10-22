@@ -12,13 +12,23 @@ using System.Collections.Concurrent;
 using System.Security.AccessControl;
 using System.Security.Principal;
 public static class HandyboyPipes {
-    static ConcurrentDictionary<int, NamedPipeServerStream> clients = new ConcurrentDictionary<int, NamedPipeServerStream>();
+    sealed class Client {
+        public NamedPipeServerStream Pipe;
+        public Task Writes = Task.FromResult(0);
+        public long Pending;
+    }
+    static ConcurrentDictionary<int, Client> clients = new ConcurrentDictionary<int, Client>();
     static object output = new object();
     static int sequence = 0;
     static void Emit(string line) { lock (output) { Console.Out.WriteLine(line); Console.Out.Flush(); } }
     static void Close(int id) {
-        NamedPipeServerStream pipe;
-        if (clients.TryRemove(id, out pipe)) { pipe.Dispose(); Emit("close " + id); }
+        Client client;
+        if (clients.TryRemove(id, out client)) { client.Pipe.Dispose(); Emit("close " + id); }
+    }
+    static async Task Write(int id, Client client, byte[] bytes) {
+        try { await client.Pipe.WriteAsync(bytes, 0, bytes.Length); }
+        catch (IOException) { Close(id); } catch (ObjectDisposedException) { Close(id); }
+        finally { System.Threading.Interlocked.Add(ref client.Pending, -bytes.Length); }
     }
     static async Task Read(int id, NamedPipeServerStream pipe) {
         try {
@@ -37,7 +47,7 @@ public static class HandyboyPipes {
             if (!ready) { Emit("ready"); ready = true; }
             await pipe.WaitForConnectionAsync();
             int id = ++sequence;
-            clients[id] = pipe;
+            clients[id] = new Client { Pipe = pipe };
             Emit("open " + id);
             Task reading = Read(id, pipe).ContinueWith(t => { if (t.IsFaulted) Emit("error client read failed"); });
         }
@@ -55,11 +65,22 @@ public static class HandyboyPipes {
             string[] parts = line.Split(new char[] { ' ' }, 3);
             int id;
             if (parts.Length < 2 || !Int32.TryParse(parts[1], out id)) continue;
-            if (parts[0] == "close") { Close(id); continue; }
-            NamedPipeServerStream pipe;
-            if (parts[0] == "write" && parts.Length == 3 && clients.TryGetValue(id, out pipe)) {
-                try { var bytes = Convert.FromBase64String(parts[2]); pipe.Write(bytes, 0, bytes.Length); pipe.Flush(); }
-                catch (IOException) { Close(id); } catch (ObjectDisposedException) { Close(id); }
+            Client client;
+            if (!clients.TryGetValue(id, out client)) continue;
+            // Preserve each client's reply order without letting a stalled reader
+            // block other clients or the helper's stdin EOF/shutdown handling.
+            if (parts[0] == "close") {
+                client.Writes = client.Writes.ContinueWith(t => Close(id));
+                continue;
+            }
+            if (parts[0] == "write" && parts.Length == 3) {
+                var bytes = Convert.FromBase64String(parts[2]);
+                if (System.Threading.Interlocked.Add(ref client.Pending, bytes.Length) > 8 * 1024 * 1024) {
+                    Close(id); continue;
+                }
+                int clientId = id;
+                Client target = client;
+                client.Writes = client.Writes.ContinueWith(t => Write(clientId, target, bytes)).Unwrap();
             }
         }
         foreach (int id in clients.Keys) Close(id);

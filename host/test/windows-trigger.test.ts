@@ -4,8 +4,47 @@ import { describe, expect, it } from 'vitest';
 import { TriggerServer } from '../src/trigger.ts';
 import { readWindowsAcl } from './windows-acl.ts';
 import { resetLogForTests } from '../src/log.ts';
+import { WindowsPipeServer } from '../src/windows-pipe.ts';
 
 describe.skipIf(process.platform !== 'win32')('Windows named-pipe control', () => {
+  it('answers another client and shuts down while a client stops reading a large reply', async () => {
+    const endpoint = `\\\\.\\pipe\\handyboy-test-${randomUUID()}`;
+    const server = new WindowsPipeServer();
+    let stalled: net.Socket | undefined;
+    let healthy: net.Socket | undefined;
+    let started!: () => void;
+    const writing = new Promise<void>((resolve) => { started = resolve; });
+    await server.listen(endpoint, (socket) => {
+      socket.on('data', (data) => {
+        if (data.toString().trim() === 'stall') {
+          socket.write(Buffer.alloc(4 * 1024 * 1024, 'x'), () => started());
+        } else socket.end('ready\n');
+      });
+    });
+    try {
+      stalled = net.connect(endpoint);
+      stalled.on('error', () => {});
+      stalled.pause();
+      stalled.write('stall\n');
+      await writing;
+      const reply = await new Promise<string>((resolve, reject) => {
+        healthy = net.connect(endpoint);
+        let text = '';
+        healthy.setTimeout(3000, () => healthy?.destroy(new Error('another client blocked status')));
+        healthy.on('error', reject);
+        healthy.on('data', (data) => { text += data; });
+        healthy.on('end', () => resolve(text));
+        healthy.write('status\n');
+      });
+      expect(reply).toBe('ready\n');
+      await server.close();
+    } finally {
+      stalled?.destroy();
+      healthy?.destroy();
+      await server.close();
+    }
+  }, 15_000);
+
   it('restricts every pipe instance to the user and SYSTEM and carries status and run termination', async () => {
     const endpoint = `\\\\.\\pipe\\handyboy-test-${randomUUID()}`;
     const server = new TriggerServer({
