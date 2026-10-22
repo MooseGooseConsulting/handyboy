@@ -9,6 +9,7 @@ import type { RunEvent } from '@/src/messaging';
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const close of cleanup.splice(0)) await close();
 });
 
@@ -26,6 +27,20 @@ async function serverFor(handle: (response: ServerResponse, attempt: number) => 
 }
 
 describe('model request deadlines', () => {
+  it('forwards cancellation and removes listeners when AbortSignal.any is unavailable', async () => {
+    vi.spyOn(AbortSignal, 'any').mockImplementation(() => { throw new Error('unsupported API'); });
+    const caller = new AbortController();
+    const remove = vi.spyOn(caller.signal, 'removeEventListener');
+    const fetch: typeof globalThis.fetch = async (_input, init) => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+      caller.abort(new DOMException('cancelled on older Chrome', 'AbortError'));
+    });
+    await expect(withRequestTimeout(fetch, 300_000)('https://example.com', { signal: caller.signal }))
+      .rejects.toThrow('cancelled on older Chrome');
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(AbortSignal.any).not.toHaveBeenCalled();
+  });
+
   it('allows a slow 289-second response under the default deadline and clears its timer on success', async () => {
     vi.useFakeTimers();
     let finish!: (response: Response) => void;

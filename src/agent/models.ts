@@ -61,7 +61,11 @@ export function withRequestTimeout(fetch: typeof globalThis.fetch, timeoutMs: nu
   return async (input, init) => {
     const deadline = new AbortController();
     const caller = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    const signal = caller ? AbortSignal.any([caller, deadline.signal]) : deadline.signal;
+    // Chrome versions with sidePanel support predate AbortSignal.any.
+    const onAbort = (): void => deadline.abort(caller!.reason);
+    if (caller?.aborted) onAbort();
+    else caller?.addEventListener('abort', onAbort, { once: true });
+    const signal = deadline.signal;
     const timer = setTimeout(() => deadline.abort(new DOMException(
       `Model request timed out after ${timeoutMs}ms`, 'TimeoutError',
     )), timeoutMs);
@@ -72,6 +76,7 @@ export function withRequestTimeout(fetch: typeof globalThis.fetch, timeoutMs: nu
       throw signal.aborted ? signal.reason : error;
     } finally {
       clearTimeout(timer);
+      caller?.removeEventListener('abort', onAbort);
     }
   };
 }
