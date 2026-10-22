@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -20,14 +20,16 @@ it.skipIf(process.platform !== 'win32')('registers the pinned extension and an a
     expect(manifest.name).toBe('com.handyboy.host');
     expect(manifest.allowed_origins).toHaveLength(1);
     expect(manifest.allowed_origins[0]).toMatch(/^chrome-extension:\/\/[a-p]{32}\/$/);
-    expect(manifest.path).toBe(path.join(dir, 'handyboy-host.cmd'));
+    // CI's TEMP can use an 8.3 alias; PowerShell expands it to the long path.
+    expect(path.isAbsolute(manifest.path)).toBe(true);
+    expect(await realpath(manifest.path)).toBe(await realpath(path.join(dir, 'handyboy-host.cmd')));
     const launcher = await readFile(manifest.path, 'utf8');
     expect(launcher).toContain('@echo off\r\n');
     expect(launcher).toContain('HANDYBOY_DEV=1');
     expect(launcher).toContain('src\\main.ts');
     const registration = await exec(windowsPowerShell(), ['-NoProfile', '-Command',
       `(Get-Item -LiteralPath '${key}').GetValue('')`], options);
-    expect(registration.stdout.trim()).toBe(path.join(dir, 'com.handyboy.host.json'));
+    expect(await realpath(registration.stdout.trim())).toBe(await realpath(path.join(dir, 'com.handyboy.host.json')));
   } finally {
     await exec(windowsPowerShell(), ['-NoProfile', '-Command', `Remove-Item -LiteralPath '${key}' -Recurse -Force -ErrorAction SilentlyContinue`], options);
     await rm(dir, { recursive: true, force: true });
