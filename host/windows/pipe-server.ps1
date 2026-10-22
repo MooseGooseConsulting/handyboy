@@ -11,7 +11,32 @@ using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 public static class HandyboyPipes {
+    [StructLayout(LayoutKind.Sequential)]
+    struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafePipeHandle CreateNamedPipe(string name, uint mode, uint pipeMode, uint instances,
+        uint outSize, uint inSize, uint timeout, ref SecurityAttributes security);
+    static NamedPipeServerStream FirstPipe(string name, PipeSecurity security) {
+        byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+        IntPtr memory = Marshal.AllocHGlobal(descriptor.Length);
+        try {
+            Marshal.Copy(descriptor, 0, memory, descriptor.Length);
+            var attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = memory };
+            // .NET Framework rejects FirstPipeInstance in PipeOptions. Claim the
+            // first instance through Win32, with the same DACL at creation.
+            var handle = CreateNamedPipe(@"\\.\pipe\" + name, 0x40080003, 0, 254, 4096, 4096, 0, ref attributes);
+            if (handle.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new System.ComponentModel.Win32Exception(error);
+            }
+            try { return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle); }
+            catch { handle.Dispose(); throw; }
+        } finally { Marshal.FreeHGlobal(memory); }
+    }
     sealed class Client {
         public NamedPipeServerStream Pipe;
         public Task Writes = Task.FromResult(0);
@@ -42,8 +67,8 @@ public static class HandyboyPipes {
     static async Task Accept(string name, PipeSecurity security) {
         bool ready = false;
         while (true) {
-            var pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 254,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, security);
+            var pipe = ready ? new NamedPipeServerStream(name, PipeDirection.InOut, 254,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, security) : FirstPipe(name, security);
             if (!ready) { Emit("ready"); ready = true; }
             await pipe.WaitForConnectionAsync();
             int id = ++sequence;

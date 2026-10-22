@@ -7,6 +7,19 @@ import { resetLogForTests } from '../src/log.ts';
 import { WindowsPipeServer } from '../src/windows-pipe.ts';
 
 describe.skipIf(process.platform !== 'win32')('Windows named-pipe control', () => {
+  it('refuses an endpoint that another server already owns', async () => {
+    const endpoint = `\\\\.\\pipe\\handyboy-test-${randomUUID()}`;
+    const owner = new WindowsPipeServer();
+    const contender = new WindowsPipeServer();
+    try {
+      await owner.listen(endpoint, (socket) => socket.end());
+      await expect(contender.listen(endpoint, (socket) => socket.end())).rejects.toThrow('failed to start');
+    } finally {
+      await contender.close();
+      await owner.close();
+    }
+  });
+
   it('answers another client and shuts down while a client stops reading a large reply', async () => {
     const endpoint = `\\\\.\\pipe\\handyboy-test-${randomUUID()}`;
     const server = new WindowsPipeServer();
