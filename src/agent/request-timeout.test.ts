@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemorySaver } from '@langchain/langgraph/web';
 import { createChatModel, retryRateLimited, withRequestTimeout } from './models';
 import { startRun } from './run';
@@ -7,7 +7,10 @@ import { FakePageTools } from './tools';
 import type { RunEvent } from '@/src/messaging';
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
+afterEach(async () => {
+  vi.useRealTimers();
+  for (const close of cleanup.splice(0)) await close();
+});
 
 async function serverFor(handle: (response: ServerResponse, attempt: number) => void) {
   let attempts = 0;
@@ -23,6 +26,22 @@ async function serverFor(handle: (response: ServerResponse, attempt: number) => 
 }
 
 describe('model request deadlines', () => {
+  it('allows a slow 289-second response under the default deadline and clears its timer on success', async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    let signal!: AbortSignal;
+    const fetch: typeof globalThis.fetch = async (_input, init) => {
+      signal = init!.signal!;
+      return new Promise((resolve) => { finish = resolve; });
+    };
+    const request = withRequestTimeout(fetch, 300_000)('https://example.com');
+    await vi.advanceTimersByTimeAsync(289_000);
+    expect(signal.aborted).toBe(false);
+    finish(new Response('slow success'));
+    expect(await (await request).text()).toBe('slow success');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('retries a connection that never responds, with a fresh deadline for the successful attempt', async () => {
     const fixture = await serverFor((res, attempt) => {
       if (attempt === 1) return;

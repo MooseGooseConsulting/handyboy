@@ -6,6 +6,8 @@ import type { Config } from '@/src/storage';
 import { RunManager, type HostRunEndEvent, type RunLogSink, type TabsPort } from './runManager';
 import type { RuntimeDriver } from './pageTools';
 import { createWorker, type DevRunStart, type HostPort } from './worker';
+import { createChatModel } from '@/src/agent/models';
+import { MemorySaver } from '@langchain/langgraph/web';
 
 const CLOCK = 1_700_000_000_000;
 
@@ -99,6 +101,44 @@ function runEventsOf(port: { onMessage(handler: (message: Envelope) => void): ()
 }
 
 describe('worker', () => {
+  it('sends the CLI run.end terminator after model timeouts exhaust retries', async () => {
+    let attempts = 0;
+    const hangingFetch: typeof fetch = async (_url, init) => {
+      attempts++;
+      return new Promise((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+      });
+    };
+    const timedModel = createChatModel({ model: 'fixture:free', fetch: hangingFetch, requestTimeoutMs: 10 });
+    const host = hostPort();
+    let begin!: Parameters<HostPort['onRunStart']>[0];
+    host.onRunStart = (listener) => { begin = listener; return () => {}; };
+    let finish!: (event: HostRunEndEvent) => void;
+    const terminal = new Promise<HostRunEndEvent>((resolve) => { finish = resolve; });
+    host.appendRunLog = (_id, event) => {
+      if ('type' in event && event.type === 'run.end') finish(event);
+    };
+    const tab = { id: 11, url: 'https://example.com' };
+    const manager = new RunManager({
+      driver: pageDriver(new Map([[11, 'fixture page']]), () => {}),
+      tabs: { activeTab: async () => tab, get: async () => tab },
+      host, createModel: () => timedModel, checkpointer: new MemorySaver(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+    });
+    const worker = createWorker({ host, runManager: manager, getConfig: async () => panelConfig() });
+    try {
+      begin({ runId: 'timeout-cli', prompt: 'read the page' });
+      const ended = await terminal;
+      expect(ended).toMatchObject({ type: 'run.end', runId: 'timeout-cli', status: 'error' });
+      expect(ended.message).toMatch(/timed? ?out/i);
+      expect(attempts).toBe(3);
+      expect(manager.activeRunId).toBeUndefined();
+    } finally {
+      worker.dispose();
+    }
+  });
+
   it('a panel run binds the tab that was active when it started and does not navigate it, and a later focused tab does not replace it', async () => {
     const tabs = new Map<number, { id: number; url: string }>([
       [11, { id: 11, url: 'https://shop.example/item' }],
