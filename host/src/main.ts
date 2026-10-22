@@ -10,7 +10,9 @@ import { Dispatcher } from './dispatcher.ts';
 import { encodeFrame, FrameParser } from './framing.ts';
 import { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
-import { artifactsDir, extLogPath, runsDir, socketPath } from './paths.ts';
+import { artifactsDir, dataDir, extLogPath, runsDir, socketPath } from './paths.ts';
+import { mkdir } from 'node:fs/promises';
+import { protectWindowsPath } from './permissions.ts';
 import type { OutboundMsg } from './protocol.ts';
 import { DopplerSecretProvider, SecretStore } from './secrets.ts';
 import { TriggerServer } from './trigger.ts';
@@ -28,6 +30,8 @@ function send(msg: OutboundMsg): void {
 }
 
 async function main(): Promise<void> {
+  await mkdir(dataDir(), { recursive: true });
+  await protectWindowsPath(dataDir(), 'directory');
   log('info', 'host starting', { dev, pid: process.pid });
 
   const secrets = new SecretStore(new DopplerSecretProvider());

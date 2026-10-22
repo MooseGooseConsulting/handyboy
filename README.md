@@ -138,6 +138,39 @@ during live runs:
 
 ## Running it
 
+### Windows
+
+Use Node 22.18 or newer and install the extension and host dependencies with pnpm.
+From the repository directory in PowerShell:
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm --dir host install --frozen-lockfile
+pnpm build
+pwsh -File host/install.ps1 -Dev
+```
+
+The installer registers the host for the current Windows user, derives the pinned
+extension ID, and records absolute Node/Doppler paths for Chrome's launch environment.
+It requires no administrator session. Load `.output/chrome-mv3` with **Load unpacked**
+at `chrome://extensions` and open Handyboy's side panel. The host loads credentials
+from Doppler (`ai-automation/dev` by default); the extension never receives them.
+
+```powershell
+node host/src/cli/nb-status.ts
+node host/src/cli/nb-run.ts "Read the title of this page"
+node host/src/cli/nb-reload.ts
+node host/src/cli/nb-logs.ts
+```
+
+Data lives under `%LOCALAPPDATA%\Handyboy`. The dev CLI uses a named pipe restricted
+to the current user and SYSTEM at creation; a bundled Windows PowerShell/.NET helper
+provides that access control. Artifact directories use Windows ACLs. `HB_HOME` gives
+tests an isolated data root; `HANDYBOY_SOCK`, if set, must name a `\\.\pipe\...` endpoint.
+Re-run the installer after moving the checkout or changing Node/Doppler locations.
+
+### Linux
+
 One human action, once ever: load `.output/chrome-mv3` unpacked at `chrome://extensions`.
 The extension ID is pinned by a manifest key so it survives rebuilds.
 
