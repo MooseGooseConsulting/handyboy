@@ -72,7 +72,6 @@ export interface RunManagerPort {
   replay(runId: RunId): RunEvent[];
   /** Rehydrates one run's replay buffer from the durable store (M6). No-op when already in memory. */
   restoreReplay(runId: RunId): Promise<void>;
-  navigateActiveTab(url: string): Promise<void>;
   resolveTabId(): Promise<number | undefined>;
   readonly activeRunId: RunId | undefined;
 }
@@ -377,20 +376,19 @@ export function createWorker(deps: WorkerDeps): Worker {
       return;
     }
 
-    if (msg.url) {
-      try {
-        await deps.runManager.navigateActiveTab(msg.url);
-      } catch (error) {
-        end('error', `could not open ${msg.url}: ${describe(error)}`, 0);
-        return;
-      }
-    }
-
     try {
       // nb-run sends no vision metadata, so followerVision stays unknown (allowed):
       // the pixels/text-only refusal only fires on the panel path, which looks the
       // follower up in its fetched catalog. A dev-trigger vision option is future work.
-      const { done } = await deps.runManager.start({ prompt: msg.prompt, config, runId: msg.runId });
+      // The url is opened by start itself: navigating here first, before start could
+      // refuse, sent the tab of a run already in progress elsewhere, and start then
+      // looked the active tab up a second time and could bind a different one.
+      const { done } = await deps.runManager.start({
+        prompt: msg.prompt,
+        config,
+        runId: msg.runId,
+        ...(msg.url ? { navigateTo: msg.url } : {}),
+      });
       const ended = await done;
       end(ended.status, ended.message, ended.steps);
     } catch (error) {
