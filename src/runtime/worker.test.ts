@@ -3,9 +3,9 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { RunEndedEvent, RunHandle, StartRunOptions } from '@/src/agent/run';
 import { createChannel, createFakePortPair, type Envelope, type RunEvent } from '@/src/messaging';
 import type { Config } from '@/src/storage';
-import { RunManager, type RunLogSink, type TabsPort } from './runManager';
+import { RunManager, type HostRunEndEvent, type RunLogSink, type TabsPort } from './runManager';
 import type { RuntimeDriver } from './pageTools';
-import { createWorker, type HostPort } from './worker';
+import { createWorker, type DevRunStart, type HostPort } from './worker';
 
 const CLOCK = 1_700_000_000_000;
 
@@ -333,4 +333,140 @@ describe('worker', () => {
     await open;
     expect(read).toBe('Wool socks');
   });
+
+  it('a dev trigger with a url while a panel run is in progress is refused without navigating the running tab', async () => {
+    const pages = new Map<number, string>([[11, 'Wool socks']]);
+    const navigations: Array<{ tabId: number; url: string }> = [];
+    let begun!: () => void;
+    const panelRunBegun = new Promise<void>((resolve) => {
+      begun = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(pages, (tabId, url) => navigations.push({ tabId, url })),
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get(tabId) {
+          return tabId === 11 ? { id: 11, url: 'https://shop.example/item' } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'panel-run',
+      start: (options) => {
+        begun();
+        return idleHandle(options.runId ?? 'panel-run');
+      },
+    });
+    const dev = devHost();
+    const worker = createWorker({ host: dev.host, runManager: manager, getConfig: async () => panelConfig() });
+    const [panelPort, extensionPort] = createFakePortPair();
+    worker.connect(extensionPort);
+    createChannel(panelPort).send('run.start', { prompt: 'find wool socks', config: panelConfig() });
+    await panelRunBegun;
+
+    dev.trigger({ runId: 'dev-run', prompt: 'find garden rakes', url: 'https://garden.example/rakes' });
+    const end = await dev.ended('dev-run');
+
+    expect(navigations).toEqual([]);
+    expect(end).toMatchObject({
+      status: 'error',
+      message: 'a run is already in progress (panel-run); abort it first',
+      steps: 0,
+    });
+    expect(manager.activeRunId).toBe('panel-run');
+  });
+
+  it("a dev trigger's url is opened in the tab the run then binds, even when focus moves during the navigation", async () => {
+    const tabs = new Map<number, { id: number; url: string }>([
+      [11, { id: 11, url: 'https://shop.example/item' }],
+      [22, { id: 22, url: 'https://mail.example/inbox' }],
+    ]);
+    const pages = new Map<number, string>([
+      [11, 'Wool socks'],
+      [22, 'Inbox'],
+    ]);
+    let activeId = 11;
+    let bound: { tabId?: number; url?: string; page?: string } = {};
+    let opened!: () => void;
+    const open = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(pages, (tabId, url) => {
+        const tab = tabs.get(tabId);
+        if (tab) tab.url = url;
+        pages.set(tabId, `navigated to ${url}`);
+        // The user switches tabs while the page loads.
+        activeId = 22;
+      }),
+      tabs: {
+        async activeTab() {
+          const tab = tabs.get(activeId);
+          return tab ? { ...tab } : undefined;
+        },
+        async get(tabId) {
+          const tab = tabs.get(tabId);
+          return tab ? { ...tab } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      start: (options) => {
+        void options.tools.snapshot().then((shot) => {
+          bound = { tabId: options.tabId, url: options.url, page: shot.text };
+          opened();
+        });
+        return idleHandle(options.runId ?? 'dev-run');
+      },
+    });
+    const dev = devHost();
+    createWorker({ host: dev.host, runManager: manager, getConfig: async () => panelConfig() });
+
+    dev.trigger({ runId: 'dev-run', prompt: 'find garden rakes', url: 'https://garden.example/rakes' });
+    await open;
+
+    expect(bound).toEqual({
+      tabId: 11,
+      url: 'https://garden.example/rakes',
+      page: 'navigated to https://garden.example/rakes',
+    });
+    expect(pages.get(22)).toBe('Inbox');
+  });
 });
+
+/** A host whose dev trigger the test fires, and whose `run.end` frames it can await. */
+function devHost(): {
+  host: HostPort;
+  trigger(msg: DevRunStart): void;
+  ended(runId: string): Promise<HostRunEndEvent>;
+} {
+  let onRunStart: ((msg: DevRunStart) => void) | undefined;
+  const ends = new Map<string, (event: HostRunEndEvent) => void>();
+  const host: HostPort = {
+    ...hostPort(),
+    appendRunLog(runId, event) {
+      if ('type' in event && event.type === 'run.end') ends.get(runId)?.(event);
+    },
+    onRunStart(handler) {
+      onRunStart = handler;
+      return () => {};
+    },
+  };
+  return {
+    host,
+    trigger(msg) {
+      onRunStart?.(msg);
+    },
+    ended(runId) {
+      return new Promise((resolve) => ends.set(runId, resolve));
+    },
+  };
+}
