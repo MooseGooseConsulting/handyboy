@@ -75,6 +75,20 @@ export class LlmProxy {
    * `sources` says which.
    */
   async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
+    const first = await this.#keyStatusOnce(source);
+    const { secrets } = this.deps;
+    if (first.ready || secrets.allReady()) return first;
+    // Keys load once at host start; a transient Doppler failure there would
+    // otherwise read as "not ready" until Chrome respawns the host. Re-check only
+    // if the reload found something, so a rejected key is not GET /key'd twice.
+    const loaded = (s: KnownOrigin) => secrets.key(s) !== null;
+    const before = (['openrouter', 'kilo'] as const).filter(loaded).length;
+    await secrets.reloadMissing();
+    const after = (['openrouter', 'kilo'] as const).filter(loaded).length;
+    return after > before ? this.#keyStatusOnce(source) : first;
+  }
+
+  async #keyStatusOnce(source?: KnownOrigin): Promise<KeyStatus> {
     const sources: Record<KnownOrigin, SourceStatus> = {
       openrouter: await this.#openRouterStatus(),
       kilo: this.deps.secrets.status('kilo'),

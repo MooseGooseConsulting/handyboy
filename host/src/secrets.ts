@@ -143,9 +143,53 @@ export class SecretStore {
     await Promise.all((Object.keys(SECRET_ENV_NAMES) as SecretSource[]).map((source) => this.#loadSource(source)));
   }
 
+  #reloading: Promise<void> | null = null;
+
+  /** True once every source has a key; nothing left for a retry to fetch. */
+  allReady(): boolean {
+    return (Object.keys(SECRET_ENV_NAMES) as SecretSource[]).every((source) => this.#state[source].key !== null);
+  }
+
+  /**
+   * Fetches again only the sources that have no key. A single load at host start
+   * meant one Doppler blip (network, a slow CLI, a timeout) left the host keyless
+   * until Chrome respawned it. Concurrent callers share one attempt, so a burst of
+   * key.status requests spawns one lookup per missing source, not one each.
+   */
+  reloadMissing(): Promise<void> {
+    if (this.#reloading) return this.#reloading;
+    const missing = (Object.keys(SECRET_ENV_NAMES) as SecretSource[]).filter((s) => this.#state[s].key === null);
+    const attempt = Promise.all(missing.map((source) => this.#loadSource(source))).then(() => {});
+    this.#reloading = attempt.finally(() => {
+      this.#reloading = null;
+    });
+    return this.#reloading;
+  }
+
+  /**
+   * Background retry after start-up, with capped exponential backoff. Bounded:
+   * a user who never configured one of the sources would otherwise spawn Doppler
+   * forever. After the last attempt, key.status still re-attempts on demand.
+   */
+  async retryMissing(opts: {
+    attempts: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    sleep: (ms: number) => Promise<void>;
+  }): Promise<void> {
+    let delay = opts.initialDelayMs;
+    for (let i = 0; i < opts.attempts && !this.allReady(); i++) {
+      await opts.sleep(delay);
+      await this.reloadMissing();
+      delay = Math.min(delay * 2, opts.maxDelayMs);
+    }
+  }
+
   async #loadSource(source: SecretSource): Promise<void> {
     const envName = SECRET_ENV_NAMES[source];
     const lookup = await this.#provider.get(envName);
+    // A retry racing an earlier success must not turn a working key back into a failure.
+    if (!lookup.value && this.#state[source].key) return;
     if (!lookup.value) {
       this.#state[source] = {
         key: null,
@@ -159,6 +203,7 @@ export class SecretStore {
     // so `LlmProxy.keyStatus()` reports this reason without ever attempting
     // the live GET /key that used to 401.
     const parsed = parseSecretToken(lookup.value);
+    if (!parsed.ok && this.#state[source].key) return;
     if (!parsed.ok) {
       this.#state[source] = {
         key: null,

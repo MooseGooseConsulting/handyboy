@@ -29,6 +29,23 @@ async function main(): Promise<void> {
   const secrets = new SecretStore(new DopplerSecretProvider());
   await secrets.load();
   if (!secrets.openRouterKey) log('warn', 'no OpenRouter key loaded', { reason: secrets.missingReason });
+  if (!secrets.allReady()) {
+    // Timers are unref'd so a pending retry never holds the host open after stdin ends.
+    void secrets
+      .retryMissing({
+        attempts: 5,
+        initialDelayMs: 2_000,
+        maxDelayMs: 30_000,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+      })
+      .then(() =>
+        log('info', 'secret retry finished', {
+          openrouter: secrets.status('openrouter'),
+          kilo: secrets.status('kilo'),
+        }),
+      )
+      .catch((err: unknown) => log('error', 'secret retry failed', { error: (err as Error).message }));
+  }
 
   const llm = new LlmProxy({
     fetch: globalThis.fetch,
