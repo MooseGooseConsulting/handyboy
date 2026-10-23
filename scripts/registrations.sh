@@ -22,15 +22,20 @@ for prefs in sorted(glob.glob(os.path.join(root, '*', 'Preferences'))):
 PY
 }
 
-# "<profile>\t<path>" for every registration whose directory does not hold the build at $1.
+# "<profile>\t<path>" for every registration whose directory holds a build other than $1.
 # chrome.runtime.reload() re-reads the directory "Load unpacked" pointed at, so such a
-# profile would come back running that directory's code, not this build. _metadata is
-# Chrome's own bookkeeping inside an extension directory; wxt never writes it.
+# profile would come back running that directory's code, not this build. A directory with
+# no manifest (a deleted worktree) loads nothing at all, so it is only noted on stderr.
+# _metadata is Chrome's own bookkeeping inside an extension directory; wxt never writes it.
 unsynced_registrations() {
   local build="$1" profile path us
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
     [ "$path" = "$build" ] && continue
+    if [ ! -f "$path/manifest.json" ]; then
+      echo "NOTE: Chrome profile \"$profile\" registers Handyboy from $path, which holds no build; it cannot load" >&2
+      continue
+    fi
     diff -rq --exclude=_metadata "$build" "$path" >/dev/null 2>&1 || printf '%s\t%s\n' "$profile" "$path"
   done <<<"$(registrations)"
 }

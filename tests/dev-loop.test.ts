@@ -128,6 +128,17 @@ describe('scripts/e2e.sh', () => {
     expect(r.code).toBe(0);
   });
 
+  it('notes, but does not fail on, a profile registered from a deleted worktree, since it loads no build', () => {
+    const root = makeRoot();
+    const gone = path.join(root, 'deleted-worktree/.output/chrome-mv3');
+    register(root, 'Default', path.join(root, '.output/chrome-mv3'));
+    register(root, 'Profile 2', gone);
+    const r = run(root, 'e2e.sh', E2E_ARGS);
+    expect(r.out).toContain(`"Profile 2" registers Handyboy from ${gone}, which holds no build`);
+    expect(r.calls).toContain('hb-reload');
+    expect(r.code).toBe(0);
+  });
+
   it('fails the run when hb-logs cannot read the extension log, since errors would go unseen', () => {
     const root = makeRoot();
     register(root, 'Default', path.join(root, '.output/chrome-mv3'));

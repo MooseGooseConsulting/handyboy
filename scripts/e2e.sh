@@ -152,7 +152,7 @@ command -v python3 >/dev/null || { echo "e2e: python3 is required to read Chrome
 # ext_id, registrations, unsynced_registrations
 source "$ROOT/scripts/registrations.sh"
 if [ ! -f "$EXT_DIR/manifest.json" ]; then
-  echo "e2e: there is no build at $EXT_DIR; drop --skip-build" >&2
+  echo "e2e: there is no build at $EXT_DIR; run just setup, or e2e.sh without --skip-build" >&2
   exit 1
 fi
 if [ -z "$(registrations)" ]; then
