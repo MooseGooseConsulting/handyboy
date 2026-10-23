@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RunEvent } from '@/src/messaging';
-import { initialRunLogState, runLogReducer, runPhase, toEntries } from './runlog';
+import { initialRunLogState, runLogReducer, runPhase, toEntries, toSections } from './runlog';
 
 const call = (callId: string, at: number): RunEvent => ({
   kind: 'tool.call',
@@ -37,6 +37,24 @@ describe('run log reducer', () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({ kind: 'tool', callId: 'c1' });
     expect(entries[1]).toMatchObject({ kind: 'tool', callId: 'c9' });
+  });
+
+  it('the opening Leader turn and every replan get their own section key, though they share step numbers', () => {
+    const step = (n: number, role: 'leader' | 'follower', at: number): RunEvent => ({ kind: 'step', n, role, at });
+    // The graph emits step 0 for the opening Leader turn and, on a replan, the Leader
+    // reuses the number of the Follower step it follows.
+    const sections = toSections([
+      call('c0', 1),
+      step(0, 'leader', 2),
+      call('c1', 3),
+      step(1, 'follower', 4),
+      call('c2', 5),
+      step(1, 'leader', 6),
+      call('c3', 7),
+    ]);
+    const keys = sections.map((section) => section.key);
+    expect(keys).toHaveLength(4);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it('pause then end is ended, and a run id with no events is still running', () => {
