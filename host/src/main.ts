@@ -7,11 +7,11 @@
  * stdout belongs to the native-messaging protocol. Diagnostics go to host.log/stderr.
  */
 import { Dispatcher } from './dispatcher.ts';
-import { encodeFrame, FrameParser } from './framing.ts';
+import { FrameParser } from './framing.ts';
 import { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
+import { makeSend } from './outbound.ts';
 import { artifactsDir, extLogPath, runsDir, socketPath } from './paths.ts';
-import type { OutboundMsg } from './protocol.ts';
 import { DopplerSecretProvider, SecretStore } from './secrets.ts';
 import { TriggerServer } from './trigger.ts';
 
@@ -19,13 +19,9 @@ export const HOST_VERSION = '0.0.1';
 
 const dev = process.env.HANDYBOY_DEV === '1' || process.argv.includes('--dev');
 
-function send(msg: OutboundMsg): void {
-  try {
-    process.stdout.write(encodeFrame(msg));
-  } catch (err) {
-    log('error', 'failed to encode outbound message', { type: msg.type, error: (err as Error).message });
-  }
-}
+const send = makeSend((frame) => {
+  process.stdout.write(frame);
+});
 
 async function main(): Promise<void> {
   log('info', 'host starting', { dev, pid: process.pid });
@@ -33,6 +29,23 @@ async function main(): Promise<void> {
   const secrets = new SecretStore(new DopplerSecretProvider());
   await secrets.load();
   if (!secrets.openRouterKey) log('warn', 'no OpenRouter key loaded', { reason: secrets.missingReason });
+  if (!secrets.allReady()) {
+    // Timers are unref'd so a pending retry never holds the host open after stdin ends.
+    void secrets
+      .retryMissing({
+        attempts: 5,
+        initialDelayMs: 2_000,
+        maxDelayMs: 30_000,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+      })
+      .then(() =>
+        log('info', 'secret retry finished', {
+          openrouter: secrets.status('openrouter'),
+          kilo: secrets.status('kilo'),
+        }),
+      )
+      .catch((err: unknown) => log('error', 'secret retry failed', { error: (err as Error).message }));
+  }
 
   const llm = new LlmProxy({
     fetch: globalThis.fetch,

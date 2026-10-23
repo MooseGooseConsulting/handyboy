@@ -16,6 +16,16 @@ export const RUN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export interface KeyStatusMsg {
   type: 'key.status';
   id: string;
+  /** Ask about one source; omitted, `ready` means some key is loaded and every loaded key passes. */
+  source?: ModelSourceName;
+}
+
+export type ModelSourceName = 'openrouter' | 'kilo';
+
+/** One source's readiness: a loaded key (and, for OpenRouter, a passing GET /key). */
+export interface SourceReadiness {
+  ready: boolean;
+  reason?: string;
 }
 
 export interface ModelsListMsg {
@@ -107,6 +117,7 @@ export interface KeyStatusResult {
   id: string;
   ready: boolean;
   reason?: string;
+  sources?: Record<ModelSourceName, SourceReadiness>;
 }
 
 export interface ModelsListResult {
@@ -247,7 +258,7 @@ export type SocketResponse =
       hostVersion: string;
       /** This host process. hb-reload watches it change to prove a NEW host came up. */
       pid: number;
-      key: { ready: boolean; reason?: string };
+      key: { ready: boolean; reason?: string; sources?: Record<ModelSourceName, SourceReadiness> };
     }
   | { op: 'reloading'; pid: number }
   | { op: 'error'; message: string };
