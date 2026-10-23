@@ -1,4 +1,4 @@
-import { normalizeRequest, type KnownOrigin } from './origins.ts';
+import { assertOnKnownBase, normalizeRequest, type KnownOrigin } from './origins.ts';
 import { CHUNK_BYTES, KILO_BASE, OPENROUTER_BASE, type LlmRequestMsg, type OutboundMsg } from './protocol.ts';
 import type { SecretStore } from './secrets.ts';
 
@@ -23,11 +23,14 @@ const BASE_FOR: Record<KnownOrigin, string> = { openrouter: OPENROUTER_BASE, kil
  * never guess wrong). `normalizeRequest` throws `OffOriginError` for anything
  * not on a known origin -- a relative path has no origin of its own and
  * defaults to OpenRouter, preserving every path sent before Kilo existed.
+ * The resolved URL is checked again because resolution itself can leave the
+ * base (`../`, or a path segment that parses as `http:host`).
  */
 export function resolveUrl(pathOrUrl: string): { url: string; source: KnownOrigin } {
   const { path, origin } = normalizeRequest(pathOrUrl);
   const source: KnownOrigin = origin ?? 'openrouter';
   const url = new URL(path, BASE_FOR[source]);
+  assertOnKnownBase(url, source);
   return { url: url.toString(), source };
 }
 
