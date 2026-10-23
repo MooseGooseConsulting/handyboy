@@ -77,6 +77,38 @@ describe('UserscriptsSection', () => {
     expect(screen.getByRole('button', { name: /listing prices/ }).getAttribute('aria-current')).toBe('true');
   });
 
+  it('deleting the loaded script while its save is pending settles on the delete reply', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    const onDelete = vi.fn();
+    const other: Userscript = {
+      id: 'script-other',
+      name: 'watchlist',
+      matches: ['*://example.com/*'],
+      code: 'return 1;\n',
+      updatedAt: 1,
+    };
+    const { rerender } = render(
+      <UserscriptsSection {...props({ onSave, onDelete, scripts: [stored, other] })} />,
+    );
+    await user.click(codeField());
+    await user.type(codeField(), '// v2');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await user.click(screen.getAllByRole('button', { name: 'delete' })[0]!);
+    await user.click(screen.getByRole('button', { name: 'Sure?' }));
+    expect(onDelete).toHaveBeenCalledWith(stored.id);
+
+    // The save's reply lands before the delete's and still lists the doomed script;
+    // it must not move the editor onto it.
+    const saved: Userscript = onSave.mock.calls[0]![0];
+    rerender(<UserscriptsSection {...props({ onSave, onDelete, scripts: [saved, other] })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+
+    // The delete's reply settles it: the editor falls back to the remaining script.
+    rerender(<UserscriptsSection {...props({ onSave, onDelete, scripts: [other] })} />);
+    expect(nameField().value).toBe('watchlist');
+  });
+
   it('typing after a failed run keeps the caret where the user is typing', async () => {
     const user = userEvent.setup();
     const failed: UserscriptRunResult = {

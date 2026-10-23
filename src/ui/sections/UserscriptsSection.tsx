@@ -75,6 +75,8 @@ export function UserscriptsSection({
   // pre-save copy — for an existing script too — which must not replace the editor.
   const savingId = useRef<string | undefined>(undefined);
   const savingAt = useRef(0);
+  // The loaded script's delete is in flight: only a list without its id settles that.
+  const deletingId = useRef<string | undefined>(undefined);
 
   const load = (script: Userscript, asDirty: boolean) => {
     setDirty(asDirty);
@@ -86,6 +88,13 @@ export function UserscriptsSection({
   useEffect(() => {
     if (dirty) return;
     const stored = scripts.find((script) => script.id === draft.id);
+    if (deletingId.current === draft.id) {
+      // Deleting the loaded script: a list that still contains it is a reply that raced
+      // the delete (or the echo of a just-completed save), and only an id-less list
+      // settles where the editor goes next.
+      if (stored) return;
+      deletingId.current = undefined;
+    }
     if (savingId.current === draft.id) {
       // A save is still catching up. Only the fresh list's entry is the saved version:
       // the worker stamps it no earlier than the moment Save was clicked, so anything
@@ -177,7 +186,16 @@ export function UserscriptsSection({
                   ) : null}
                   <span className="ml-1 text-[11px] text-muted">{script.matches.join(' ')}</span>
                 </button>
-                <ConfirmButton label="delete" onConfirm={() => onDelete(script.id)} />
+                <ConfirmButton
+                  label="delete"
+                  onConfirm={() => {
+                    // The pending save is moot once the user destroys the script, and the
+                    // delete's reply — not a racing save echo — decides what loads next.
+                    if (savingId.current === script.id) savingId.current = undefined;
+                    deletingId.current = script.id;
+                    onDelete(script.id);
+                  }}
+                />
               </li>
             ))}
           </ul>
