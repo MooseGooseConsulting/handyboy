@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Dispatcher } from '../src/dispatcher.ts';
 import { LlmProxy } from '../src/llm.ts';
 import { resetLogForTests } from '../src/log.ts';
@@ -123,5 +123,65 @@ describe('secret loading after a transient failure', () => {
     now = 10_500; // well inside the window the reload started
     await secrets.reloadMissing();
     expect(provider.calls).toEqual(['OPENROUTER_API_KEY', 'KILO_CODE_API_KEY', 'KILO_CODE_API_KEY']);
+  });
+
+  it('the cooldown window starts when the reload settles, so a slow lookup is still rate-limited', async () => {
+    let now = 10_000;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let lookups = 0;
+    const provider: SecretProvider = {
+      name: 'slow',
+      get: async (name: string) => {
+        lookups += 1;
+        await gate;
+        return { value: null, reason: `${name} missing` };
+      },
+    };
+    const secrets = new SecretStore(provider, { now: () => now, reloadCooldownMs: 5_000 });
+
+    const first = secrets.reloadMissing();
+    expect(lookups).toBe(2); // both sources, still in flight
+    now = 14_000; // lookup outlived the window it started in
+    release();
+    await first; // settle stamps the window here
+
+    now = 15_500; // > start + cooldown, but < settle + cooldown
+    await secrets.reloadMissing();
+    expect(lookups).toBe(2); // reused the last result, no new lookups
+  });
+
+  it('a ready answer re-checks a still-absent source in the background, so a later poll sees a new key', async () => {
+    const provider = new FlakyProvider(
+      { OPENROUTER_API_KEY: OR_KEY, KILO_CODE_API_KEY: KILO_KEY },
+      { OPENROUTER_API_KEY: 1 },
+    );
+    const secrets = new SecretStore(provider, { reloadCooldownMs: 0 });
+    await secrets.load();
+    const fetch = new FakeFetch();
+    fetch.enqueueJson(200, { data: {} }); // the post-recovery OpenRouter validation
+    const sent: OutboundMsg[] = [];
+    const llm = new LlmProxy({ fetch: fetch.fetch, secrets, send: (m) => sent.push(m) });
+    const dispatcher = new Dispatcher({ send: (m) => sent.push(m), llm, runsDir: '/tmp/unused-runs' });
+
+    await dispatcher.handle({ type: 'key.status', id: 'r1' });
+    expect(sent[0]).toMatchObject({
+      type: 'key.status.result',
+      id: 'r1',
+      ready: true,
+      sources: { openrouter: { ready: false }, kilo: { ready: true } },
+    });
+
+    await vi.waitFor(() => expect(secrets.key('openrouter')).toBe(OR_KEY));
+
+    await dispatcher.handle({ type: 'key.status', id: 'r2' });
+    expect(sent[1]).toMatchObject({
+      type: 'key.status.result',
+      id: 'r2',
+      ready: true,
+      sources: { openrouter: { ready: true }, kilo: { ready: true } },
+    });
   });
 });

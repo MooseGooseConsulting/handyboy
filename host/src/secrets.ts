@@ -11,10 +11,15 @@ import { protectSecret } from './log.ts';
  * stdout verbatim): `SecretStore` surfaces it via `status()`/`missingReason`,
  * which is what `hb-status` and `key.status` report. A bare null with no reason
  * falls back to "<NAME> not available from <provider>".
+ *
+ * `invalid` marks a lookup whose value WAS present but failed validation
+ * (banner-prefixed output, whitespace): the source is configured, just broken,
+ * so readiness counts it instead of treating it as unconfigured.
  */
 export interface SecretLookup {
   value: string | null;
   reason?: string;
+  invalid?: boolean;
 }
 
 export interface SecretProvider {
@@ -73,10 +78,16 @@ const DOPPLER_CONFIG = process.env.HANDYBOY_DOPPLER_CONFIG || 'dev';
 
 export class DopplerSecretProvider implements SecretProvider {
   readonly name = 'doppler';
+  readonly #exec: typeof execFile;
+
+  /** `exec` is injectable so tests can drive the provider without a Doppler binary. */
+  constructor(exec: typeof execFile = execFile) {
+    this.#exec = exec;
+  }
 
   get(name: string): Promise<SecretLookup> {
     return new Promise((resolve) => {
-      execFile(
+      this.#exec(
         'doppler',
         ['secrets', 'get', name, '--plain', '-p', DOPPLER_PROJECT, '-c', DOPPLER_CONFIG],
         { timeout: 20_000, maxBuffer: 1 << 20, env: process.env },
@@ -85,7 +96,11 @@ export class DopplerSecretProvider implements SecretProvider {
           // and we will not risk relaying anything secret-shaped into the log.
           if (err) return resolve({ value: null, reason: `${name} from doppler failed: ${describeDopplerError(err)}` });
           const parsed = parseSecretToken(stdout);
-          if (!parsed.ok) return resolve({ value: null, reason: `${name} from doppler invalid: ${parsed.reason}` });
+          // invalid: the value WAS there, just unparseable — the source is
+          // configured and must block readiness like any rejected key.
+          if (!parsed.ok) {
+            return resolve({ value: null, reason: `${name} from doppler invalid: ${parsed.reason}`, invalid: true });
+          }
           resolve({ value: parsed.token });
         },
       );
@@ -178,6 +193,10 @@ export class SecretStore {
     const missing = (Object.keys(SECRET_ENV_NAMES) as SecretSource[]).filter((s) => this.#state[s].key === null);
     const attempt = Promise.all(missing.map((source) => this.#loadSource(source))).then(() => {});
     this.#reloading = attempt.finally(() => {
+      // Stamp at settle, not start: a lookup can outlive the whole window (20 s
+      // timeout vs 5 s cooldown), and rate limiting is about spawn rate. A key that
+      // loaded reset the stamp to 0 — keep that so the next check can re-attempt.
+      if (this.#lastReloadAt !== 0) this.#lastReloadAt = this.#now();
       this.#reloading = null;
     });
     return this.#reloading;
@@ -214,6 +233,9 @@ export class SecretStore {
       this.#state[source] = {
         key: null,
         reason: lookup.reason ?? `${envName} not available from ${this.#provider.name}`,
+        // A provider that saw the value but rejected its shape (Doppler parses
+        // before returning) reports it here; either way the source stays configured.
+        ...(lookup.invalid ? { invalid: true } : {}),
       };
       return;
     }

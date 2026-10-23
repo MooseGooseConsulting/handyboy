@@ -83,7 +83,14 @@ export class LlmProxy {
   async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
     const first = await this.#keyStatusOnce(source);
     const { secrets } = this.deps;
-    if (first.ready || secrets.allReady()) return first;
+    if (first.ready || secrets.allReady()) {
+      // A ready answer can still hide a source that was absent at load but has
+      // since been configured. Re-check in the background (cooldown-limited, so a
+      // never-configured source costs one lookup per window, not one per poll) and
+      // let a later poll report it; this response still returns immediately.
+      if (!secrets.allReady()) void secrets.reloadMissing().catch(() => {});
+      return first;
+    }
     // Keys load once at host start; a transient Doppler failure there would
     // otherwise read as "not ready" until Chrome respawns the host. Re-check only
     // if the reload found something, so a rejected key is not GET /key'd twice.

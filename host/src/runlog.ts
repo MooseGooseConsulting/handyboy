@@ -30,8 +30,17 @@ function redactValue(value: unknown): unknown {
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     // A credential can sit in a property name, not only a value; redact keys with
-    // the same policy. Distinct keys that redact to the same name collapse.
-    for (const [key, v] of Object.entries(value)) out[redact(key).replace(BEARER_RE, '[redacted]')] = redactValue(v);
+    // the same policy. defineProperty (not assignment) so an own "__proto__" key
+    // becomes a data property instead of invoking the legacy prototype setter.
+    // Distinct keys that redact to the same name collapse.
+    for (const [key, v] of Object.entries(value)) {
+      Object.defineProperty(out, redact(key).replace(BEARER_RE, '[redacted]'), {
+        value: redactValue(v),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
     return out;
   }
   return value;
