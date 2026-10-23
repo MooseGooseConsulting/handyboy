@@ -50,10 +50,9 @@ export function SetupSection({
   const escalated: boolean = config.inputFidelity === 'escalated';
   const observeExplainer = OBSERVE_OPTIONS.find((option) => option.value === config.observe)?.title;
 
-  // "Selecting one must warn": these track the last picker to knowingly commit a paid
-  // model, so the warning stays specific to the role that just changed and clears once
-  // that role is free again.
-  const [paidWarning, setPaidWarning] = useState<{ role: 'Leader' | 'Follower'; model: ModelInfo } | null>(null);
+  // "Selecting one must warn": each role remembers the paid model it was knowingly set
+  // to here, so picking a free Follower does not silence a paid Leader's warning.
+  const [paidPicks, setPaidPicks] = useState<Partial<Record<'Leader' | 'Follower', ModelInfo>>>({});
 
   const pick =
     (role: 'Leader' | 'Follower', modelField: 'leaderModel' | 'followerModel', sourceField: 'leaderModelSource' | 'followerModelSource') =>
@@ -62,7 +61,7 @@ export function SetupSection({
       // existed byte-for-byte reproducible, and keeps the common case's patch small.
       update({ [modelField]: id, [sourceField]: source === 'openrouter' ? undefined : source } as Partial<typeof config>);
       const model = findModel(models, id, source);
-      setPaidWarning(model && !model.free ? { role, model } : null);
+      setPaidPicks((prev) => ({ ...prev, [role]: model && !model.free ? model : undefined }));
     };
 
   // An absent source means OpenRouter (Config), and that is where the run routes, so the
@@ -90,6 +89,17 @@ export function SetupSection({
   const unknownRoles = rolesAt('unknown');
   const describeRoles = (roles: typeof trainingRoles) =>
     roles.map(([role, model]) => `${role} (${model!.name})`).join(' and ');
+  // A pick only warns while the config still holds it: Reset, or a change from another
+  // panel, moves the role off that model and the warning would describe a stale choice.
+  const paidWarnings = (
+    [
+      ['Leader', config.leaderModel, config.leaderModelSource],
+      ['Follower', config.followerModel, config.followerModelSource],
+    ] as const
+  ).flatMap(([role, id, source]) => {
+    const model = paidPicks[role];
+    return model && model.id === id && sourceOf(model) === (source ?? 'openrouter') ? [{ role, model }] : [];
+  });
 
   return (
     <div className="space-y-4">
@@ -187,10 +197,14 @@ export function SetupSection({
           </p>
         ) : null}
 
-        {paidWarning ? (
+        {paidWarnings.length > 0 ? (
           <p role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-            {paidWarning.role} is now a paid model ({paidWarning.model.name}) — it costs money to run. Turn on
-            &ldquo;free only&rdquo; above and re-pick to go back to a free model.
+            {paidWarnings.map(({ role, model }) => (
+              <span key={role} className="block">
+                {role} is now a paid model ({model.name}) — it costs money to run. Turn on
+                &ldquo;free only&rdquo; above and re-pick to go back to a free model.
+              </span>
+            ))}
           </p>
         ) : null}
       </Section>

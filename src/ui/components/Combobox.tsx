@@ -133,6 +133,13 @@ export function Combobox<T>({
         placeholder={selected ? getLabel(selected) : placeholder}
         aria-describedby={!open && unresolved && unresolvedHint ? `${id}-unresolved` : undefined}
         onFocus={() => setOpen(true)}
+        // Outside clicks are caught on mousedown, but Tab moves focus without one, and an
+        // absolutely positioned list left open covers the field the user tabbed into.
+        onBlur={(event) => {
+          if (rootRef.current?.contains(event.relatedTarget as Node | null)) return;
+          setQuery('');
+          setOpen(false);
+        }}
         onChange={(event) => {
           setQuery(event.target.value);
           setOpen(true);
@@ -154,6 +161,9 @@ export function Combobox<T>({
         role="listbox"
         aria-label={label}
         hidden={!open}
+        // Pressing the list's scrollbar or padding must not take focus off the input, or
+        // the blur above would close the list mid-scroll.
+        onMouseDown={(event) => event.preventDefault()}
         className={cn(
           'absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border border-line bg-paper shadow-lg',
           !open && 'hidden',

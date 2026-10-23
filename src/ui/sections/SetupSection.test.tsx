@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { ModelInfo, Readiness } from '@/src/messaging';
 import { configItem, getConfig, type Config } from '@/src/storage';
+import { freeOnlyItem } from '../state/modelFilter';
 import { SetupSection } from './SetupSection';
 
 afterEach(cleanup);
@@ -158,6 +159,52 @@ describe('SetupSection', () => {
     await screen.findAllByText('Atlas Planner');
     expect(screen.queryByText(/may train on your prompts/)).toBeNull();
     expect(screen.queryByText(/^Unknown whether/)).toBeNull();
+  });
+
+  const paid: ModelInfo = {
+    id: 'paid-pick',
+    name: 'Atlas Premium',
+    free: false,
+    vision: false,
+    tools: true,
+    contextLength: 200_000,
+    source: 'openrouter',
+    mayTrainOnYourPrompts: false,
+  };
+
+  async function choose(role: 'Leader' | 'Follower', option: RegExp) {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: `${role} model` }));
+    await user.click(await screen.findByRole('option', { name: option }));
+  }
+
+  it('picking a free Follower leaves the paid Leader warning standing', async () => {
+    await freeOnlyItem.setValue(false);
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, paid] });
+    await screen.findAllByText('Atlas Planner');
+
+    await choose('Leader', /Atlas Premium/);
+    expect((await screen.findByRole('alert')).textContent).toContain('Leader is now a paid model (Atlas Premium)');
+
+    await choose('Follower', /Atlas Spare/);
+    await waitFor(async () => expect((await getConfig()).followerModel).toBe('spare-pick'));
+    expect(screen.getByRole('alert').textContent).toContain('Leader is now a paid model (Atlas Premium)');
+  });
+
+  it('resetting to defaults takes the paid-model warning away with the paid pick', async () => {
+    const user = userEvent.setup();
+    await freeOnlyItem.setValue(false);
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, paid] });
+    await screen.findAllByText('Atlas Planner');
+
+    await choose('Leader', /Atlas Premium/);
+    expect((await screen.findByRole('alert')).textContent).toContain('Leader is now a paid model');
+
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    await waitFor(async () => expect((await getConfig()).leaderModel).not.toBe('paid-pick'));
+    expect(screen.queryByText(/is now a paid model/)).toBeNull();
   });
 
   it('clearing the planning interval would store NaN', async () => {
