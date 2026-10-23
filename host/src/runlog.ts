@@ -29,7 +29,9 @@ function redactValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactValue);
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value)) out[key] = redactValue(v);
+    // A credential can sit in a property name, not only a value; redact keys with
+    // the same policy. Distinct keys that redact to the same name collapse.
+    for (const [key, v] of Object.entries(value)) out[redact(key).replace(BEARER_RE, '[redacted]')] = redactValue(v);
     return out;
   }
   return value;

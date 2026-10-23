@@ -8,6 +8,11 @@ export interface SourceStatus {
 }
 
 export interface KeyStatus extends SourceStatus {
+  /**
+   * Per-source detail. `sources.openrouter` is a validated status (live GET /key)
+   * except in Kilo-scoped responses, where it is presence-only — a Kilo answer
+   * never runs on OpenRouter, so the probe would be pure latency.
+   */
   sources?: Record<KnownOrigin, SourceStatus>;
 }
 
@@ -71,8 +76,9 @@ export class LlmProxy {
   /**
    * Readiness per source. Reporting OpenRouter alone blocked a Kilo-only setup and
    * passed a Kilo run with no Kilo key loaded. With `source`, `ready` is that source's
-   * answer; without it, `ready` means at least one key is loaded and every loaded key
-   * passes its check, and `sources` says which is which.
+   * answer; without it, `ready` means at least one source is configured (has a key,
+   * or one the store rejected) and every configured source passes its check, and
+   * `sources` says which is which.
    */
   async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
     const first = await this.#keyStatusOnce(source);
@@ -90,19 +96,22 @@ export class LlmProxy {
 
   async #keyStatusOnce(source?: KnownOrigin): Promise<KeyStatus> {
     const sources: Record<KnownOrigin, SourceStatus> = {
-      openrouter: await this.#openRouterStatus(),
+      // A Kilo-scoped answer never runs on OpenRouter, so don't spend the live
+      // GET /key (20 s timeout) filling in sources.openrouter — presence is enough.
+      openrouter: source === 'kilo' ? this.deps.secrets.status('openrouter') : await this.#openRouterStatus(),
       kilo: this.deps.secrets.status('kilo'),
     };
     if (source) {
       const s = sources[source];
       return { ready: s.ready, ...(s.reason ? { reason: s.reason } : {}), sources };
     }
-    // A source with no key is not configured and must not block the other; a key
-    // that loaded but fails its check is broken and must not be hidden by the other.
+    // A source the store never saw a value for is not configured and must not block
+    // the other. A configured source blocks when its key is present-but-invalid or
+    // loads and fails its check — a working Kilo key must not hide either.
     const all = Object.entries(sources) as Array<[KnownOrigin, SourceStatus]>;
-    const loaded = all.filter(([name]) => this.deps.secrets.key(name) !== null);
-    if (loaded.length > 0 && loaded.every(([, s]) => s.ready)) return { ready: true, sources };
-    const blocking = loaded.length > 0 ? loaded.filter(([, s]) => !s.ready) : all;
+    const counted = all.filter(([name]) => this.deps.secrets.configured(name));
+    if (counted.length > 0 && counted.every(([, s]) => s.ready)) return { ready: true, sources };
+    const blocking = counted.length > 0 ? counted.filter(([, s]) => !s.ready) : all;
     const reason = blocking.map(([name, s]) => `${name}: ${s.reason ?? 'not ready'}`).join('; ');
     return { ready: false, reason, sources };
   }

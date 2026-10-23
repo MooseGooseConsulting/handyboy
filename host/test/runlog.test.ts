@@ -41,3 +41,24 @@ it('a run event carrying keys or a bearer token is redacted on disk and in the d
   // The caller's object is theirs; redaction must not rewrite it in place.
   expect(event.nested.keys[2]).toBe(kiloKey);
 });
+
+it('a credential used as an object property name is redacted on disk and in the dev-socket mirror', async () => {
+  h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: null });
+  const event = {
+    type: 'tool.result',
+    output: { 'token sk-or-v1.aaaabbbbccccdddd.eeeeffff00001111 end': 'wrapped', plain: 'kept' },
+  };
+
+  await h.dispatcher.handle({ type: 'runlog.append', runId: 'run-redact-key', event });
+
+  const lines = (await readFile(path.join(h.runsDir, 'run-redact-key.jsonl'), 'utf8')).trim().split('\n');
+  const onDisk = JSON.parse(lines[0]!);
+  const expected = {
+    type: 'tool.result',
+    output: { 'token [redacted] end': 'wrapped', plain: 'kept' },
+  };
+  expect(onDisk).toEqual(expected);
+  expect(h.runEvents[0]?.event).toEqual(expected);
+  // The caller's object is theirs; the key name must be untouched in place.
+  expect(Object.keys(event.output)).toEqual(['token sk-or-v1.aaaabbbbccccdddd.eeeeffff00001111 end', 'plain']);
+});

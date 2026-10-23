@@ -66,6 +66,20 @@ describe('key.status per source', () => {
     });
   });
 
+  it('an OpenRouter secret the store rejects (banner-prefixed output) blocks readiness even with a working Kilo key', async () => {
+    // Doppler printed a banner ahead of the key, so the token failed parsing: no
+    // key, but the source IS configured — that must block exactly like a 401.
+    h = await makeHarness({ key: 'DEPRECATION WARNING\nsk-or-v1-0000aaaa1111bbbb', kiloKey: 'kilo-only-key-0123456789' });
+    await h.dispatcher.handle({ type: 'key.status', id: 'k7' });
+    expect(h.sent[0]).toMatchObject({
+      type: 'key.status.result',
+      id: 'k7',
+      ready: false,
+      reason: 'openrouter: OPENROUTER_API_KEY from fake invalid: expected a single token but got 2 lines',
+      sources: { openrouter: { ready: false }, kilo: { ready: true } },
+    });
+  });
+
   it('an OpenRouter key that GET /key rejects is not ready even though it loaded', async () => {
     h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: null });
     h.fetch.enqueueJson(401, {});

@@ -118,6 +118,8 @@ const SECRET_ENV_NAMES: Record<SecretSource, string> = {
 interface SourceState {
   key: string | null;
   reason?: string;
+  /** The provider returned a value but it failed validation (banner-prefixed output, whitespace). */
+  invalid?: boolean;
 }
 
 function emptyState(): SourceState {
@@ -134,9 +136,16 @@ export class SecretStore {
   #state: Record<SecretSource, SourceState> = { openrouter: emptyState(), kilo: emptyState() };
 
   readonly #provider: SecretProvider;
+  readonly #now: () => number;
+  /** Minimum interval between on-demand reload attempts (negative cache). */
+  readonly #reloadCooldownMs: number;
+  /** Start of the last on-demand reload; 0 means "no reload yet / just reset". */
+  #lastReloadAt = 0;
 
-  constructor(provider: SecretProvider) {
+  constructor(provider: SecretProvider, opts: { now?: () => number; reloadCooldownMs?: number } = {}) {
     this.#provider = provider;
+    this.#now = opts.now ?? Date.now;
+    this.#reloadCooldownMs = opts.reloadCooldownMs ?? 5_000;
   }
 
   async load(): Promise<void> {
@@ -155,9 +164,17 @@ export class SecretStore {
    * meant one Doppler blip (network, a slow CLI, a timeout) left the host keyless
    * until Chrome respawned it. Concurrent callers share one attempt, so a burst of
    * key.status requests spawns one lookup per missing source, not one each.
+   *
+   * On-demand callers are rate-limited: key.status awaits this, and a source the
+   * user never configured would otherwise spawn a Doppler lookup (20 s timeout)
+   * on every poll. Inside the cooldown window the last attempt's result stands.
    */
   reloadMissing(): Promise<void> {
     if (this.#reloading) return this.#reloading;
+    if (this.#lastReloadAt !== 0 && this.#now() - this.#lastReloadAt < this.#reloadCooldownMs) {
+      return Promise.resolve();
+    }
+    this.#lastReloadAt = this.#now();
     const missing = (Object.keys(SECRET_ENV_NAMES) as SecretSource[]).filter((s) => this.#state[s].key === null);
     const attempt = Promise.all(missing.map((source) => this.#loadSource(source))).then(() => {});
     this.#reloading = attempt.finally(() => {
@@ -180,6 +197,9 @@ export class SecretStore {
     let delay = opts.initialDelayMs;
     for (let i = 0; i < opts.attempts && !this.allReady(); i++) {
       await opts.sleep(delay);
+      // The backoff above already paces attempts; the cooldown only guards the
+      // on-demand key.status path, so it must not swallow a scheduled retry.
+      this.#lastReloadAt = 0;
       await this.reloadMissing();
       delay = Math.min(delay * 2, opts.maxDelayMs);
     }
@@ -201,18 +221,23 @@ export class SecretStore {
     // Doppler's, so a future backend (OpenBao, keychain) cannot smuggle a
     // multi-line blob into an Authorization header either. The key stays null,
     // so `LlmProxy.keyStatus()` reports this reason without ever attempting
-    // the live GET /key that used to 401.
+    // the live GET /key that used to 401. `invalid` keeps the source configured:
+    // readiness counts it, so a working other key cannot hide it.
     const parsed = parseSecretToken(lookup.value);
     if (!parsed.ok && this.#state[source].key) return;
     if (!parsed.ok) {
       this.#state[source] = {
         key: null,
         reason: `${envName} from ${this.#provider.name} invalid: ${parsed.reason}`,
+        invalid: true,
       };
       return;
     }
     protectSecret(parsed.token);
     this.#state[source] = { key: parsed.token };
+    // A lookup that loaded a key proves the window stale: let the next check
+    // re-attempt immediately instead of sitting out the cooldown.
+    this.#lastReloadAt = 0;
   }
 
   /** The key for one source. Callers must only put it in an outbound Authorization header. */
@@ -224,6 +249,16 @@ export class SecretStore {
   status(source: SecretSource): { ready: boolean; reason?: string } {
     const state = this.#state[source];
     return state.key ? { ready: true } : { ready: false, ...(state.reason ? { reason: state.reason } : {}) };
+  }
+
+  /**
+   * True when the provider holds a value for this source — a loaded key, or one
+   * that was present but failed validation. Absent (never returned) sources are
+   * not configured and must not block the other source's readiness.
+   */
+  configured(source: SecretSource): boolean {
+    const state = this.#state[source];
+    return state.key !== null || state.invalid === true;
   }
 
   /**
