@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import type { Userscript, UserscriptRunResult } from '@/src/messaging';
 import { Button } from '../components/Button';
 import { Card, Field, Section } from '../components/Card';
 import { ConfirmButton } from '../components/ConfirmButton';
+import { TabPanelVisibleContext } from '../components/Tabs';
 import { cn } from '../lib/cn';
 import { formatDuration, prettyJson } from '../runlog/format';
 import { isWaiting, type AreaStatus } from '../state/status';
@@ -68,9 +69,12 @@ export function UserscriptsSection({
   const [matchesText, setMatchesText] = useState(() => draft.matches.join(' '));
   const [dirty, setDirty] = useState(false);
   const codeRef = useRef<HTMLTextAreaElement>(null);
-  // The id of a script handed to onSave that the list may not contain yet: the worker
-  // stores it and sends a fresh list later, and until then it is not a missing script.
+  const visible = useContext(TabPanelVisibleContext);
+  // A script handed to onSave that the list may not reflect yet: the worker stores it,
+  // re-stamps updatedAt, and sends a fresh list. Until then the list still holds the
+  // pre-save copy — for an existing script too — which must not replace the editor.
   const savingId = useRef<string | undefined>(undefined);
+  const savingAt = useRef(0);
 
   const load = (script: Userscript, asDirty: boolean) => {
     setDirty(asDirty);
@@ -82,10 +86,12 @@ export function UserscriptsSection({
   useEffect(() => {
     if (dirty) return;
     const stored = scripts.find((script) => script.id === draft.id);
-    if (stored) {
-      if (savingId.current === draft.id) savingId.current = undefined;
-    } else if (savingId.current === draft.id) {
-      return;
+    if (savingId.current === draft.id) {
+      // A save is still catching up. Only the fresh list's entry is the saved version:
+      // the worker stamps it no earlier than the moment Save was clicked, so anything
+      // older is the pre-save copy and must stay out of the editor.
+      if (!stored || stored.updatedAt < savingAt.current) return;
+      savingId.current = undefined;
     }
     const match = stored ?? scripts[0];
     if (!match || match === draft) return;
@@ -100,18 +106,21 @@ export function UserscriptsSection({
 
   // The error line is already the user's line, with the wrapper offset removed. This
   // follows the run result only: re-running it on every edit would yank the caret back
-  // to the error line on each keystroke while the user is fixing it.
+  // to the error line on each keystroke while the user is fixing it. A hidden panel has
+  // no layout to focus or scroll in, and the list can answer after the result, so both
+  // gate the jump instead of losing it.
+  const draftIsRunScript = result != null && draft.id === result.scriptId;
   useEffect(() => {
     const match = result?.error?.match(/line (\d+)/);
     const area = codeRef.current;
-    if (!match || !area) return;
+    if (!match || !area || !visible || !draftIsRunScript) return;
     const line = Number(match[1]);
     // The newline that ends the previous line belongs before this line's first character.
     const before = line > 1 ? area.value.split('\n').slice(0, line - 1).join('\n').length + 1 : 0;
     area.focus();
     area.setSelectionRange(before, before);
     area.scrollTop = (line - 1) * 16;
-  }, [result]);
+  }, [result, visible, draftIsRunScript]);
 
   return (
     <div className="space-y-4">
@@ -178,7 +187,8 @@ export function UserscriptsSection({
             <Button
               onClick={() => {
                 savingId.current = draft.id;
-                onSave({ ...draft, updatedAt: Date.now() });
+                savingAt.current = Date.now();
+                onSave({ ...draft, updatedAt: savingAt.current });
                 setDirty(false);
               }}
             >

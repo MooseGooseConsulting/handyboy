@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Userscript, UserscriptRunResult } from '@/src/messaging';
+import { TabPanelVisibleContext } from '../components/Tabs';
 import { UserscriptsSection } from './UserscriptsSection';
 
 afterEach(cleanup);
@@ -53,6 +54,29 @@ describe('UserscriptsSection', () => {
     expect(screen.getByRole('button', { name: /review counts/ }).getAttribute('aria-current')).toBe('true');
   });
 
+  it('saving an edit to an existing script keeps the edited copy until the fresh list arrives', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    const { rerender } = render(<UserscriptsSection {...props({ onSave })} />);
+    expect(codeField().value).toBe(stored.code);
+
+    await user.click(codeField());
+    await user.type(codeField(), '// v2');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ code: `${stored.code}// v2` }));
+    // The panel's list still holds the pre-save copy; it must not replace the editor.
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+    rerender(<UserscriptsSection {...props({ onSave })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+
+    // The stored copy the worker echoes is stamped at save time, never earlier.
+    const saved: Userscript = onSave.mock.calls[0]![0];
+    rerender(<UserscriptsSection {...props({ onSave, scripts: [saved] })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+    expect(screen.getByRole('button', { name: /listing prices/ }).getAttribute('aria-current')).toBe('true');
+  });
+
   it('typing after a failed run keeps the caret where the user is typing', async () => {
     const user = userEvent.setup();
     const failed: UserscriptRunResult = {
@@ -73,5 +97,44 @@ describe('UserscriptsSection', () => {
 
     expect(codeField().value).toBe(`${stored.code}// fixed`);
     expect(codeField().selectionStart).toBe(codeField().value.length);
+  });
+
+  // 'const rows = [];' is 16 characters, so line 2 starts at offset 17.
+  const failedLineTwo: UserscriptRunResult = {
+    scriptId: stored.id,
+    ok: false,
+    error: 'ReferenceError: rows is not defined (line 2)',
+    console: [],
+    durationMs: 3,
+  };
+
+  it('moves the caret once the panel shows, when the result arrived while it was hidden', () => {
+    const hidden = (result?: UserscriptRunResult) => (
+      <TabPanelVisibleContext.Provider value={false}>
+        <UserscriptsSection {...props({ result })} />
+      </TabPanelVisibleContext.Provider>
+    );
+    const shown = (
+      <TabPanelVisibleContext.Provider value={true}>
+        <UserscriptsSection {...props({ result: failedLineTwo })} />
+      </TabPanelVisibleContext.Provider>
+    );
+    const { rerender } = render(hidden());
+    rerender(hidden(failedLineTwo));
+    // A hidden panel has no layout: the jump waits instead of running into a no-op.
+    expect(codeField().selectionStart).not.toBe(17);
+
+    rerender(shown);
+    expect(codeField().selectionStart).toBe(17);
+  });
+
+  it('moves the caret when the result outran the script list', () => {
+    const { rerender } = render(<UserscriptsSection {...props({ scripts: [] })} />);
+    rerender(<UserscriptsSection {...props({ scripts: [], result: failedLineTwo })} />);
+    // The executed script is not in the editor yet, so nothing is positioned.
+    expect(codeField().selectionStart).not.toBe(17);
+
+    rerender(<UserscriptsSection {...props({ result: failedLineTwo })} />);
+    expect(codeField().selectionStart).toBe(17);
   });
 });
