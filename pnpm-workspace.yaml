@@ -2,3 +2,18 @@
 # releases at least 4 days old (5760 minutes), in Renovate lock updates and in a local
 # `pnpm install`. Needs pnpm 10.16 or later.
 minimumReleaseAge: 5760
+
+# Security floors for transitive dependencies. pnpm 11 and later read overrides only from
+# this file and ignore the "pnpm" field in package.json; pnpm 10 reads them here too.
+overrides:
+  shell-quote: '>=1.10.0'
+  adm-zip: '>=0.6.1'
+  tmp: '>=0.2.7'
+  ajv@>=7.0.0 <8.18.0: '>=8.20.0'
+  uuid@<11.1.1: '>=11.1.1'
+
+# spawn-sync (via wxt > web-ext > fx-runner) has a postinstall that only matters on Node
+# older than 0.12. Deny it explicitly: pnpm 11 and later fail the install on an unreviewed
+# build script.
+allowBuilds:
+  spawn-sync: false
