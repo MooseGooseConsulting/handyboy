@@ -25,6 +25,12 @@ export interface TabUpdateInfo {
   status?: string;
 }
 
+/** Payload of `chrome.tabs.onActivated`. */
+export interface TabActivationInfo {
+  tabId: number;
+  windowId: number;
+}
+
 export interface ChromeApi {
   scripting: {
     executeScript(injection: {
@@ -40,6 +46,11 @@ export interface ChromeApi {
     onUpdated: {
       addListener(fn: (tabId: number, info: TabUpdateInfo) => void): void;
       removeListener(fn: (tabId: number, info: TabUpdateInfo) => void): void;
+    };
+    /** Optional so test fakes need not model it; the real API always has it. */
+    onActivated?: {
+      addListener(fn: (info: TabActivationInfo) => void): void;
+      removeListener(fn: (info: TabActivationInfo) => void): void;
     };
     /** Optional so test fakes need not model it; the real API always has it. */
     onReplaced?: TabReplacedEvent;
@@ -264,17 +275,32 @@ export class PageDriver {
    * handing it to the model as "the page" would have it act on something it never saw. So
    * the capture is refused unless the run's tab is the active one, and thrown away if that
    * stopped being true while it was taken. Which tab a run uses is not decided here.
+   *
+   * Checking only before and after the capture is not enough on its own: a switch away and
+   * back (A→B→A) leaves the run tab active at both checkpoints while `captureVisibleTab`
+   * may still have sampled the other tab. Activations are therefore watched for the whole
+   * capture, and the image is discarded if the run tab was ever deactivated.
    */
   async screenshot(tabId: number): Promise<ScreenshotResult> {
     const metrics = (await this.send<PingResult>(tabId, { op: 'ping' })) as PingResult;
     if (!metrics.ok) return { ok: false, error: metrics.error ?? 'page did not report metrics' };
     const before = await this.visibleWindowOf(tabId);
     if (typeof before !== 'number') return before;
+    // Deactivation is latched, so a switch away and back still discards the capture.
+    let deactivated = false;
+    const onActivated = this.api.tabs.onActivated;
+    const watcher = (info: TabActivationInfo): void => {
+      if (info.tabId !== currentTabId(tabId)) deactivated = true;
+    };
+    if (onActivated) onActivated.addListener(watcher);
     let dataUrl: string;
     try {
       dataUrl = await this.withTimeout(this.api.tabs.captureVisibleTab(before, { format: 'png' }), 'captureVisibleTab');
     } catch (err) {
       return { ok: false, error: `captureVisibleTab failed: ${errorOf(err)}` };
+    } finally {
+      // R-02 "leave no listeners behind": removed on success, timeout and throw alike.
+      if (onActivated) onActivated.removeListener(watcher);
     }
     // Checked again afterwards: the user can switch tabs while the capture is in flight,
     // and the image would then be of whatever they switched to.
@@ -282,6 +308,9 @@ export class PageDriver {
     if (typeof after !== 'number') return { ok: false, error: `screenshot discarded: ${after.error}` };
     if (after !== before) {
       return { ok: false, error: 'screenshot discarded: the tab moved to another window while it was captured' };
+    }
+    if (deactivated) {
+      return { ok: false, error: 'screenshot discarded: the run tab was switched away from while it was captured' };
     }
     const dpr = metrics.devicePixelRatio || 1;
     return {
@@ -304,7 +333,7 @@ export class PageDriver {
     const target = currentTabId(tabId);
     let tab: { windowId?: number; active?: boolean };
     try {
-      tab = await this.api.tabs.get(target);
+      tab = await this.withTimeout(this.api.tabs.get(target), 'tabs.get');
     } catch (err) {
       return { ok: false, error: `tabs.get failed: ${errorOf(err)}` };
     }
