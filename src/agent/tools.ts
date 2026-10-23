@@ -92,6 +92,7 @@ export interface PageTools {
    * just carries the request and returns whatever the write path reports.
    */
   writeUserscript(request: WriteUserscriptRequest): Promise<string>;
+  deleteUserscript(scriptId: string): Promise<string>;
   /**
    * Saves `content` (or, when `fromLastUserscript` is true, the full untruncated
    * result of the most recent `run_userscript` call) as a file. `content` has
@@ -399,6 +400,16 @@ export function createPageToolset(page: PageTools, options: { readOnly?: boolean
         'Pass the id, or the name when only one script has it.',
       schema: z.object({
         idOrName: z.string().describe('The id from list_userscripts, or an unambiguous name.'),
+        ...controlEnvelope,
+      }),
+    }),
+    tool(async ({ scriptId }) => page.deleteUserscript(scriptId), {
+      name: 'delete_userscript',
+      description:
+        'Delete an obsolete script you wrote to free a saved-script slot. ' +
+        'Use the exact id from list_userscripts. User-written and bundled scripts cannot be deleted by this tool.',
+      schema: z.object({
+        scriptId: z.string().min(1).describe('The exact id of an agent-written script to delete.'),
         ...controlEnvelope,
       }),
     }),
@@ -753,6 +764,11 @@ export class FakePageTools implements PageTools {
   async writeUserscript(request: WriteUserscriptRequest): Promise<string> {
     this.#record('writeUserscript', request);
     return `saved userscript ${request.scriptId ?? 'fake-script-id'}`;
+  }
+
+  async deleteUserscript(scriptId: string): Promise<string> {
+    this.#record('deleteUserscript', scriptId);
+    return `deleted userscript ${scriptId}`;
   }
 
   async saveFile(filename: string, content: string | undefined, fromLastUserscript: boolean): Promise<string> {

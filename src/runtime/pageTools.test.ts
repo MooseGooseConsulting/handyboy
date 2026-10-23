@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { BaseMessage } from '@langchain/core/messages';
 import { MemorySaver } from '@langchain/langgraph/web';
 import { buildAgentGraph } from '@/src/agent/graph';
@@ -222,7 +222,10 @@ describe('observe mode is the run argument (R-08)', () => {
   });
 });
 
-function toolsAt(fidelity: 'in-page' | 'escalated') {
+function toolsAt(
+  fidelity: 'in-page' | 'escalated',
+  options: Partial<Parameters<typeof createPageTools>[0]> = {},
+) {
   const driver = new PageDouble();
   const port = debuggerPort();
   const rng = clickRng();
@@ -243,9 +246,35 @@ function toolsAt(fidelity: 'in-page' | 'escalated') {
     runUserscript: async () => {
       throw new Error('this run only clicks');
     },
+    ...options,
   });
   return { driver, port, input, tools };
 }
+
+describe('the agent can clean up its saved userscripts', () => {
+  it('routes the model tool call through the runtime and reports the deleted id', async () => {
+    const remove = vi.fn(async () => true);
+    const { tools } = toolsAt('in-page', { deleteUserscript: remove });
+    const tool = createPageToolset(tools).byName.get('delete_userscript')!;
+    await expect(tool.invoke({ scriptId: 'obsolete' })).resolves.toBe('deleted userscript obsolete');
+    expect(remove).toHaveBeenCalledWith('obsolete');
+  });
+
+  it('reports missing scripts, catalog failures, and unavailable deletion as failed calls', async () => {
+    const { tools } = toolsAt('in-page', { deleteUserscript: async () => false });
+    await expect(tools.deleteUserscript('missing')).rejects.toThrow('unknown userscript');
+    const failed = toolsAt('in-page', { deleteUserscript: async () => { throw new Error('cannot be deleted'); } });
+    await expect(failed.tools.deleteUserscript('user-script')).rejects.toThrow('cannot be deleted');
+    await expect(toolsAt('in-page').tools.deleteUserscript('any')).rejects.toThrow('not available');
+  });
+
+  it('refuses direct runtime deletion in a read-only run before touching storage', async () => {
+    const remove = vi.fn(async () => true);
+    const { tools } = toolsAt('in-page', { readOnly: true, deleteUserscript: remove });
+    await expect(tools.deleteUserscript('obsolete')).rejects.toThrow(/read.only/i);
+    expect(remove).not.toHaveBeenCalled();
+  });
+});
 
 describe('click fidelity is the run argument (R-13)', () => {
   it('sending the default click to the debugger tier would address a viewport point and raise the debugging banner', async () => {

@@ -32,6 +32,7 @@ describe('read-only toolset', () => {
     expect(names).not.toContain('click');
     expect(names).not.toContain('type');
     expect(names).not.toContain('write_userscript');
+    expect(names).not.toContain('delete_userscript');
     expect(names).toContain('snapshot');
     expect(names).toContain('save_file');
   });
