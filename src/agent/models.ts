@@ -7,16 +7,11 @@
  * out. `apiKey` here is a non-secret placeholder only because the underlying
  * openai client refuses to construct without one.
  *
- * `provider.data_collection` is "deny" for paid models because page DOM and
- * screenshots are sent on every step (docs/research/models-and-grounding.md §6).
- * OpenRouter's `:free` endpoints exist only under the training data policy, so
- * "deny" yields `404 No endpoints found matching your data policy`; the user
- * chose free models knowingly (a live run on the free pair ended `error 404`
- * under "deny" before this mapping existed), so those get "allow".
+ * No `provider.data_collection` is sent: which endpoints may serve a request is
+ * left to the user's OpenRouter privacy settings. A per-request "deny" for paid
+ * models used to sit here and 404'd any paid model whose only endpoint trains on
+ * prompts (meta/muse-spark-1.3-contributor), a restriction the user never asked for.
  */
-export function dataCollectionFor(model: string): 'allow' | 'deny' {
-  return model.endsWith(':free') ? 'allow' : 'deny';
-}
 import { ChatOpenAI } from '@langchain/openai';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseChatModelParams } from '@langchain/core/language_models/chat_models';
@@ -202,7 +197,6 @@ function errorResponse(status: number, message: string, upstream: Headers): Resp
  */
 export function createChatModel(options: CreateChatModelOptions): ChatOpenAI {
   const { model, fetch, source = 'openrouter', baseURL = baseUrlFor(source), temperature = 0, rateLimitDelaysMs } = options;
-  const isOpenRouter = source === 'openrouter';
   return new ChatOpenAI({
     model,
     temperature,
@@ -218,13 +212,6 @@ export function createChatModel(options: CreateChatModelOptions): ChatOpenAI {
     // provider-agnostic, so there is no reason to leave either gateway unguarded.
     // Retry outside the hardening, so a 429 reported inside a 200 body is retried too.
     configuration: { baseURL, fetch: retryRateLimited(hardenEmptyChoices(fetch), rateLimitDelaysMs) },
-    // `provider.data_collection` is an OpenRouter-specific field; Kilo does not use it,
-    // and sending it there breaks models whose Kilo endpoint would otherwise work
-    // (live evidence: meta/muse-spark-1.3-contributor 404s on OpenRouter under `deny`
-    // but completes normally on Kilo -- only when this field is left out of the request).
-    ...(isOpenRouter
-      ? { modelKwargs: { provider: { data_collection: dataCollectionFor(model), allow_fallbacks: true } } }
-      : {}),
   });
 }
 

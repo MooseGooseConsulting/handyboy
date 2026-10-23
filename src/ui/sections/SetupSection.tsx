@@ -9,7 +9,7 @@ import { NumberField } from '../components/NumberField';
 import { RadioGroup } from '../components/RadioGroup';
 import { Toggle } from '../components/Toggle';
 import { MAX_STEPS, PLANNING_INTERVAL } from '../state/gate';
-import { findModel } from '../state/models';
+import { findModel, sourceOf, trainingRisk, type TrainingRisk } from '../state/models';
 import { useFreeModelsOnly, useModelSourceFilter, type SourceFilter } from '../state/modelFilter';
 import { isWaiting, type AreaStatus } from '../state/status';
 import { useConfig } from '../state/useConfig';
@@ -65,8 +65,31 @@ export function SetupSection({
       setPaidWarning(model && !model.free ? { role, model } : null);
     };
 
-  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource);
-  const followerModel = findModel(models, config.followerModel, config.followerModelSource);
+  // An absent source means OpenRouter (Config), and that is where the run routes, so the
+  // lookup must not fall through to a same-id Kilo entry.
+  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource ?? 'openrouter');
+  const followerModel = findModel(models, config.followerModel, config.followerModelSource ?? 'openrouter');
+  // A saved model missing from the loaded catalog (still loading, or both catalogs failed)
+  // still runs, so it is judged from its stored id rather than dropped from the warnings.
+  const judged = (model: ModelInfo | undefined, id: string, source: ModelSource | undefined): ModelInfo | undefined =>
+    model ??
+    (id
+      ? { id, name: id, free: id.endsWith(':free'), vision: false, tools: false, contextLength: 0, source: source ?? 'openrouter' }
+      : undefined);
+  // Page content from the user's logged-in sessions goes out every step, so a role whose
+  // model trains on prompts is flagged in red, and one nobody reports on in amber. A
+  // warning, not a gate: the run still starts.
+  const rolesAt = (risk: TrainingRisk) =>
+    (
+      [
+        ['Leader', judged(leaderModel, config.leaderModel, config.leaderModelSource)],
+        ['Follower', judged(followerModel, config.followerModel, config.followerModelSource)],
+      ] as const
+    ).filter(([, model]) => model && trainingRisk(model, models) === risk);
+  const trainingRoles = rolesAt('trains');
+  const unknownRoles = rolesAt('unknown');
+  const describeRoles = (roles: typeof trainingRoles) =>
+    roles.map(([role, model]) => `${role} (${model!.name})`).join(' and ');
 
   return (
     <div className="space-y-4">
@@ -114,6 +137,7 @@ export function SetupSection({
           <Badge tone="leader">{leaderModel?.name || config.leaderModel || 'no leader model'}</Badge>
           <span>/</span>
           <Badge tone="follower">{followerModel?.name || config.followerModel || 'no follower model'}</Badge>
+          {trainingRoles.length > 0 ? <Badge tone="bad">trains on prompts</Badge> : null}
         </p>
 
         <div className="mt-2 space-y-2">
@@ -142,6 +166,26 @@ export function SetupSection({
             />
           </Field>
         </div>
+
+        {trainingRoles.length > 0 ? (
+          <p role="status" className="rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            {describeRoles(trainingRoles)} {trainingRoles.length === 1 ? 'may train' : 'may each train'} on your
+            prompts: the page content of every step is sent to it.
+          </p>
+        ) : null}
+
+        {unknownRoles.length > 0 ? (
+          <p role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+            {unknownRoles.map(([role, model]) => (
+              <span key={role} className="block">
+                Unknown whether {describeRoles([[role, model]])} trains on your prompts:{' '}
+                {model && sourceOf(model) === 'kilo'
+                  ? "Kilo's catalog gives no training flag for it."
+                  : 'OpenRouter does not say, and Kilo has no matching entry flagged as training (or its catalog did not load). Your OpenRouter privacy settings decide.'}
+              </span>
+            ))}
+          </p>
+        ) : null}
 
         {paidWarning ? (
           <p role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">

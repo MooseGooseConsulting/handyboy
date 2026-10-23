@@ -309,9 +309,7 @@ interface CatalogModelRaw {
  * string "0", or the id ending `:free`. `vision` when `architecture.input_modalities`
  * includes "image"; `tools` when `supported_parameters` includes "tools";
  * `contextLength` from `context_length`. `mayTrainOnYourPrompts` is carried through
- * when the source reports it (Kilo) -- it is exactly the signal that explains why a
- * model that 404s on OpenRouter (whose only endpoint trains on inputs, denied by our
- * `data_collection: deny` default for paid models) can still work on Kilo.
+ * when the source reports it (Kilo), so the panel can badge a model that trains on prompts.
  */
 function mapCatalogModel(raw: unknown, source: ModelSource): ModelInfo | null {
   if (typeof raw !== 'object' || raw === null) return null;
