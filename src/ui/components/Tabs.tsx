@@ -80,7 +80,9 @@ export function TabPanel<T extends string>({
       hidden={!selected}
       className={cn('min-h-0 flex-1 flex-col', selected ? 'flex' : 'hidden')}
     >
-      {selected ? children : null}
+      {/* Hidden, not unmounted: the sections hold work in progress in local state (the
+          typed objective, an unsaved userscript), and switching tabs must not discard it. */}
+      {children}
     </div>
   );
 }
