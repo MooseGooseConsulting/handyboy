@@ -657,7 +657,13 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   // Pull evidence, then plan. Each lap is one model round trip; the loop is
   // bounded (reads plus room for the plan and one refusal or rejected plan) so a model that
   // only ever reads still ends its turn instead of becoming a second Follower.
-  for (let lap = 0; lap < LEADER_READ_CAP + 2 && !planned; lap++) {
+  // A set_plan the schema rejects earns one bounded correction lap (codex and
+  // codeant reviews on this PR): without it, a rejection landing on the final
+  // ordinary lap — after two reads and an over-cap refusal, or after a
+  // screenshot's vision retry consumed one — fell through to the prose fallback
+  // and handed the Follower the previous plan instead of the corrected one.
+  let rejectedPlans = 0;
+  for (let lap = 0; lap < LEADER_READ_CAP + 2 + rejectedPlans && !planned; lap++) {
     let response: AIMessage;
     const sent = [new SystemMessage(LEADER_SYSTEM), ...state.leaderMessages, ...messages];
     try {
@@ -729,6 +735,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
       });
       messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
       planned = ok;
+      if (!ok) rejectedPlans = Math.min(rejectedPlans + 1, 1);
       answerExtras();
     } else if (readByName.has(call.name)) {
       emit(config, {

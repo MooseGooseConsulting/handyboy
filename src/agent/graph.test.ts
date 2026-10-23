@@ -322,6 +322,86 @@ function leaderWithInvalidFirstPlan(sent: BaseMessage[][]): BaseChatModel {
   return model as unknown as BaseChatModel;
 }
 
+/**
+ * A Leader that spends both evidence reads, hits the over-cap refusal, and only
+ * then calls set_plan — invalid on the first try. Codex review on this PR: the
+ * rejection lands on what was the final ordinary lap, and without a correction
+ * lap the prose fallback hands the Follower the objective instead of the fixed
+ * plan.
+ */
+function leaderRejectingPlanOnFinalLap(sent: BaseMessage[][]): BaseChatModel {
+  const script: { name: string; args: Record<string, unknown> }[] = [
+    { name: 'leader_snapshot', args: {} },
+    { name: 'leader_snapshot', args: {} },
+    // The read budget is spent, so this one is refused. It still consumes a lap.
+    { name: 'leader_snapshot', args: {} },
+    { name: 'set_plan', args: { plan: 'Open the results and save the first one.', subgoals: [] } },
+    {
+      name: 'set_plan',
+      args: { plan: 'Open the results and save the first one.', subgoals: ['Open the results page'], currentSubgoal: 0 },
+    },
+  ];
+  const model = {
+    model: 'scripted-leader',
+    bindTools() {
+      return model;
+    },
+    async invoke(messages: BaseMessage[]) {
+      sent.push([...messages]);
+      const step = script[sent.length - 1];
+      if (!step) throw new Error(`scripted leader ran past its ${script.length} scripted calls`);
+      return new AIMessage({
+        content: '',
+        tool_calls: [{ id: `plan-${sent.length}`, name: step.name, args: step.args, type: 'tool_call' }],
+      });
+    },
+  };
+  return model as unknown as BaseChatModel;
+}
+
+/**
+ * CodeAnt's variant on the same bug: the screenshot's vision retry consumes an
+ * ordinary lap (invoke 2 throws on the image), one read takes another, and the
+ * rejected set_plan again lands on the final lap.
+ */
+function leaderVisionRetryThenLatePlanRejection(sent: BaseMessage[][]): BaseChatModel {
+  const script: { name: string; args: Record<string, unknown> }[] = [
+    { name: 'leader_screenshot', args: {} },
+    { name: 'leader_snapshot', args: {} },
+    { name: 'set_plan', args: { plan: 'Open the results and save the first one.', subgoals: [] } },
+    {
+      name: 'set_plan',
+      args: { plan: 'Open the results and save the first one.', subgoals: ['Open the results page'], currentSubgoal: 0 },
+    },
+  ];
+  let calls = 0;
+  const model = {
+    model: 'scripted-leader',
+    bindTools() {
+      return model;
+    },
+    async invoke(messages: BaseMessage[]) {
+      sent.push([...messages]);
+      calls += 1;
+      // The thrown call below still consumed a lap, so later calls map to the
+      // script one slot earlier.
+      if (calls === 2) throw new Error('provider rejected the request: image blocks are not supported by this model');
+      const step = script[calls === 1 ? 0 : calls - 2];
+      if (!step) throw new Error(`scripted leader ran past its ${script.length} scripted calls`);
+      return new AIMessage({
+        content: '',
+        tool_calls: [{ id: `plan-${calls}`, name: step.name, args: step.args, type: 'tool_call' }],
+      });
+    },
+  };
+  return model as unknown as BaseChatModel;
+}
+
+const pixelsPage: PageTools = {
+  ...page,
+  screenshot: async () => ({ dataUrl: 'data:image/png;base64,cGxheA==', width: 4, height: 3 }),
+};
+
 describe('leader set_plan validation', () => {
   it('gives the leader another lap with the validation error when its set_plan breaks the schema', async () => {
     const leaderSent: BaseMessage[][] = [];
@@ -341,6 +421,36 @@ describe('leader set_plan validation', () => {
     expect(String(failed?.content)).toMatch(/did not match expected schema[\s\S]*→ at subgoals/);
     expect(followerPrompts[0]).toContain('Current subgoal: Open the results page');
   });
+
+  it('reserves a correction lap when the rejected set_plan lands on the final ordinary lap', async () => {
+    const leaderSent: BaseMessage[][] = [];
+    const followerPrompts: string[] = [];
+    const visits = await drive(4, 9, ['BLOCKED'], {
+      leaderModel: leaderRejectingPlanOnFinalLap(leaderSent),
+      followerPrompts,
+    });
+
+    expect(visits.map((v) => v.node)).toEqual(['leader', 'follower']);
+    // read, read, refused read, rejected set_plan, corrected set_plan.
+    expect(leaderSent).toHaveLength(5);
+    expect(followerPrompts[0]).toContain('Current subgoal: Open the results page');
+  });
+
+  it('reserves a correction lap when a vision retry consumed an ordinary lap', async () => {
+    const leaderSent: BaseMessage[][] = [];
+    const followerPrompts: string[] = [];
+    const visits = await drive(4, 9, ['BLOCKED'], {
+      leaderModel: leaderVisionRetryThenLatePlanRejection(leaderSent),
+      page: pixelsPage,
+      observe: 'both',
+      followerPrompts,
+    });
+
+    expect(visits.map((v) => v.node)).toEqual(['leader', 'follower']);
+    // screenshot, vision-retry lap, read, rejected set_plan, corrected set_plan.
+    expect(leaderSent).toHaveLength(5);
+    expect(followerPrompts[0]).toContain('Current subgoal: Open the results page');
+  });
 });
 
 function failingPage(): PageTools {
@@ -349,6 +459,15 @@ function failingPage(): PageTools {
     snapshot: async () => {
       throw new Error('snapshot walk timed out');
     },
+    screenshot: async () => {
+      throw new Error('captureVisibleTab stalled');
+    },
+  };
+}
+
+function screenshotFailingPage(): PageTools {
+  return {
+    ...page,
     screenshot: async () => {
       throw new Error('captureVisibleTab stalled');
     },
@@ -380,4 +499,20 @@ describe('follower observation failures', () => {
       }
     },
   );
+
+  it('resends the snapshot text on an unchanged step when the screenshot is lost', async () => {
+    const followerPrompts: string[] = [];
+    await drive(6, 2, ['CONTINUE', 'CONTINUE'], {
+      page: screenshotFailingPage(),
+      observe: 'both',
+      followerPrompts,
+    });
+
+    // Step 2 repeats step 1's snapshot, so the unchanged note replaces the page
+    // text. The lost screenshot must resend the snapshot or the Follower sees
+    // no page at all.
+    expect(followerPrompts[1]).toContain('Page unchanged since step 1');
+    expect(followerPrompts[1]).toContain('results page');
+    expect(followerPrompts[1]).toContain('the page text above is current');
+  });
 });
