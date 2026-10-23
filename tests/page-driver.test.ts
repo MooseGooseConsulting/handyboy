@@ -1,15 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PageDriver, type ChromeApi } from '@/src/page/driver';
 
-function api(over: Partial<ChromeApi> = {}): ChromeApi & { listeners: Array<(tabId: number, info: { status?: string }) => void> } {
+function api(over: Partial<ChromeApi> = {}): ChromeApi & {
+  listeners: Array<(tabId: number, info: { status?: string }) => void>;
+  activations: Array<(info: { tabId: number; windowId: number }) => void>;
+} {
   const listeners: Array<(tabId: number, info: { status?: string }) => void> = [];
+  const activations: Array<(info: { tabId: number; windowId: number }) => void> = [];
   return {
     listeners,
+    activations,
     scripting: { executeScript: vi.fn(async () => []) },
     tabs: {
       sendMessage: vi.fn(async () => ({ ok: true as const })),
       update: vi.fn(async () => ({})),
-      get: vi.fn(async () => ({ windowId: 1, status: 'complete' })),
+      get: vi.fn(async () => ({ windowId: 1, active: true, status: 'complete' })),
       captureVisibleTab: vi.fn(async () => 'data:image/png;base64,x'),
       onUpdated: {
         addListener(fn) {
@@ -18,6 +23,15 @@ function api(over: Partial<ChromeApi> = {}): ChromeApi & { listeners: Array<(tab
         removeListener(fn) {
           const index = listeners.indexOf(fn);
           if (index >= 0) listeners.splice(index, 1);
+        },
+      },
+      onActivated: {
+        addListener(fn) {
+          activations.push(fn);
+        },
+        removeListener(fn) {
+          const index = activations.indexOf(fn);
+          if (index >= 0) activations.splice(index, 1);
         },
       },
     },
@@ -63,5 +77,93 @@ describe('page driver', () => {
     chrome.listeners[0]?.(3, { status: 'complete' });
     await expect(pending).resolves.toEqual({ ok: true });
     expect(chrome.listeners).toHaveLength(0);
+  });
+
+  it('screenshot returns the capture when the run tab stays the active tab of its window', async () => {
+    const chrome = api();
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(result.ok).toBe(true);
+    expect(result.dataUrl).toBe('data:image/png;base64,x');
+    expect(chrome.tabs.captureVisibleTab).toHaveBeenCalledWith(1, { format: 'png' });
+  });
+
+  it('screenshot refuses without capturing when the run tab is in the background, since the capture would show another tab', async () => {
+    const chrome = api();
+    chrome.tabs.get = vi.fn(async () => ({ windowId: 1, active: false, status: 'complete' }));
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(result.ok).toBe(false);
+    expect(result.dataUrl).toBeUndefined();
+    expect(result.error).toContain('tab 3 is not the active tab');
+    expect(chrome.tabs.captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it('screenshot discards the capture when another tab became active while it was taken', async () => {
+    const chrome = api();
+    chrome.tabs.get = vi
+      .fn()
+      .mockResolvedValueOnce({ windowId: 1, active: true })
+      .mockResolvedValueOnce({ windowId: 1, active: false });
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(chrome.tabs.captureVisibleTab).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.dataUrl).toBeUndefined();
+    expect(result.error).toContain('screenshot discarded');
+  });
+
+  it('screenshot discards the capture when the run tab moved to another window while it was taken', async () => {
+    const chrome = api();
+    chrome.tabs.get = vi
+      .fn()
+      .mockResolvedValueOnce({ windowId: 1, active: true })
+      .mockResolvedValueOnce({ windowId: 2, active: true });
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(result.ok).toBe(false);
+    expect(result.dataUrl).toBeUndefined();
+    expect(result.error).toContain('another window');
+  });
+
+  it('screenshot discards the capture when the run tab is switched away from and back during it', async () => {
+    const chrome = api();
+    // Both checkpoints still see the run tab active — only the activation watcher catches this.
+    chrome.tabs.get = vi.fn(async () => ({ windowId: 1, active: true }));
+    chrome.tabs.captureVisibleTab = vi.fn(async () => {
+      chrome.activations.forEach((fn) => fn({ tabId: 9, windowId: 1 }));
+      chrome.activations.forEach((fn) => fn({ tabId: 3, windowId: 1 }));
+      return 'data:image/png;base64,x';
+    });
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(chrome.tabs.captureVisibleTab).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.dataUrl).toBeUndefined();
+    expect(result.error).toContain('switched away from');
+    expect(chrome.activations).toHaveLength(0);
+  });
+
+  it('screenshot keeps the capture when the active tab changes in another window', async () => {
+    const chrome = api();
+    chrome.tabs.captureVisibleTab = vi.fn(async () => {
+      chrome.activations.forEach((fn) => fn({ tabId: 9, windowId: 2 }));
+      return 'data:image/png;base64,x';
+    });
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(result.ok).toBe(true);
+    expect(result.dataUrl).toBe('data:image/png;base64,x');
+    expect(chrome.activations).toHaveLength(0);
+  });
+
+  it('screenshot fails instead of hanging when tabs.get never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const chrome = api();
+      chrome.tabs.get = vi.fn(() => new Promise<never>(() => {}));
+      const pending = new PageDriver(chrome, { opTimeoutMs: 50 }).screenshot(3);
+      await vi.advanceTimersByTimeAsync(200);
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('tabs.get failed');
+      expect(chrome.tabs.captureVisibleTab).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
