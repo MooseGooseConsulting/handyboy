@@ -174,7 +174,7 @@ if ! UNSYNCED="$(unsynced_registrations "$EXT_DIR")"; then
 fi
 if [ -n "$UNSYNCED" ]; then
   echo "e2e: a reload would not run this build. These profiles load Handyboy from elsewhere:" >&2
-  while IFS=$'\t' read -r profile path; do
+  while IFS=$'\x1f' read -r profile path; do
     echo "       \"$profile\": $path" >&2
   done <<<"$UNSYNCED"
   echo "     Run just setup from this checkout to copy the build there, or Load unpacked from $EXT_DIR." >&2

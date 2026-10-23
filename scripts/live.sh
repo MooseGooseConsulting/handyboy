@@ -101,15 +101,15 @@ cmd_setup() {
   local reg profile path us
   # A failed enumeration may have printed a partial list; never copy on that basis.
   reg="$(registrations)" || die "a Chrome registration exists but could not be read completely (see the NOTE above)"
-  while IFS=$'\t' read -r profile path us; do
+  while IFS=$'\x1f' read -r profile path us; do
     [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ -z "$path" ]; then
-      # A packaged install (crx or Web Store) loads from Chrome's own storage;
-      # there is no directory to copy this build into, and only the human can
-      # remove it in Chrome.
-      echo "   NOTE: \"$profile\" runs Handyboy packaged, not from an unpacked directory; live.sh cannot sync it. Remove it in chrome://extensions, then Load unpacked from $EXT_DIR"
-      continue
+      # A packaged install (crx or Web Store) loads from Chrome's own storage,
+      # and its worker answers the socket with that copy; setup's contract is
+      # that every registration runs this build, which only the human can
+      # restore here.
+      die "\"$profile\" runs Handyboy packaged, not from an unpacked directory; remove it in chrome://extensions, then Load unpacked from $EXT_DIR"
     fi
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still

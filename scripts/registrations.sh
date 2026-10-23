@@ -7,13 +7,15 @@ ext_id() {
     | base64 -d | sha256sum | head -c 32 | tr '0-9a-f' 'a-p'
 }
 
-# "<profile>\t<path>\t<user_scripts_enabled>" for every profile that has the extension.
-# Chrome rewrites Preferences lazily, so this can lag a click in chrome://extensions.
-# A profile whose Preferences cannot be read or parsed is not in the list at all; it is
-# unknown rather than unregistered, so it gets a NOTE on stderr instead (see below). A
-# registration that exists but has the wrong shape is worse: stdout up to that profile
-# has already been printed, so anything but a nonzero exit would pass a partial list off
-# as a complete one. Exits 1 there; callers must treat the output as unusable.
+# Fields of each line are unit-separated (0x1f), profile first: a packaged install has
+# an empty path field, and `IFS=\t read` would collapse the adjacent tabs and shift the
+# remaining fields. Chrome rewrites Preferences lazily, so this can lag a click in
+# chrome://extensions. A profile whose Preferences cannot be read or parsed is not in
+# the list at all; it is unknown rather than unregistered, so it gets a NOTE on stderr
+# instead (see below). A registration that exists but has the wrong shape is worse:
+# stdout up to that profile has already been printed, so anything but a nonzero exit
+# would pass a partial list off as a complete one. Exits 1 there; callers must treat
+# the output as unusable.
 registrations() {
   python3 -I - "$CHROME_DIR" "$(ext_id)" <<'PY'
 import glob, json, os, sys
@@ -38,25 +40,30 @@ for prefs in sorted(glob.glob(os.path.join(root, '*', 'Preferences'))):
         # and $(registrations) callers would read that partial list as complete.
         print(f"NOTE: {prefs} has a malformed Handyboy registration; that profile's build was not checked", file=sys.stderr)
         sys.exit(1)
-    print(f"{os.path.basename(os.path.dirname(prefs))}\t{s.get('path', '')}\t{s.get('user_scripts_enabled', False)}")
+    print("\x1f".join((
+        os.path.basename(os.path.dirname(prefs)),
+        s.get('path', ''),
+        str(s.get('user_scripts_enabled', False)),
+    )))
 PY
 }
 
-# "<profile>\t<path>" for every registration whose directory holds a build other than $1.
-# chrome.runtime.reload() re-reads the directory "Load unpacked" pointed at, so such a
-# profile would come back running that directory's code, not this build. A directory with
-# no manifest (a deleted worktree) loads nothing at all, so it is only noted on stderr.
-# _metadata is Chrome's own bookkeeping inside an extension directory; wxt never writes it.
+# "<profile>\x1f<path>" (unit-separated, like registrations) for every registration whose
+# directory holds a build other than $1. chrome.runtime.reload() re-reads the directory
+# "Load unpacked" pointed at, so such a profile would come back running that directory's
+# code, not this build. A directory with no manifest (a deleted worktree) loads nothing
+# at all, so it is only noted on stderr. _metadata is Chrome's own bookkeeping inside an
+# extension directory; wxt never writes it.
 unsynced_registrations() {
   local build="$1" profile path us registered
   # A failed enumeration may have printed a partial list; never read it as complete.
   registered="$(registrations)" || return 1
-  while IFS=$'\t' read -r profile path us; do
+  while IFS=$'\x1f' read -r profile path us; do
     [ -n "$profile" ] || continue
     [ "$path" = "$build" ] && continue
     case "$path" in
       /*) ;;
-      # An unpacked registration has an absolute directory. Anything else is a
+      # An unpacked registration has an absolute directory. An empty path is a
       # packaged install (crx or Web Store): its worker answers the socket with
       # Chrome's own copy, so a reload would run code this check cannot vouch
       # for. Fail closed; e2e turns the nonzero exit into a refusal.
@@ -66,6 +73,6 @@ unsynced_registrations() {
       echo "NOTE: Chrome profile \"$profile\" registers Handyboy from $path, which holds no build; it cannot load" >&2
       continue
     fi
-    diff -rq --exclude=_metadata "$build" "$path" >/dev/null 2>&1 || printf '%s\t%s\n' "$profile" "$path"
+    diff -rq --exclude=_metadata "$build" "$path" >/dev/null 2>&1 || printf '%s\x1f%s\n' "$profile" "$path"
   done <<<"$registered"
 }
