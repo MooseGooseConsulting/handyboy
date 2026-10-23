@@ -35,7 +35,7 @@ export interface ChromeApi {
   tabs: {
     sendMessage(tabId: number, message: PageRequest): Promise<PageResponse | undefined>;
     update(tabId: number, props: { url: string }): Promise<unknown>;
-    get(tabId: number): Promise<{ windowId?: number; status?: string; url?: string }>;
+    get(tabId: number): Promise<{ windowId?: number; active?: boolean; status?: string; url?: string }>;
     captureVisibleTab(windowId: number, options: { format: 'png' | 'jpeg' }): Promise<string>;
     onUpdated: {
       addListener(fn: (tabId: number, info: TabUpdateInfo) => void): void;
@@ -258,36 +258,66 @@ export class PageDriver {
    * CSS-pixel viewport and `devicePixelRatio` are read from the injected side and the device
    * dimensions derived — that is what lets a `[ref=eNN]` box from `getBox()` be located in
    * the screenshot.
+   *
+   * `captureVisibleTab` takes a window, not a tab: it captures whichever tab is showing in
+   * the run tab's window. With the run's tab in the background that is some other page, and
+   * handing it to the model as "the page" would have it act on something it never saw. So
+   * the capture is refused unless the run's tab is the active one, and thrown away if that
+   * stopped being true while it was taken. Which tab a run uses is not decided here.
    */
   async screenshot(tabId: number): Promise<ScreenshotResult> {
     const metrics = (await this.send<PingResult>(tabId, { op: 'ping' })) as PingResult;
     if (!metrics.ok) return { ok: false, error: metrics.error ?? 'page did not report metrics' };
-    let windowId: number;
+    const before = await this.visibleWindowOf(tabId);
+    if (typeof before !== 'number') return before;
+    let dataUrl: string;
     try {
-      const tab = await this.api.tabs.get(currentTabId(tabId));
-      if (typeof tab.windowId !== 'number') return { ok: false, error: 'tab has no window' };
-      windowId = tab.windowId;
-    } catch (err) {
-      return { ok: false, error: `tabs.get failed: ${errorOf(err)}` };
-    }
-    try {
-      const dataUrl = await this.withTimeout(
-        this.api.tabs.captureVisibleTab(windowId, { format: 'png' }),
-        'captureVisibleTab',
-      );
-      const dpr = metrics.devicePixelRatio || 1;
-      return {
-        ok: true,
-        dataUrl,
-        width: metrics.width,
-        height: metrics.height,
-        devicePixelRatio: dpr,
-        deviceWidth: Math.round(metrics.width * dpr),
-        deviceHeight: Math.round(metrics.height * dpr),
-      };
+      dataUrl = await this.withTimeout(this.api.tabs.captureVisibleTab(before, { format: 'png' }), 'captureVisibleTab');
     } catch (err) {
       return { ok: false, error: `captureVisibleTab failed: ${errorOf(err)}` };
     }
+    // Checked again afterwards: the user can switch tabs while the capture is in flight,
+    // and the image would then be of whatever they switched to.
+    const after = await this.visibleWindowOf(tabId);
+    if (typeof after !== 'number') return { ok: false, error: `screenshot discarded: ${after.error}` };
+    if (after !== before) {
+      return { ok: false, error: 'screenshot discarded: the tab moved to another window while it was captured' };
+    }
+    const dpr = metrics.devicePixelRatio || 1;
+    return {
+      ok: true,
+      dataUrl,
+      width: metrics.width,
+      height: metrics.height,
+      devicePixelRatio: dpr,
+      deviceWidth: Math.round(metrics.width * dpr),
+      deviceHeight: Math.round(metrics.height * dpr),
+    };
+  }
+
+  /**
+   * The window to capture `tabId` from, or why it cannot be captured. Only `active: true`
+   * passes: a tab Chrome does not report as active is treated as hidden, so a missing
+   * field fails closed rather than capturing a page that may not be the run's.
+   */
+  private async visibleWindowOf(tabId: number): Promise<number | { ok: false; error: string }> {
+    const target = currentTabId(tabId);
+    let tab: { windowId?: number; active?: boolean };
+    try {
+      tab = await this.api.tabs.get(target);
+    } catch (err) {
+      return { ok: false, error: `tabs.get failed: ${errorOf(err)}` };
+    }
+    if (typeof tab.windowId !== 'number') return { ok: false, error: 'tab has no window' };
+    if (tab.active !== true) {
+      return {
+        ok: false,
+        error:
+          `tab ${target} is not the active tab of its window; captureVisibleTab captures only ` +
+          'the active tab, so the screenshot would show a different page',
+      };
+    }
+    return tab.windowId;
   }
 
   /**
