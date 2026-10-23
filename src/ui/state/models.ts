@@ -67,7 +67,10 @@ export type TrainingRisk = 'trains' | 'no' | 'unknown';
 export function trainingRisk(model: ModelInfo, catalog: ModelInfo[]): TrainingRisk {
   if (model.mayTrainOnYourPrompts !== undefined) return model.mayTrainOnYourPrompts ? 'trains' : 'no';
   if (sourceOf(model) === 'openrouter' && model.id.endsWith(':free')) return 'trains';
-  return catalog.some((other) => other.id === model.id && other.mayTrainOnYourPrompts === true) ? 'trains' : 'unknown';
+  const kiloTwinTrains = catalog.some(
+    (other) => sourceOf(other) === 'kilo' && other.id === model.id && other.mayTrainOnYourPrompts === true,
+  );
+  return kiloTwinTrains ? 'trains' : 'unknown';
 }
 
 /** The Setup tab's "filter by source" control. `'all'` (the default) passes every model through. */

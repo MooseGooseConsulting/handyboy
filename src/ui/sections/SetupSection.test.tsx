@@ -131,6 +131,27 @@ describe('SetupSection', () => {
     expect(warning.textContent).not.toContain('OpenRouter');
   });
 
+  it('a saved model missing from the loaded catalog still gets its warning, judged from the stored id', async () => {
+    await configItem.setValue(stored({ leaderModel: 'nvidia/nemotron-3-ultra-550b-a55b:free', followerModel: 'paid/not-loaded' }));
+    renderSetup({ models: catalog });
+
+    const red = await screen.findByText(/may train on your prompts/);
+    expect(red.textContent).toContain('Leader (nvidia/nemotron-3-ultra-550b-a55b:free)');
+    const amber = await screen.findByText(/^Unknown whether/);
+    expect(amber.textContent).toContain('Follower (paid/not-loaded)');
+  });
+
+  it('a stored OpenRouter pick is judged as the OpenRouter entry, not its same-id Kilo twin', async () => {
+    const openrouter: ModelInfo = { ...catalog[0]!, id: 'twin/model', name: 'Twin via OpenRouter', free: false, source: 'openrouter' };
+    const kilo: ModelInfo = { ...openrouter, name: 'Twin via Kilo', source: 'kilo', mayTrainOnYourPrompts: false };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: openrouter.id, followerModel: known.id }));
+    renderSetup({ models: [kilo, openrouter, known] });
+
+    const amber = await screen.findByText(/^Unknown whether/);
+    expect(amber.textContent).toContain('Leader (Twin via OpenRouter)');
+  });
+
   it('no warning shows when neither selected model trains on prompts', async () => {
     await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
     renderSetup({ models: catalog.map((model) => ({ ...model, mayTrainOnYourPrompts: false })) });

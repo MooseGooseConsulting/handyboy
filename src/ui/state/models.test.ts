@@ -61,6 +61,11 @@ describe('training risk', () => {
     expect(trainingRisk(free, [free])).toBe('trains');
   });
 
+  it('a Kilo model never borrows a flag from an OpenRouter entry', () => {
+    const kilo: ModelInfo = { ...muse('kilo'), mayTrainOnYourPrompts: undefined };
+    expect(trainingRisk(kilo, [kilo, { ...muse('openrouter'), mayTrainOnYourPrompts: true }])).toBe('unknown');
+  });
+
   it("a model's own explicit flag wins over anything borrowed", () => {
     expect(trainingRisk(muse('kilo', false), [muse('kilo', false), muse('kilo', true)])).toBe('no');
   });

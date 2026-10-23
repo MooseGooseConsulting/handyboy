@@ -65,16 +65,25 @@ export function SetupSection({
       setPaidWarning(model && !model.free ? { role, model } : null);
     };
 
-  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource);
-  const followerModel = findModel(models, config.followerModel, config.followerModelSource);
+  // An absent source means OpenRouter (Config), and that is where the run routes, so the
+  // lookup must not fall through to a same-id Kilo entry.
+  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource ?? 'openrouter');
+  const followerModel = findModel(models, config.followerModel, config.followerModelSource ?? 'openrouter');
+  // A saved model missing from the loaded catalog (still loading, or both catalogs failed)
+  // still runs, so it is judged from its stored id rather than dropped from the warnings.
+  const judged = (model: ModelInfo | undefined, id: string, source: ModelSource | undefined): ModelInfo | undefined =>
+    model ??
+    (id
+      ? { id, name: id, free: id.endsWith(':free'), vision: false, tools: false, contextLength: 0, source: source ?? 'openrouter' }
+      : undefined);
   // Page content from the user's logged-in sessions goes out every step, so a role whose
   // model trains on prompts is flagged in red, and one nobody reports on in amber. A
   // warning, not a gate: the run still starts.
   const rolesAt = (risk: TrainingRisk) =>
     (
       [
-        ['Leader', leaderModel],
-        ['Follower', followerModel],
+        ['Leader', judged(leaderModel, config.leaderModel, config.leaderModelSource)],
+        ['Follower', judged(followerModel, config.followerModel, config.followerModelSource)],
       ] as const
     ).filter(([, model]) => model && trainingRisk(model, models) === risk);
   const trainingRoles = rolesAt('trains');
