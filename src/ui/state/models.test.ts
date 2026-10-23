@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelInfo } from '@/src/messaging';
-import { filterFree, findModel, rankModels, sourceOf } from './models';
+import { filterFree, findModel, mayTrainOnPrompts, rankModels, sourceOf } from './models';
 
 const models: ModelInfo[] = [
   { id: 'paid/first', name: 'Paid', free: false, vision: true, tools: true, contextLength: 8000 },
@@ -28,5 +28,34 @@ describe('model list', () => {
     expect(sourceOf(models[0]!)).toBe('openrouter');
     expect(filterFree(models, true).every((model) => model.free)).toBe(true);
     expect(filterFree(models, false)).toHaveLength(models.length);
+  });
+});
+
+describe('trains-on-prompts flag', () => {
+  const muse = (source: 'openrouter' | 'kilo', flag?: boolean): ModelInfo => ({
+    id: 'meta/muse-spark-1.3-contributor',
+    name: 'Muse Spark Contributor',
+    free: false,
+    vision: false,
+    tools: true,
+    contextLength: 1000,
+    source,
+    ...(flag === undefined ? {} : { mayTrainOnYourPrompts: flag }),
+  });
+
+  it('an OpenRouter entry with no flag of its own borrows the Kilo flag for the same id', () => {
+    const catalog = [muse('openrouter'), muse('kilo', true)];
+    expect(mayTrainOnPrompts(catalog[0]!, catalog)).toBe(true);
+  });
+
+  it('a free OpenRouter id is flagged, and a paid one with no Kilo evidence is not', () => {
+    const free: ModelInfo = { ...muse('openrouter'), id: 'nvidia/nemotron-3.5-lightning:free' };
+    expect(mayTrainOnPrompts(free, [free])).toBe(true);
+    expect(mayTrainOnPrompts(muse('openrouter'), [muse('openrouter')])).toBe(false);
+  });
+
+  it("a model's own explicit flag wins over anything borrowed", () => {
+    const catalog = [muse('kilo', false), muse('openrouter')];
+    expect(mayTrainOnPrompts(catalog[0]!, [...catalog, muse('kilo', true)])).toBe(false);
   });
 });

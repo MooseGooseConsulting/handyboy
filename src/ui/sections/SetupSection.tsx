@@ -9,7 +9,7 @@ import { NumberField } from '../components/NumberField';
 import { RadioGroup } from '../components/RadioGroup';
 import { Toggle } from '../components/Toggle';
 import { MAX_STEPS, PLANNING_INTERVAL } from '../state/gate';
-import { findModel } from '../state/models';
+import { findModel, mayTrainOnPrompts } from '../state/models';
 import { useFreeModelsOnly, useModelSourceFilter, type SourceFilter } from '../state/modelFilter';
 import { isWaiting, type AreaStatus } from '../state/status';
 import { useConfig } from '../state/useConfig';
@@ -67,6 +67,14 @@ export function SetupSection({
 
   const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource);
   const followerModel = findModel(models, config.followerModel, config.followerModelSource);
+  // Page content from the user's logged-in sessions goes out every step, so a role whose
+  // model trains on prompts is flagged in red. A warning, not a gate: the run still starts.
+  const trainingRoles = (
+    [
+      ['Leader', leaderModel],
+      ['Follower', followerModel],
+    ] as const
+  ).filter(([, model]) => model && mayTrainOnPrompts(model, models));
 
   return (
     <div className="space-y-4">
@@ -114,6 +122,7 @@ export function SetupSection({
           <Badge tone="leader">{leaderModel?.name || config.leaderModel || 'no leader model'}</Badge>
           <span>/</span>
           <Badge tone="follower">{followerModel?.name || config.followerModel || 'no follower model'}</Badge>
+          {trainingRoles.length > 0 ? <Badge tone="bad">trains on prompts</Badge> : null}
         </p>
 
         <div className="mt-2 space-y-2">
@@ -142,6 +151,14 @@ export function SetupSection({
             />
           </Field>
         </div>
+
+        {trainingRoles.length > 0 ? (
+          <p role="status" className="rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            {trainingRoles.map(([role, model]) => `${role} (${model!.name})`).join(' and ')}{' '}
+            {trainingRoles.length === 1 ? 'may train' : 'may each train'} on your prompts: the page content of every
+            step is sent to it.
+          </p>
+        ) : null}
 
         {paidWarning ? (
           <p role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">

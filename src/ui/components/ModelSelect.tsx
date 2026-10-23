@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import type { ModelInfo } from '@/src/messaging';
 import type { ModelSource } from '@/src/storage';
-import { filterFree, filterSource, formatContext, rankModels, sourceOf } from '../state/models';
+import { filterFree, filterSource, formatContext, mayTrainOnPrompts, rankModels, sourceOf } from '../state/models';
 import { Badge } from './Badge';
 import { Combobox } from './Combobox';
 
@@ -90,8 +90,8 @@ export function ModelSelect({
             {model.free ? <Badge tone="good">free</Badge> : null}
             {model.vision ? <Badge tone="accent">vision</Badge> : null}
             {model.tools ? <Badge tone="neutral">tools</Badge> : null}
-            {model.mayTrainOnYourPrompts ? (
-              <Badge tone="warn" title="This endpoint trains on your prompts.">
+            {mayTrainOnPrompts(model, models) ? (
+              <Badge tone="bad" title="This model may train on your prompts, including page content.">
                 trains on prompts
               </Badge>
             ) : null}

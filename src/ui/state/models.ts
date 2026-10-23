@@ -51,6 +51,19 @@ export function findModel(models: ModelInfo[], id: string, source?: ModelSource)
   return models.find((model) => model.id === id);
 }
 
+/**
+ * Whether picking `model` may send page content to an endpoint that trains on prompts.
+ * Only Kilo's catalog reports this, so an OpenRouter entry borrows it: a `:free` id is
+ * served only under OpenRouter's training policy, and the same id flagged on Kilo is the
+ * same upstream model (e.g. the Muse Spark "Contributor" models). A warning only --
+ * Handyboy sends no data-collection filter, so nothing here stops the run.
+ */
+export function mayTrainOnPrompts(model: ModelInfo, catalog: ModelInfo[]): boolean {
+  if (model.mayTrainOnYourPrompts !== undefined) return model.mayTrainOnYourPrompts;
+  if (sourceOf(model) === 'openrouter' && model.id.endsWith(':free')) return true;
+  return catalog.some((other) => other.id === model.id && other.mayTrainOnYourPrompts === true);
+}
+
 /** The Setup tab's "filter by source" control. `'all'` (the default) passes every model through. */
 export function filterSource(models: ModelInfo[], source: ModelSource | 'all'): ModelInfo[] {
   return source === 'all' ? models : models.filter((model) => sourceOf(model) === source);

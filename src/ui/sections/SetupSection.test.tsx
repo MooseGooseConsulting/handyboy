@@ -81,6 +81,33 @@ async function planningInterval(): Promise<HTMLInputElement> {
 }
 
 describe('SetupSection', () => {
+  it('a Leader that trains on prompts gets a red warning but stays selected and runnable', async () => {
+    const museOpenRouter: ModelInfo = {
+      id: 'meta/muse-spark-1.3-contributor',
+      name: 'Meta: Muse Spark 1.3 Contributor',
+      free: false,
+      vision: false,
+      tools: true,
+      contextLength: 1000,
+      source: 'openrouter',
+    };
+    const museKilo: ModelInfo = { ...museOpenRouter, source: 'kilo', mayTrainOnYourPrompts: true };
+    await configItem.setValue(stored({ leaderModel: museOpenRouter.id, followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, museOpenRouter, museKilo] });
+
+    const warning = await screen.findByText(/may train on your prompts/);
+    expect(warning.textContent).toContain('Leader (Meta: Muse Spark 1.3 Contributor)');
+    expect(warning.textContent).not.toContain('Follower');
+    expect((await getConfig()).leaderModel).toBe(museOpenRouter.id);
+  });
+
+  it('no warning shows when neither selected model trains on prompts', async () => {
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: catalog });
+    await screen.findAllByText('Atlas Planner');
+    expect(screen.queryByText(/may train on your prompts/)).toBeNull();
+  });
+
   it('clearing the planning interval would store NaN', async () => {
     const user = userEvent.setup();
     await configItem.setValue(stored({ planningInterval: 7 }));
