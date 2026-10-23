@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { RunEvent } from '@/src/messaging';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
+import { TabPanelVisibleContext } from '../components/Tabs';
 import { Toggle } from '../components/Toggle';
 import { cn } from '../lib/cn';
 import { entryKind, startedEvent, toEntries, toSections } from '../state/runlog';
@@ -97,6 +98,7 @@ export function RunLog({ events, emptyMessage }: { events: RunEvent[]; emptyMess
   const [pinned, setPinned] = useState(true);
   const [copied, setCopied] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const visible = useContext(TabPanelVisibleContext);
 
   const runStart = startedEvent(events)?.at;
   const stepsHidden = hidden.includes('step');
@@ -128,11 +130,13 @@ export function RunLog({ events, emptyMessage }: { events: RunEvent[]; emptyMess
   const hasEvents = events.length > 0;
 
   useEffect(() => {
-    if (!pinned) return;
+    // A hidden tab panel has no layout, so scrolling there is a no-op: events that
+    // arrive while the user is on another tab are caught up when the panel shows again.
+    if (!pinned || !visible) return;
     // `scrollIntoView` is missing in jsdom and in some embedded surfaces; pinning is a
     // convenience and must never take the log down.
     endRef.current?.scrollIntoView?.({ block: 'end' });
-  }, [pinned, totalVisible]);
+  }, [pinned, totalVisible, visible]);
 
   const toggleFilter = (kind: RunEvent['kind']) =>
     setHidden((current) =>
