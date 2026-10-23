@@ -21,7 +21,7 @@
 #
 # What one invocation does:
 #
-#   1. pnpm build -> .output/chrome-mv3 (unless --skip-build).
+#   1. node_modules/.bin/wxt build -> .output/chrome-mv3 (unless --skip-build).
 #   2. Starts a local HTTP fixture (scripts/harness/fixture-server.mjs). Its three
 #      inventory rows come from the seed and only reach the DOM after a click on
 #      "Reveal inventory"; the expected answer is written to expected.json.
@@ -180,7 +180,8 @@ if [ "$SKIP_BUILD" = "1" ]; then
   [ -f "$EXT_DIR/manifest.json" ] || { echo "harness: --skip-build but $EXT_DIR/manifest.json is missing" >&2; exit 2; }
 else
   step "build"
-  pnpm build >"$WORK/build.log" 2>&1 || { tail -20 "$WORK/build.log"; echo "harness: pnpm build failed" >&2; exit 1; }
+  # The project's own wxt, as e2e.sh does: a bare `pnpm` may be a version-manager shim with no version set.
+  node_modules/.bin/wxt build >"$WORK/build.log" 2>&1 || { tail -20 "$WORK/build.log"; echo "harness: wxt build failed" >&2; exit 1; }
   echo "built $EXT_DIR"
 fi
 MANIFEST_KEY_ID="$(jq -r '.key' "$EXT_DIR/manifest.json" | base64 -d | sha256sum | head -c 32 | tr '0-9a-f' 'a-p')"
