@@ -286,11 +286,13 @@ export class PageDriver {
     if (!metrics.ok) return { ok: false, error: metrics.error ?? 'page did not report metrics' };
     const before = await this.visibleWindowOf(tabId);
     if (typeof before !== 'number') return before;
-    // Deactivation is latched, so a switch away and back still discards the capture.
+    // Deactivation is latched, so a switch away and back still discards the capture. Only
+    // activations in the captured window count: onActivated fires for every window, and
+    // activating a tab elsewhere does not hide the run tab.
     let deactivated = false;
     const onActivated = this.api.tabs.onActivated;
     const watcher = (info: TabActivationInfo): void => {
-      if (info.tabId !== currentTabId(tabId)) deactivated = true;
+      if (info.windowId === before && info.tabId !== currentTabId(tabId)) deactivated = true;
     };
     if (onActivated) onActivated.addListener(watcher);
     let dataUrl: string;

@@ -139,6 +139,18 @@ describe('page driver', () => {
     expect(chrome.activations).toHaveLength(0);
   });
 
+  it('screenshot keeps the capture when the active tab changes in another window', async () => {
+    const chrome = api();
+    chrome.tabs.captureVisibleTab = vi.fn(async () => {
+      chrome.activations.forEach((fn) => fn({ tabId: 9, windowId: 2 }));
+      return 'data:image/png;base64,x';
+    });
+    const result = await new PageDriver(chrome).screenshot(3);
+    expect(result.ok).toBe(true);
+    expect(result.dataUrl).toBe('data:image/png;base64,x');
+    expect(chrome.activations).toHaveLength(0);
+  });
+
   it('screenshot fails instead of hanging when tabs.get never answers', async () => {
     vi.useFakeTimers();
     try {
