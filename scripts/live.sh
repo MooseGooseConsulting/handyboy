@@ -111,6 +111,13 @@ cmd_setup() {
       # restore here.
       die "\"$profile\" runs Handyboy packaged, not from an unpacked directory; remove it in chrome://extensions, then Load unpacked from $EXT_DIR"
     fi
+    case "$path" in
+      /*) ;;
+      # Same guard as unsynced_registrations: only an absolute directory is an
+      # unpacked registration. A relative path is Chrome's own bookkeeping for
+      # a packaged install and must not be treated as a dead build here.
+      *) die "\"$profile\" runs Handyboy from \"$path\", which is not an unpacked absolute directory; a reload would run that copy, not this build. Remove it in chrome://extensions, then Load unpacked from $EXT_DIR" ;;
+    esac
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still
       # holds a Handyboy build. A stale registration may now point at something else.
