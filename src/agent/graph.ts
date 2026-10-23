@@ -655,7 +655,7 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
   );
 
   // Pull evidence, then plan. Each lap is one model round trip; the loop is
-  // bounded (reads plus room for the plan and one refusal) so a model that
+  // bounded (reads plus room for the plan and one refusal or rejected plan) so a model that
   // only ever reads still ends its turn instead of becoming a second Follower.
   for (let lap = 0; lap < LEADER_READ_CAP + 2 && !planned; lap++) {
     let response: AIMessage;
@@ -711,8 +711,15 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
         const picked = typeof args.currentSubgoal === 'number' ? args.currentSubgoal : 0;
         currentSubgoal = Math.min(Math.max(picked, 0), Math.max(subgoals.length - 1, 0));
       } catch (error) {
+        // A plan that fails the schema recorded nothing. Counting it as planned handed
+        // the Follower an empty subgoal; instead the Leader reads the error and gets
+        // another lap, and the lap bound plus the prose fallback below still end the turn.
         ok = false;
-        result = toolResultText(error instanceof Error ? error.message : String(error));
+        result = toolResultText(
+          `${error instanceof Error ? error.message : String(error)}\n` +
+            'set_plan was not recorded. Call it again with "plan" (a string), "subgoals" ' +
+            '(at least one string) and optionally "currentSubgoal" (an index into subgoals).',
+        );
       }
       emit(config, {
         kind: 'tool.result',
@@ -720,8 +727,8 @@ const leader: GraphNode<typeof AgentState, AgentContext> = async (state, config)
         result: { callId, name: call.name, ok, summary: summarize(result), durationMs: now() - started, chars: result.length },
         at: now(),
       });
-      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result }));
-      planned = true;
+      messages.push(new ToolMessage({ tool_call_id: callId, name: call.name, content: result, status: ok ? 'success' : 'error' }));
+      planned = ok;
       answerExtras();
     } else if (readByName.has(call.name)) {
       emit(config, {
@@ -926,22 +933,46 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
   // earlier copy; a repeated observation does not store it again.
   let readEvidence: string | undefined;
 
+  // A failed snapshot is one missing observation, like a failed screenshot below; it
+  // used to throw and end the whole run. The step budget still bounds a page that
+  // never yields one.
+  const takeSnapshot = async (): Promise<{ snap?: Awaited<ReturnType<typeof ctx.page.snapshot>>; error?: string }> => {
+    try {
+      return { snap: await ctx.page.snapshot() };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  const snapshotRetry = ctx.toolset.byName.has('snapshot') ? ' Call snapshot to try reading it again.' : '';
+
   if (ctx.observe === 'dom' || ctx.observe === 'both') {
     // Always take the snapshot: it is a local read-only walk, and comparing content
     // rather than trusting the last tool's name is what catches a `wait` that saw the
     // page change, or a scroll or userscript that left it alone.
-    snapshot = await ctx.page.snapshot();
-    tokens = snapshot.tokens;
-    url = snapshot.url;
-    const digest = snapshotDigest(snapshot.text);
-    if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
-      unchanged = true;
-      blocks.push({ type: 'text', text: unchangedPageNote(state.lastSnapshotStep) });
+    const taken = await takeSnapshot();
+    snapshot = taken.snap;
+    if (!snapshot) {
+      // A failed walk may have left the ref table half rebuilt, so the next good
+      // snapshot is sent in full rather than as "unchanged since" an older step.
+      lastSnapshotDigest = null;
+      lastSnapshotStep = null;
+      blocks.push({
+        type: 'text',
+        text: `No page snapshot this step (${taken.error}); refs from earlier snapshots may be stale.${snapshotRetry}`,
+      });
     } else {
-      lastSnapshotDigest = digest;
-      lastSnapshotStep = stepN;
-      blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
-      readEvidence = snapshot.text;
+      tokens = snapshot.tokens;
+      url = snapshot.url;
+      const digest = snapshotDigest(snapshot.text);
+      if (digest === state.lastSnapshotDigest && state.lastSnapshotStep !== null) {
+        unchanged = true;
+        blocks.push({ type: 'text', text: unchangedPageNote(state.lastSnapshotStep) });
+      } else {
+        lastSnapshotDigest = digest;
+        lastSnapshotStep = stepN;
+        blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
+        readEvidence = snapshot.text;
+      }
     }
   }
   if (ctx.observe === 'pixels' || ctx.observe === 'both') {
@@ -978,23 +1009,36 @@ const follower: GraphNode<typeof AgentState, AgentContext> = async (state, confi
         }
       }
     } else if (ctx.observe === 'both') {
-      // The unchanged-page note above can point at a snapshot trimFollowerHistory
-      // has since removed from the prompt (coderabbit review on PR #53): after
-      // three such turns a lost screenshot would leave the Follower with no page
-      // text and no image. Resend the text only in that case. When the digest
-      // changed, the full snapshot is already in the prompt; appending it again
-      // doubles the DOM tokens.
-      if (snapshot && unchanged) {
-        blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
-        readEvidence = snapshot.text;
+      if (!snapshot) {
+        // Neither observation arrived. Saying the page text above is current would
+        // point the Follower at a note that holds no page at all.
+        blocks.push({ type: 'text', text: `No screenshot this step either (${shotError}); there is no current view of the page.` });
+      } else {
+        // The unchanged-page note above can point at a snapshot trimFollowerHistory
+        // has since removed from the prompt (coderabbit review on PR #53): after
+        // three such turns a lost screenshot would leave the Follower with no page
+        // text and no image. Resend the text only in that case. When the digest
+        // changed, the full snapshot is already in the prompt; appending it again
+        // doubles the DOM tokens.
+        if (unchanged) {
+          blocks.push({ type: 'text', text: `${SNAPSHOT_HEADER}${snapshot.text}` });
+          readEvidence = snapshot.text;
+        }
+        blocks.push({ type: 'text', text: `No screenshot this step (${shotError}); the page text above is current.` });
       }
-      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}); the page text above is current.` });
     } else {
-      const snap = await ctx.page.snapshot();
-      tokens = snap.tokens;
-      url = snap.url;
-      blocks.push({ type: 'text', text: `No screenshot this step (${shotError}), so here is the page text instead.\n${SNAPSHOT_HEADER}${snap.text}` });
-      readEvidence = snap.text;
+      const { snap, error } = await takeSnapshot();
+      if (snap) {
+        tokens = snap.tokens;
+        url = snap.url;
+        blocks.push({ type: 'text', text: `No screenshot this step (${shotError}), so here is the page text instead.\n${SNAPSHOT_HEADER}${snap.text}` });
+        readEvidence = snap.text;
+      } else {
+        blocks.push({
+          type: 'text',
+          text: `No screenshot this step (${shotError}), and no page snapshot either (${error}); there is no current view of the page.${snapshotRetry}`,
+        });
+      }
     }
   }
 
