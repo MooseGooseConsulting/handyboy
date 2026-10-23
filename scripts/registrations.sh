@@ -9,15 +9,27 @@ ext_id() {
 
 # "<profile>\t<path>\t<user_scripts_enabled>" for every profile that has the extension.
 # Chrome rewrites Preferences lazily, so this can lag a click in chrome://extensions.
+# A profile whose Preferences cannot be read or parsed is not in the list at all; it is
+# unknown rather than unregistered, so it gets a NOTE on stderr instead (see below).
 registrations() {
   python3 -I - "$CHROME_DIR" "$(ext_id)" <<'PY'
 import glob, json, os, sys
 root, ext = sys.argv[1], sys.argv[2]
 for prefs in sorted(glob.glob(os.path.join(root, '*', 'Preferences'))):
     try:
-        s = json.load(open(prefs))['extensions']['settings'][ext]
+        data = json.load(open(prefs))
     except Exception:
+        # Unreadable or malformed on disk is unknown, not unregistered: this
+        # profile may still load a build the sync check cannot vouch for, so
+        # dropping it silently would weaken e2e's "every profile loads this
+        # build" gate. Chrome resets a malformed Preferences on its next start,
+        # so this is rare; note it, as unsynced_registrations notes dead dirs.
+        print(f"NOTE: {prefs} is unreadable or malformed; that profile's build was not checked", file=sys.stderr)
         continue
+    try:
+        s = data['extensions']['settings'][ext]
+    except Exception:
+        continue  # parses fine without this extension: genuinely unregistered
     print(f"{os.path.basename(os.path.dirname(prefs))}\t{s.get('path', '')}\t{s.get('user_scripts_enabled', False)}")
 PY
 }

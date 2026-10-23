@@ -139,6 +139,17 @@ describe('scripts/e2e.sh', () => {
     expect(r.code).toBe(0);
   });
 
+  it('notes, but does not fail on, a profile whose Preferences cannot be parsed, since that is not "unregistered"', () => {
+    const root = makeRoot();
+    register(root, 'Default', path.join(root, '.output/chrome-mv3'));
+    const prefs = path.join(root, 'chrome', 'Profile 3', 'Preferences');
+    write(prefs, '{not json');
+    const r = run(root, 'e2e.sh', E2E_ARGS);
+    expect(r.out).toContain(`${prefs} is unreadable or malformed; that profile's build was not checked`);
+    expect(r.calls).toContain('hb-reload');
+    expect(r.code).toBe(0);
+  });
+
   it('fails the run when hb-logs cannot read the extension log, since errors would go unseen', () => {
     const root = makeRoot();
     register(root, 'Default', path.join(root, '.output/chrome-mv3'));
