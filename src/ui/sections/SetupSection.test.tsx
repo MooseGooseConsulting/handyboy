@@ -101,11 +101,31 @@ describe('SetupSection', () => {
     expect((await getConfig()).leaderModel).toBe(museOpenRouter.id);
   });
 
+  it('a paid OpenRouter Leader gets an amber unknown warning instead of none when the Kilo catalog is missing', async () => {
+    const museOpenRouter: ModelInfo = {
+      id: 'meta/muse-spark-1.3-contributor',
+      name: 'Meta: Muse Spark 1.3 Contributor',
+      free: false,
+      vision: false,
+      tools: true,
+      contextLength: 1000,
+      source: 'openrouter',
+    };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: museOpenRouter.id, followerModel: known.id }));
+    renderSetup({ models: [known, museOpenRouter] });
+
+    const warning = await screen.findByText(/^Unknown whether/);
+    expect(warning.textContent).toContain('Leader (Meta: Muse Spark 1.3 Contributor)');
+    expect(screen.queryByText(/may train on your prompts/)).toBeNull();
+  });
+
   it('no warning shows when neither selected model trains on prompts', async () => {
     await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
-    renderSetup({ models: catalog });
+    renderSetup({ models: catalog.map((model) => ({ ...model, mayTrainOnYourPrompts: false })) });
     await screen.findAllByText('Atlas Planner');
     expect(screen.queryByText(/may train on your prompts/)).toBeNull();
+    expect(screen.queryByText(/^Unknown whether/)).toBeNull();
   });
 
   it('clearing the planning interval would store NaN', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelInfo } from '@/src/messaging';
-import { filterFree, findModel, mayTrainOnPrompts, rankModels, sourceOf } from './models';
+import { filterFree, findModel, rankModels, sourceOf, trainingRisk } from './models';
 
 const models: ModelInfo[] = [
   { id: 'paid/first', name: 'Paid', free: false, vision: true, tools: true, contextLength: 8000 },
@@ -31,7 +31,7 @@ describe('model list', () => {
   });
 });
 
-describe('trains-on-prompts flag', () => {
+describe('training risk', () => {
   const muse = (source: 'openrouter' | 'kilo', flag?: boolean): ModelInfo => ({
     id: 'meta/muse-spark-1.3-contributor',
     name: 'Muse Spark Contributor',
@@ -45,17 +45,20 @@ describe('trains-on-prompts flag', () => {
 
   it('an OpenRouter entry with no flag of its own borrows the Kilo flag for the same id', () => {
     const catalog = [muse('openrouter'), muse('kilo', true)];
-    expect(mayTrainOnPrompts(catalog[0]!, catalog)).toBe(true);
+    expect(trainingRisk(catalog[0]!, catalog)).toBe('trains');
+    expect(trainingRisk(muse('openrouter'), [muse('openrouter'), muse('kilo', false)])).toBe('no');
   });
 
-  it('a free OpenRouter id is flagged, and a paid one with no Kilo evidence is not', () => {
+  it('a paid OpenRouter model reads as unknown, not safe, when the Kilo catalog did not load', () => {
+    expect(trainingRisk(muse('openrouter'), [muse('openrouter')])).toBe('unknown');
+  });
+
+  it('a free OpenRouter id trains, since those endpoints exist only under the training policy', () => {
     const free: ModelInfo = { ...muse('openrouter'), id: 'nvidia/nemotron-3.5-lightning:free' };
-    expect(mayTrainOnPrompts(free, [free])).toBe(true);
-    expect(mayTrainOnPrompts(muse('openrouter'), [muse('openrouter')])).toBe(false);
+    expect(trainingRisk(free, [free])).toBe('trains');
   });
 
   it("a model's own explicit flag wins over anything borrowed", () => {
-    const catalog = [muse('kilo', false), muse('openrouter')];
-    expect(mayTrainOnPrompts(catalog[0]!, [...catalog, muse('kilo', true)])).toBe(false);
+    expect(trainingRisk(muse('kilo', false), [muse('kilo', false), muse('kilo', true)])).toBe('no');
   });
 });

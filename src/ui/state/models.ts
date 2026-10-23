@@ -51,17 +51,23 @@ export function findModel(models: ModelInfo[], id: string, source?: ModelSource)
   return models.find((model) => model.id === id);
 }
 
+/** Whether picking a model may send page content to an endpoint that trains on prompts. */
+export type TrainingRisk = 'trains' | 'no' | 'unknown';
+
 /**
- * Whether picking `model` may send page content to an endpoint that trains on prompts.
- * Only Kilo's catalog reports this, so an OpenRouter entry borrows it: a `:free` id is
- * served only under OpenRouter's training policy, and the same id flagged on Kilo is the
- * same upstream model (e.g. the Muse Spark "Contributor" models). A warning only --
+ * Only Kilo's catalog reports training, so an OpenRouter entry borrows it: a `:free` id
+ * is served only under OpenRouter's training policy, and the same id on Kilo is the same
+ * upstream model (e.g. the Muse Spark "Contributor" models). With no Kilo entry to borrow
+ * from -- the model is not on Kilo, or Kilo's catalog failed to load and the panel got
+ * OpenRouter's alone -- the answer is `unknown`, never a silent `no`. A warning only:
  * Handyboy sends no data-collection filter, so nothing here stops the run.
  */
-export function mayTrainOnPrompts(model: ModelInfo, catalog: ModelInfo[]): boolean {
-  if (model.mayTrainOnYourPrompts !== undefined) return model.mayTrainOnYourPrompts;
-  if (sourceOf(model) === 'openrouter' && model.id.endsWith(':free')) return true;
-  return catalog.some((other) => other.id === model.id && other.mayTrainOnYourPrompts === true);
+export function trainingRisk(model: ModelInfo, catalog: ModelInfo[]): TrainingRisk {
+  const fromFlag = (flag: boolean): TrainingRisk => (flag ? 'trains' : 'no');
+  if (model.mayTrainOnYourPrompts !== undefined) return fromFlag(model.mayTrainOnYourPrompts);
+  if (sourceOf(model) === 'openrouter' && model.id.endsWith(':free')) return 'trains';
+  const twin = catalog.find((other) => other.id === model.id && other.mayTrainOnYourPrompts !== undefined);
+  return twin ? fromFlag(twin.mayTrainOnYourPrompts!) : 'unknown';
 }
 
 /** The Setup tab's "filter by source" control. `'all'` (the default) passes every model through. */
