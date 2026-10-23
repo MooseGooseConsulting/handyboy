@@ -46,7 +46,10 @@ describe('training risk', () => {
   it('an OpenRouter entry with no flag of its own borrows the Kilo flag for the same id', () => {
     const catalog = [muse('openrouter'), muse('kilo', true)];
     expect(trainingRisk(catalog[0]!, catalog)).toBe('trains');
-    expect(trainingRisk(muse('openrouter'), [muse('openrouter'), muse('kilo', false)])).toBe('no');
+  });
+
+  it('a non-training Kilo twin does not clear an OpenRouter model, since the gateways route independently', () => {
+    expect(trainingRisk(muse('openrouter'), [muse('openrouter'), muse('kilo', false)])).toBe('unknown');
   });
 
   it('a paid OpenRouter model reads as unknown, not safe, when the Kilo catalog did not load', () => {

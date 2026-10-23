@@ -120,6 +120,17 @@ describe('SetupSection', () => {
     expect(screen.queryByText(/may train on your prompts/)).toBeNull();
   });
 
+  it('an unknown Kilo model is not sent to OpenRouter privacy settings, which do not govern Kilo', async () => {
+    const kiloModel: ModelInfo = { ...catalog[0]!, id: 'kilo/unflagged', name: 'Kilo Unflagged', source: 'kilo' };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: kiloModel.id, leaderModelSource: 'kilo', followerModel: known.id }));
+    renderSetup({ models: [known, kiloModel] });
+
+    const warning = await screen.findByText(/^Unknown whether/);
+    expect(warning.textContent).toContain("Kilo's catalog gives no training flag");
+    expect(warning.textContent).not.toContain('OpenRouter');
+  });
+
   it('no warning shows when neither selected model trains on prompts', async () => {
     await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
     renderSetup({ models: catalog.map((model) => ({ ...model, mayTrainOnYourPrompts: false })) });
