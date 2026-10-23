@@ -39,6 +39,23 @@ describe('HostClient log forwarding', () => {
   });
 });
 
+describe('HostClient readiness', () => {
+  it('asking about one source sends that source and reports the host answer for it', async () => {
+    const port = new FakeNativePort();
+    const client = new HostClient(() => port);
+    const pending = client.keyStatus('kilo');
+    const sent = port.sent[0];
+    expect(sent).toMatchObject({ type: 'key.status', source: 'kilo' });
+    if (sent?.type !== 'key.status') return;
+    port.emit({ type: 'key.status.result', id: sent.id, ready: false, reason: 'KILO_CODE_API_KEY not available' });
+    await expect(pending).resolves.toEqual({
+      hostConnected: true,
+      keyReady: false,
+      reason: 'KILO_CODE_API_KEY not available',
+    });
+  });
+});
+
 describe('HostClient settling', () => {
   it('a generic host error for an llm request id settles that stream instead of leaving it pending', () => {
     const port = new FakeNativePort();

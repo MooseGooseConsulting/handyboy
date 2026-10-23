@@ -9,6 +9,7 @@ import type {
   ErrorCode,
   InboundMsg,
   InputMsg,
+  KeyStatusMsg,
   LlmRequestMsg,
   LogAppendMsg,
   OutboundMsg,
@@ -81,8 +82,18 @@ export class Dispatcher {
 
     switch (msg.type) {
       case 'key.status': {
-        const { ready, reason } = await this.#deps.llm.keyStatus();
-        return this.#deps.send({ type: 'key.status.result', id: msg.id, ready, ...(reason ? { reason } : {}) });
+        const source = (msg as KeyStatusMsg).source;
+        if (source !== undefined && source !== 'openrouter' && source !== 'kilo') {
+          return this.#fail(msg.id, 'bad_request', 'key.status "source" must be "openrouter" or "kilo"');
+        }
+        const { ready, reason, sources } = await this.#deps.llm.keyStatus(source);
+        return this.#deps.send({
+          type: 'key.status.result',
+          id: msg.id,
+          ready,
+          ...(reason ? { reason } : {}),
+          ...(sources ? { sources } : {}),
+        });
       }
 
       case 'models.list': {

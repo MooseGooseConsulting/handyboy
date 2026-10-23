@@ -28,6 +28,8 @@ export const MAX_BACKOFF_MS = 30_000;
 export interface KeyStatusMsg {
   type: 'key.status';
   id: string;
+  /** Ask about one source; omitted, the host answers whether any source is usable. */
+  source?: ModelSource;
 }
 
 export interface ModelsListMsg {
@@ -104,6 +106,7 @@ export interface KeyStatusResult {
   id: string;
   ready: boolean;
   reason?: string;
+  sources?: Record<ModelSource, { ready: boolean; reason?: string }>;
 }
 
 export interface ModelsListResult {
@@ -413,10 +416,14 @@ export class HostClient {
     this.#settleAllPendingOnDisconnect();
   }
 
-  /** `GET /key` readiness (R-11): never assumed, always the host's validated answer. */
-  async keyStatus(): Promise<Readiness> {
+  /**
+   * Key readiness (R-11): never assumed, always the host's validated answer. With a
+   * `source`, the answer is for that source alone; without one, whether any source
+   * can serve a request -- a Kilo-only setup is ready.
+   */
+  async keyStatus(source?: ModelSource): Promise<Readiness> {
     try {
-      const res = await this.#call<KeyStatusResult>({ type: 'key.status', id: nextId() });
+      const res = await this.#call<KeyStatusResult>({ type: 'key.status', id: nextId(), ...(source ? { source } : {}) });
       return { hostConnected: true, keyReady: res.ready, ...(res.reason ? { reason: res.reason } : {}) };
     } catch (err) {
       return { hostConnected: false, keyReady: false, reason: (err as Error).message };

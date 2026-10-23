@@ -2,7 +2,16 @@ import { assertOnKnownBase, normalizeRequest, type KnownOrigin } from './origins
 import { CHUNK_BYTES, KILO_BASE, OPENROUTER_BASE, type LlmRequestMsg, type OutboundMsg } from './protocol.ts';
 import type { SecretStore } from './secrets.ts';
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+export interface SourceStatus {
+  ready: boolean;
+  reason?: string;
+}
+
+export interface KeyStatus extends SourceStatus {
+  sources?: Record<KnownOrigin, SourceStatus>;
+}
+
+export type FetchLike =(input: string, init?: RequestInit) => Promise<Response>;
 
 export interface LlmDeps {
   fetch: FetchLike;
@@ -60,12 +69,32 @@ export class LlmProxy {
   }
 
   /**
+   * Readiness per source. Reporting OpenRouter alone blocked a Kilo-only setup and
+   * passed a Kilo run with no Kilo key loaded. With `source`, `ready` is that source's
+   * answer; without it, `ready` means at least one source can serve a request, and
+   * `sources` says which.
+   */
+  async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
+    const sources: Record<KnownOrigin, SourceStatus> = {
+      openrouter: await this.#openRouterStatus(),
+      kilo: this.deps.secrets.status('kilo'),
+    };
+    if (source) {
+      const s = sources[source];
+      return { ready: s.ready, ...(s.reason ? { reason: s.reason } : {}), sources };
+    }
+    const all = Object.entries(sources) as Array<[KnownOrigin, SourceStatus]>;
+    if (all.some(([, s]) => s.ready)) return { ready: true, sources };
+    const reason = all.map(([name, s]) => `${name}: ${s.reason ?? 'not ready'}`).join('; ');
+    return { ready: false, reason, sources };
+  }
+
+  /**
    * GET /key with the real key: validates readiness without spending a completion (R-11).
    * OpenRouter-specific -- Kilo has no documented equivalent validation endpoint, so its
-   * readiness is presence-only (`SecretStore.status('kilo')`, checked wherever that
-   * matters) rather than a live round trip.
+   * readiness is presence-only (`SecretStore.status('kilo')`) rather than a live round trip.
    */
-  async keyStatus(): Promise<{ ready: boolean; reason?: string }> {
+  async #openRouterStatus(): Promise<SourceStatus> {
     const key = this.deps.secrets.openRouterKey;
     if (!key) return { ready: false, reason: this.deps.secrets.missingReason ?? 'no key loaded' };
     try {
