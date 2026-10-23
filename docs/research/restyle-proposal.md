@@ -4,6 +4,10 @@ Date: 2026-10-23. Investigation only. `REQUIREMENTS.md` is not changed by this
 file. Sequencing is proposed, not promised. Open questions are at the bottom —
 they are asked, not decided.
 
+Superseded in depth by `restyle-exhaustive.md` (§A–M), which inventories every
+Stylebot area with borrow/adapt/skip verdicts and pairs each recommendation
+with its counter-case. This file remains the short placement map.
+
 Evidence: Stylebot checkout at `/tmp/stylebot` (`docs/cli.md`, `docs/css.md`,
 `docs/editor.md`, `tools/claude-plugin/skills/stylebot/SKILL.md`,
 `src/core/css/*`, `src/core/saved-styles/*`, `src/features/history/*`).

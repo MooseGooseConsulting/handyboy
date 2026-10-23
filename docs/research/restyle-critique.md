@@ -4,7 +4,9 @@ Date: 2026-10-23. Investigation only. Nothing here changes `REQUIREMENTS.md`.
 Each section names the file, the defect, and why it matters for durable
 rescaling (or for the bot generally). Suite state at write time: `pnpm vitest
 run` → 46 files / 137 tests passing; `scripts/check-invariants.sh` is the
-stealth gate (7 rules, all relevant below).
+stealth gate (7 rules, all relevant below). Extended in
+`restyle-exhaustive.md` (§L pairs every recommendation with the case against
+it, §K lists what is explicitly not coming over and why).
 
 ## 1. Missing capability (the gap Stylebot exposes)
 
