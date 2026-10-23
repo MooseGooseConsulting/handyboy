@@ -68,6 +68,9 @@ export function UserscriptsSection({
   const [matchesText, setMatchesText] = useState(() => draft.matches.join(' '));
   const [dirty, setDirty] = useState(false);
   const codeRef = useRef<HTMLTextAreaElement>(null);
+  // The id of a script handed to onSave that the list may not contain yet: the worker
+  // stores it and sends a fresh list later, and until then it is not a missing script.
+  const savingId = useRef<string | undefined>(undefined);
 
   const load = (script: Userscript, asDirty: boolean) => {
     setDirty(asDirty);
@@ -78,7 +81,13 @@ export function UserscriptsSection({
   // Adopt a stored script the first time the list arrives, unless the user is mid-edit.
   useEffect(() => {
     if (dirty) return;
-    const match = scripts.find((script) => script.id === draft.id) ?? scripts[0];
+    const stored = scripts.find((script) => script.id === draft.id);
+    if (stored) {
+      if (savingId.current === draft.id) savingId.current = undefined;
+    } else if (savingId.current === draft.id) {
+      return;
+    }
+    const match = stored ?? scripts[0];
     if (!match || match === draft) return;
     setDraft(match);
     setMatchesText(match.matches.join(' '));
@@ -89,18 +98,20 @@ export function UserscriptsSection({
     setDraft((prev) => ({ ...prev, ...patch }));
   };
 
-  // The error line is already the user's line, with the wrapper offset removed.
+  // The error line is already the user's line, with the wrapper offset removed. This
+  // follows the run result only: re-running it on every edit would yank the caret back
+  // to the error line on each keystroke while the user is fixing it.
   useEffect(() => {
     const match = result?.error?.match(/line (\d+)/);
     const area = codeRef.current;
     if (!match || !area) return;
     const line = Number(match[1]);
     // The newline that ends the previous line belongs before this line's first character.
-    const before = line > 1 ? draft.code.split('\n').slice(0, line - 1).join('\n').length + 1 : 0;
+    const before = line > 1 ? area.value.split('\n').slice(0, line - 1).join('\n').length + 1 : 0;
     area.focus();
     area.setSelectionRange(before, before);
     area.scrollTop = (line - 1) * 16;
-  }, [result?.error, draft.code]);
+  }, [result]);
 
   return (
     <div className="space-y-4">
@@ -166,6 +177,7 @@ export function UserscriptsSection({
           <span className="flex gap-1">
             <Button
               onClick={() => {
+                savingId.current = draft.id;
                 onSave({ ...draft, updatedAt: Date.now() });
                 setDirty(false);
               }}
