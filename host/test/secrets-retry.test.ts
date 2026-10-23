@@ -153,8 +153,7 @@ describe('secret loading after a transient failure', () => {
     expect(lookups).toBe(2); // reused the last result, no new lookups
   });
 
-  it('a ready answer re-checks a still-absent source in the background, so a later poll sees a new key', async () => {
-    const provider = new FlakyProvider(
+  it('a ready answer re-checks a still-absent source in the background, so a later poll sees a new key', async () => {    const provider = new FlakyProvider(
       { OPENROUTER_API_KEY: OR_KEY, KILO_CODE_API_KEY: KILO_KEY },
       { OPENROUTER_API_KEY: 1 },
     );
@@ -183,5 +182,31 @@ describe('secret loading after a transient failure', () => {
       ready: true,
       sources: { openrouter: { ready: true }, kilo: { ready: true } },
     });
+  });
+
+  it('a transient reload failure does not erase a known invalid configuration', async () => {
+    let calls = 0;
+    const provider: SecretProvider = {
+      name: 'flaky-invalid',
+      get: async (name: string) => {
+        calls += 1;
+        if (calls === 1) {
+          // The store saw the value and rejected its shape (banner-prefixed).
+          return { value: null, reason: `${name} invalid: expected a single token but got 2 lines`, invalid: true };
+        }
+        // Every later attempt is a transient Doppler outage.
+        return { value: null, reason: `${name} from flaky-invalid failed: doppler exited with code 1` };
+      },
+    };
+    const secrets = new SecretStore(provider, { reloadCooldownMs: 0 });
+    await secrets.load();
+    expect(secrets.configured('openrouter')).toBe(true);
+
+    await secrets.reloadMissing();
+    // The rejected configuration still exists, so the source stays configured
+    // (blocking readiness) even though this attempt failed — only a loaded key
+    // clears the marker. The reason is still fresh.
+    expect(secrets.configured('openrouter')).toBe(true);
+    expect(secrets.status('openrouter').reason).toContain('doppler exited with code 1');
   });
 });

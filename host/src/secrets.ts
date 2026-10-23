@@ -234,8 +234,9 @@ export class SecretStore {
         key: null,
         reason: lookup.reason ?? `${envName} not available from ${this.#provider.name}`,
         // A provider that saw the value but rejected its shape (Doppler parses
-        // before returning) reports it here; either way the source stays configured.
-        ...(lookup.invalid ? { invalid: true } : {}),
+        // before returning) reports it here. A later failed retry must not erase a
+        // known invalid configuration — only a successfully loaded key clears it.
+        ...(this.#state[source].invalid || lookup.invalid ? { invalid: true } : {}),
       };
       return;
     }
