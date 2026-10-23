@@ -97,12 +97,13 @@ export class Dispatcher {
           return this.#fail(m.id, 'bad_request', (err as RunLogError).message);
         }
         const append = async (): Promise<void> => {
+          let written: unknown;
           try {
-            await appendRunLog(m.runId, m.event, this.#deps.runsDir);
+            written = await appendRunLog(m.runId, m.event, this.#deps.runsDir);
           } catch (err) {
             return this.#fail(m.id, 'io', (err as Error).message);
           }
-          this.#deps.onRunEvent?.(m.runId, m.event);
+          this.#deps.onRunEvent?.(m.runId, written);
           this.#deps.send({ type: 'runlog.ack', ...(m.id ? { id: m.id } : {}), runId: m.runId, ok: true });
         };
         // The stored tail is guarded: if this append throws (a subscriber or a dead
