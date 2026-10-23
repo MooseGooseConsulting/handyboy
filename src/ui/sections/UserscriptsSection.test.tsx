@@ -128,6 +128,23 @@ describe('UserscriptsSection', () => {
     expect(codeField().selectionStart).toBe(17);
   });
 
+  it('does not replay the error jump on later tab returns', () => {
+    const panel = (visible: boolean) => (
+      <TabPanelVisibleContext.Provider value={visible}>
+        <UserscriptsSection {...props({ result: failedLineTwo })} />
+      </TabPanelVisibleContext.Provider>
+    );
+    const { rerender } = render(panel(true));
+    expect(codeField().selectionStart).toBe(17);
+
+    // The user takes the caret back, then switches away and returns: the consumed
+    // jump must not fire again.
+    codeField().setSelectionRange(0, 0);
+    rerender(panel(false));
+    rerender(panel(true));
+    expect(codeField().selectionStart).toBe(0);
+  });
+
   it('moves the caret when the result outran the script list', () => {
     const { rerender } = render(<UserscriptsSection {...props({ scripts: [] })} />);
     rerender(<UserscriptsSection {...props({ scripts: [], result: failedLineTwo })} />);

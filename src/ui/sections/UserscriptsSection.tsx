@@ -104,13 +104,16 @@ export function UserscriptsSection({
     setDraft((prev) => ({ ...prev, ...patch }));
   };
 
-  // The error line is already the user's line, with the wrapper offset removed. This
-  // follows the run result only: re-running it on every edit would yank the caret back
-  // to the error line on each keystroke while the user is fixing it. A hidden panel has
-  // no layout to focus or scroll in, and the list can answer after the result, so both
-  // gate the jump instead of losing it.
+  // The error line is already the user's line, with the wrapper offset removed. Each
+  // result jumps at most once: re-running the jump would yank the caret back to a stale
+  // error line on every edit or tab return while the user is fixing it. A jump stays
+  // pending until the panel is visible and the executed script is the loaded draft — a
+  // hidden panel has no layout to focus or scroll in, and the list can answer after the
+  // result — and is then consumed.
   const draftIsRunScript = result != null && draft.id === result.scriptId;
+  const jumpedFor = useRef<UserscriptRunResult | undefined>(undefined);
   useEffect(() => {
+    if (jumpedFor.current === result) return;
     const match = result?.error?.match(/line (\d+)/);
     const area = codeRef.current;
     if (!match || !area || !visible || !draftIsRunScript) return;
@@ -120,6 +123,7 @@ export function UserscriptsSection({
     area.focus();
     area.setSelectionRange(before, before);
     area.scrollTop = (line - 1) * 16;
+    jumpedFor.current = result;
   }, [result, visible, draftIsRunScript]);
 
   return (
