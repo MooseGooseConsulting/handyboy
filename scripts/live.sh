@@ -104,6 +104,13 @@ cmd_setup() {
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"
+    if [ -z "$path" ]; then
+      # A packaged install (crx or Web Store) loads from Chrome's own storage;
+      # there is no directory to copy this build into, and only the human can
+      # remove it in Chrome.
+      echo "   NOTE: \"$profile\" runs Handyboy packaged, not from an unpacked directory; live.sh cannot sync it. Remove it in chrome://extensions, then Load unpacked from $EXT_DIR"
+      continue
+    fi
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still
       # holds a Handyboy build. A stale registration may now point at something else.

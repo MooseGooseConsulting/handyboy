@@ -162,6 +162,18 @@ describe('scripts/e2e.sh', () => {
     expect(r.code).toBe(1);
   });
 
+  it('fails closed when a profile runs Handyboy packaged, since a reload would run Chrome\'s copy, not this build', () => {
+    const root = makeRoot();
+    register(root, 'Default', path.join(root, '.output/chrome-mv3'));
+    // A packaged install (crx or Web Store) has no unpacked path in Preferences.
+    const prefs = path.join(root, 'chrome', 'Profile 5', 'Preferences');
+    write(prefs, JSON.stringify({ extensions: { settings: { [extId()]: { user_scripts_enabled: true } } } }));
+    const r = run(root, 'e2e.sh', E2E_ARGS);
+    expect(r.out).toContain('"Profile 5" runs Handyboy packaged, not from an unpacked directory');
+    expect(r.calls).not.toContain('hb-reload');
+    expect(r.code).toBe(1);
+  });
+
   it('fails the run when hb-logs cannot read the extension log, since errors would go unseen', () => {
     const root = makeRoot();
     register(root, 'Default', path.join(root, '.output/chrome-mv3'));

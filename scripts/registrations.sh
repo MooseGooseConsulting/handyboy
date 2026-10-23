@@ -54,6 +54,14 @@ unsynced_registrations() {
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
     [ "$path" = "$build" ] && continue
+    case "$path" in
+      /*) ;;
+      # An unpacked registration has an absolute directory. Anything else is a
+      # packaged install (crx or Web Store): its worker answers the socket with
+      # Chrome's own copy, so a reload would run code this check cannot vouch
+      # for. Fail closed; e2e turns the nonzero exit into a refusal.
+      *) echo "NOTE: Chrome profile \"$profile\" runs Handyboy packaged, not from an unpacked directory; a reload would run Chrome's copy, not this build" >&2; return 1 ;;
+    esac
     if [ ! -f "$path/manifest.json" ]; then
       echo "NOTE: Chrome profile \"$profile\" registers Handyboy from $path, which holds no build; it cannot load" >&2
       continue
