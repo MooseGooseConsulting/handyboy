@@ -33,26 +33,8 @@ die() { echo "live: $*" >&2; exit 1; }
 
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# Same derivation as host/install.sh: the manifest key pins the id across rebuilds.
-ext_id() {
-  grep -oE "'MII[A-Za-z0-9+/=]+'" wxt.config.ts | head -n1 | tr -d "'" \
-    | base64 -d | sha256sum | head -c 32 | tr '0-9a-f' 'a-p'
-}
-
-# "<profile>\t<path>\t<user_scripts_enabled>" for every profile that has the extension.
-# Chrome rewrites Preferences lazily, so this can lag a click in chrome://extensions.
-registrations() {
-  python3 -I - "$CHROME_DIR" "$(ext_id)" <<'PY'
-import glob, json, os, sys
-root, ext = sys.argv[1], sys.argv[2]
-for prefs in sorted(glob.glob(os.path.join(root, '*', 'Preferences'))):
-    try:
-        s = json.load(open(prefs))['extensions']['settings'][ext]
-    except Exception:
-        continue
-    print(f"{os.path.basename(os.path.dirname(prefs))}\t{s.get('path', '')}\t{s.get('user_scripts_enabled', False)}")
-PY
-}
+# ext_id, registrations
+source "$ROOT/scripts/registrations.sh"
 
 # True once the extension's service worker has spawned the dev host and it answers.
 # hb-status exits 1 both for "key not ready" and "no host", so read what it printed instead.
@@ -117,10 +99,25 @@ cmd_setup() {
   # Every profile that has it gets the build: the CLI cannot tell which profile's worker
   # answers the socket, and a reload of an unsynced profile would test stale code.
   local reg profile path us
-  reg="$(registrations)"
-  while IFS=$'\t' read -r profile path us; do
+  # A failed enumeration may have printed a partial list; never copy on that basis.
+  reg="$(registrations)" || die "a Chrome registration exists but could not be read completely (see the NOTE above)"
+  while IFS=$'\x1f' read -r profile path us; do
     [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"
+    if [ -z "$path" ]; then
+      # A packaged install (crx or Web Store) loads from Chrome's own storage,
+      # and its worker answers the socket with that copy; setup's contract is
+      # that every registration runs this build, which only the human can
+      # restore here.
+      die "\"$profile\" runs Handyboy packaged, not from an unpacked directory; remove it in chrome://extensions, then Load unpacked from $EXT_DIR"
+    fi
+    case "$path" in
+      /*) ;;
+      # Same guard as unsynced_registrations: only an absolute directory is an
+      # unpacked registration. A relative path is Chrome's own bookkeeping for
+      # a packaged install and must not be treated as a dead build here.
+      *) die "\"$profile\" runs Handyboy from \"$path\", which is not an unpacked absolute directory; a reload would run that copy, not this build. Remove it in chrome://extensions, then Load unpacked from $EXT_DIR" ;;
+    esac
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still
       # holds a Handyboy build. A stale registration may now point at something else.
