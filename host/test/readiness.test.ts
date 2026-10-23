@@ -53,6 +53,19 @@ describe('key.status per source', () => {
     expect(h.sent[1]).toMatchObject({ type: 'error', id: 'k4', code: 'bad_request' });
   });
 
+  it('a loaded OpenRouter key that GET /key rejects is not hidden by a working Kilo key', async () => {
+    h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: 'kilo-only-key-0123456789' });
+    h.fetch.enqueueJson(401, {});
+    await h.dispatcher.handle({ type: 'key.status', id: 'k6' });
+    expect(h.sent[0]).toMatchObject({
+      type: 'key.status.result',
+      id: 'k6',
+      ready: false,
+      reason: 'openrouter: GET /key returned 401',
+      sources: { openrouter: { ready: false }, kilo: { ready: true } },
+    });
+  });
+
   it('an OpenRouter key that GET /key rejects is not ready even though it loaded', async () => {
     h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: null });
     h.fetch.enqueueJson(401, {});

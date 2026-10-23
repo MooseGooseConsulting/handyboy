@@ -16,7 +16,7 @@ export const RUN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export interface KeyStatusMsg {
   type: 'key.status';
   id: string;
-  /** Ask about one source; omitted, `ready` means at least one source is usable. */
+  /** Ask about one source; omitted, `ready` means some key is loaded and every loaded key passes. */
   source?: ModelSourceName;
 }
 

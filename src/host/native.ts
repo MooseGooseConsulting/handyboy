@@ -28,7 +28,7 @@ export const MAX_BACKOFF_MS = 30_000;
 export interface KeyStatusMsg {
   type: 'key.status';
   id: string;
-  /** Ask about one source; omitted, the host answers whether any source is usable. */
+  /** Ask about one source; omitted, the host answers for every source that has a key. */
   source?: ModelSource;
 }
 
@@ -418,8 +418,8 @@ export class HostClient {
 
   /**
    * Key readiness (R-11): never assumed, always the host's validated answer. With a
-   * `source`, the answer is for that source alone; without one, whether any source
-   * can serve a request -- a Kilo-only setup is ready.
+   * `source`, the answer is for that source alone; without one, whether every loaded
+   * key passes -- a Kilo-only setup is ready, a rejected OpenRouter key is not.
    */
   async keyStatus(source?: ModelSource): Promise<Readiness> {
     try {

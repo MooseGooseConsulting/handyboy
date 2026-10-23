@@ -71,8 +71,8 @@ export class LlmProxy {
   /**
    * Readiness per source. Reporting OpenRouter alone blocked a Kilo-only setup and
    * passed a Kilo run with no Kilo key loaded. With `source`, `ready` is that source's
-   * answer; without it, `ready` means at least one source can serve a request, and
-   * `sources` says which.
+   * answer; without it, `ready` means at least one key is loaded and every loaded key
+   * passes its check, and `sources` says which is which.
    */
   async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
     const first = await this.#keyStatusOnce(source);
@@ -97,9 +97,13 @@ export class LlmProxy {
       const s = sources[source];
       return { ready: s.ready, ...(s.reason ? { reason: s.reason } : {}), sources };
     }
+    // A source with no key is not configured and must not block the other; a key
+    // that loaded but fails its check is broken and must not be hidden by the other.
     const all = Object.entries(sources) as Array<[KnownOrigin, SourceStatus]>;
-    if (all.some(([, s]) => s.ready)) return { ready: true, sources };
-    const reason = all.map(([name, s]) => `${name}: ${s.reason ?? 'not ready'}`).join('; ');
+    const loaded = all.filter(([name]) => this.deps.secrets.key(name) !== null);
+    if (loaded.length > 0 && loaded.every(([, s]) => s.ready)) return { ready: true, sources };
+    const blocking = loaded.length > 0 ? loaded.filter(([, s]) => !s.ready) : all;
+    const reason = blocking.map(([name, s]) => `${name}: ${s.reason ?? 'not ready'}`).join('; ');
     return { ready: false, reason, sources };
   }
 
