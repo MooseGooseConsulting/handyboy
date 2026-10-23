@@ -155,7 +155,11 @@ if [ ! -f "$EXT_DIR/manifest.json" ]; then
   echo "e2e: there is no build at $EXT_DIR; run just setup, or e2e.sh without --skip-build" >&2
   exit 1
 fi
-if [ -z "$(registrations)" ]; then
+if ! REGISTRATIONS_OUT="$(registrations)"; then
+  echo "e2e: a Chrome registration exists but could not be read completely (see the NOTE above), so which build a reload would run is unknown" >&2
+  exit 1
+fi
+if [ -z "$REGISTRATIONS_OUT" ]; then
   cat >&2 <<MSG
 e2e: no Chrome profile under $CHROME_DIR has Handyboy registered, so there is no
      telling which build a reload would run. Set HB_LIVE_CHROME_DIR to Chrome's config
@@ -164,7 +168,10 @@ e2e: no Chrome profile under $CHROME_DIR has Handyboy registered, so there is no
 MSG
   exit 1
 fi
-UNSYNCED="$(unsynced_registrations "$EXT_DIR")"
+if ! UNSYNCED="$(unsynced_registrations "$EXT_DIR")"; then
+  echo "e2e: could not check every Chrome registration (see the NOTE above), so a reload might run an unchecked build" >&2
+  exit 1
+fi
 if [ -n "$UNSYNCED" ]; then
   echo "e2e: a reload would not run this build. These profiles load Handyboy from elsewhere:" >&2
   while IFS=$'\t' read -r profile path; do

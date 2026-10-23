@@ -99,7 +99,8 @@ cmd_setup() {
   # Every profile that has it gets the build: the CLI cannot tell which profile's worker
   # answers the socket, and a reload of an unsynced profile would test stale code.
   local reg profile path us
-  reg="$(registrations)"
+  # A failed enumeration may have printed a partial list; never copy on that basis.
+  reg="$(registrations)" || die "a Chrome registration exists but could not be read completely (see the NOTE above)"
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
     echo "registered in Chrome profile \"$profile\" from $path"

@@ -10,7 +10,10 @@ ext_id() {
 # "<profile>\t<path>\t<user_scripts_enabled>" for every profile that has the extension.
 # Chrome rewrites Preferences lazily, so this can lag a click in chrome://extensions.
 # A profile whose Preferences cannot be read or parsed is not in the list at all; it is
-# unknown rather than unregistered, so it gets a NOTE on stderr instead (see below).
+# unknown rather than unregistered, so it gets a NOTE on stderr instead (see below). A
+# registration that exists but has the wrong shape is worse: stdout up to that profile
+# has already been printed, so anything but a nonzero exit would pass a partial list off
+# as a complete one. Exits 1 there; callers must treat the output as unusable.
 registrations() {
   python3 -I - "$CHROME_DIR" "$(ext_id)" <<'PY'
 import glob, json, os, sys
@@ -30,6 +33,11 @@ for prefs in sorted(glob.glob(os.path.join(root, '*', 'Preferences'))):
         s = data['extensions']['settings'][ext]
     except Exception:
         continue  # parses fine without this extension: genuinely unregistered
+    if not isinstance(s, dict):
+        # s.get below would crash after earlier profiles were already printed,
+        # and $(registrations) callers would read that partial list as complete.
+        print(f"NOTE: {prefs} has a malformed Handyboy registration; that profile's build was not checked", file=sys.stderr)
+        sys.exit(1)
     print(f"{os.path.basename(os.path.dirname(prefs))}\t{s.get('path', '')}\t{s.get('user_scripts_enabled', False)}")
 PY
 }
@@ -40,7 +48,9 @@ PY
 # no manifest (a deleted worktree) loads nothing at all, so it is only noted on stderr.
 # _metadata is Chrome's own bookkeeping inside an extension directory; wxt never writes it.
 unsynced_registrations() {
-  local build="$1" profile path us
+  local build="$1" profile path us registered
+  # A failed enumeration may have printed a partial list; never read it as complete.
+  registered="$(registrations)" || return 1
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
     [ "$path" = "$build" ] && continue
@@ -49,5 +59,5 @@ unsynced_registrations() {
       continue
     fi
     diff -rq --exclude=_metadata "$build" "$path" >/dev/null 2>&1 || printf '%s\t%s\n' "$profile" "$path"
-  done <<<"$(registrations)"
+  done <<<"$registered"
 }

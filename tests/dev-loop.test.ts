@@ -150,6 +150,18 @@ describe('scripts/e2e.sh', () => {
     expect(r.code).toBe(0);
   });
 
+  it('fails closed when a registration exists but is not an object, since a partial list must not pass for complete', () => {
+    const root = makeRoot();
+    register(root, 'Default', path.join(root, '.output/chrome-mv3'));
+    // Sorts after Default: its line is on stdout before the malformed one crashes the scan.
+    const prefs = path.join(root, 'chrome', 'Profile 4', 'Preferences');
+    write(prefs, JSON.stringify({ extensions: { settings: { [extId()]: 'bogus' } } }));
+    const r = run(root, 'e2e.sh', E2E_ARGS);
+    expect(r.out).toContain(`${prefs} has a malformed Handyboy registration; that profile's build was not checked`);
+    expect(r.calls).not.toContain('hb-reload');
+    expect(r.code).toBe(1);
+  });
+
   it('fails the run when hb-logs cannot read the extension log, since errors would go unseen', () => {
     const root = makeRoot();
     register(root, 'Default', path.join(root, '.output/chrome-mv3'));
