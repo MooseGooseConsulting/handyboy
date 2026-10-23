@@ -371,12 +371,30 @@ export class RunManager {
     const visionRefusal = validateObserveForVision(config.observe, options.followerVision);
     if (visionRefusal) return this.#refuse(runId, visionRefusal);
 
+    // Honour an abort that arrived while the tab was being looked up before
+    // anything changes the page: a cancelled pre-start run must not navigate
+    // the user's tab.
+    if (slot.abortRequested) {
+      return this.#refuse(runId, 'aborted by the user before the run began', 'aborted');
+    }
+
     let tab: TargetTab = found;
     if (options.navigateTo !== undefined) {
       const url = options.navigateTo;
+      // Refused targets are refused before the tab moves: navigating first and
+      // checking only the landed URL would already have cleared the user's tab
+      // (e.g. to about:blank) before the refusal.
+      const targetRefusal = refuseReason(url);
+      if (targetRefusal) return this.#refuse(runId, targetRefusal);
       const result = await this.#deps.driver
         .navigate(tab.id, url)
         .catch((error: unknown) => ({ ok: false as const, error: describe(error) }));
+      // A navigation already in flight cannot be undone, but honour an abort
+      // that arrived during it before the tab is re-read, input attaches, and
+      // the run is assembled on top of it.
+      if (slot.abortRequested) {
+        return this.#refuse(runId, 'aborted by the user before the run began', 'aborted');
+      }
       if (!result.ok) {
         return this.#refuse(runId, `could not open ${url}: ${result.error ?? `navigation to ${url} failed`}`);
       }
@@ -529,6 +547,11 @@ export class RunManager {
     }
 
     slot.handle = handle;
+    // `start` can emit `run.started` synchronously; a listener aborting in that
+    // window found no handle, so `abort()` only set `slot.abortRequested`.
+    // Forward the abort now that the handle exists, or the run would carry on
+    // after an abort the caller was told matched.
+    if (slot.abortRequested) handle.abort();
     void this.#deps.saveLastRunId?.(runId).catch((error: unknown) => {
       console.warn('[handyboy] could not persist session:lastRunId', error);
     });

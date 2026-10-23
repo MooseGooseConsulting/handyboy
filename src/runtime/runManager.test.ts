@@ -356,6 +356,207 @@ describe('RunManager', () => {
     expect(manager.activeRunId).toBeUndefined();
   });
 
+  it('an abort that arrives before a dev-trigger navigation is honoured without navigating the tab', async () => {
+    let releaseTab!: () => void;
+    const tabLookup = new Promise<void>((resolve) => {
+      releaseTab = resolve;
+    });
+    const navigated: string[] = [];
+    const base = pageDriver(() => 'Wool socks');
+    const driver: RuntimeDriver = {
+      ...base,
+      navigate: async (_tabId, url) => {
+        navigated.push(url);
+        return { ok: true as const };
+      },
+    };
+    let begun = false;
+    const manager = new RunManager({
+      driver,
+      tabs: {
+        async activeTab() {
+          await tabLookup;
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+      },
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'run-cancelled',
+      start: (options) => {
+        begun = true;
+        return controllableRun(options.runId ?? 'missing-run').handle;
+      },
+    });
+
+    const starting = manager.start({
+      prompt: 'cancel me',
+      config: panelConfig(),
+      navigateTo: 'https://shop.example/sale',
+    });
+    expect(manager.abort('run-cancelled')).toBe(true);
+    releaseTab();
+    const result = await starting;
+
+    expect(result.ok).toBe(false);
+    expect(await result.done).toMatchObject({ status: 'aborted', steps: 0 });
+    expect(navigated).toEqual([]);
+    expect(begun).toBe(false);
+    expect(manager.activeRunId).toBeUndefined();
+  });
+
+  it('a dev-trigger navigation to a refused target refuses before the tab moves', async () => {
+    const navigated: string[] = [];
+    const base = pageDriver(() => 'Wool socks');
+    const driver: RuntimeDriver = {
+      ...base,
+      navigate: async (_tabId, url) => {
+        navigated.push(url);
+        return { ok: true as const };
+      },
+    };
+    let begun = false;
+    const manager = new RunManager({
+      driver,
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+      },
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'run-refused-target',
+      start: (options) => {
+        begun = true;
+        return controllableRun(options.runId ?? 'missing-run').handle;
+      },
+    });
+
+    const result = await manager.start({
+      prompt: 'open a browser page',
+      config: panelConfig(),
+      navigateTo: 'about:blank',
+    });
+
+    expect(result.ok).toBe(false);
+    expect((await result.done).message).toContain('refusing to run on a browser page');
+    expect(navigated).toEqual([]);
+    expect(begun).toBe(false);
+  });
+
+  it('an abort that arrives while a dev-trigger navigation is in flight ends the run as aborted before it begins', async () => {
+    let enteredNav!: () => void;
+    let releaseNav!: () => void;
+    const navInFlight = new Promise<void>((resolve) => {
+      releaseNav = resolve;
+    });
+    const navEntered = new Promise<void>((resolve) => {
+      enteredNav = resolve;
+    });
+    const base = pageDriver(() => 'Wool socks');
+    const driver: RuntimeDriver = {
+      ...base,
+      navigate: async (_tabId, _url) => {
+        enteredNav();
+        await navInFlight;
+        return { ok: true as const };
+      },
+    };
+    let begun = false;
+    const manager = new RunManager({
+      driver,
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+      },
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'run-mid-flight',
+      start: (options) => {
+        begun = true;
+        return controllableRun(options.runId ?? 'missing-run').handle;
+      },
+    });
+
+    const starting = manager.start({
+      prompt: 'cancel mid-flight',
+      config: panelConfig(),
+      navigateTo: 'https://shop.example/sale',
+    });
+    await navEntered;
+    expect(manager.abort('run-mid-flight')).toBe(true);
+    releaseNav();
+    const result = await starting;
+
+    expect(result.ok).toBe(false);
+    expect(await result.done).toMatchObject({ status: 'aborted', steps: 0 });
+    expect(begun).toBe(false);
+  });
+
+  it('an abort issued from a run.started listener still reaches the run when the handle lands after the emission', async () => {
+    let startedEmitted = false;
+    const manager = new RunManager({
+      driver: pageDriver(() => 'Wool socks'),
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+      },
+      host: quietHost,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'run-sync-abort',
+      start: (options) => {
+        // Production `startRun` emits run.started synchronously, so a listener
+        // aborting on it runs before `start` has returned its handle.
+        options.onEvent({
+          kind: 'run.started',
+          runId: options.runId ?? '',
+          prompt: options.prompt,
+          config: options.config,
+          tabId: options.tabId ?? -1,
+          url: options.url ?? '',
+          at: CLOCK,
+        });
+        return controllableRun(options.runId ?? 'missing-run').handle;
+      },
+    });
+    manager.onEvent((runId, event) => {
+      if (event.kind !== 'run.started') return;
+      startedEmitted = true;
+      expect(manager.abort(runId)).toBe(true);
+    });
+
+    const started = await manager.start({ prompt: 'find wool socks', config: panelConfig() });
+
+    expect(started.ok).toBe(true);
+    expect(startedEmitted).toBe(true);
+    expect((await started.done).status).toBe('aborted');
+  });
+
   it('a start whose run seam throws frees the run slot, so the next start runs', async () => {
     let calls = 0;
     const manager = new RunManager({
