@@ -38,3 +38,21 @@ describe('HostClient log forwarding', () => {
     expect(port.sent).toHaveLength(1);
   });
 });
+
+describe('HostClient settling', () => {
+  it('a generic host error for an llm request id settles that stream instead of leaving it pending', () => {
+    const port = new FakeNativePort();
+    const client = new HostClient(() => port);
+    const errors: Array<[string, string]> = [];
+    const id = client.sendLlmRequest(
+      { url: '' },
+      { onChunk: () => {}, onEnd: () => {}, onError: (code, message) => errors.push([code, message]) },
+    );
+    port.emit({ type: 'error', id, code: 'bad_request', message: 'llm.request requires a string "url"' });
+    expect(errors).toEqual([['bad_request', 'llm.request requires a string "url"']]);
+
+    // Settled means forgotten: a late duplicate must not fire the handler twice.
+    port.emit({ type: 'llm.error', id, code: 'upstream', message: 'late' });
+    expect(errors).toHaveLength(1);
+  });
+});

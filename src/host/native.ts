@@ -582,6 +582,15 @@ export class HostClient {
         if (pending) {
           this.#pending.delete(msg.id);
           pending.reject(new HostError(msg.code, msg.message));
+          return;
+        }
+        // The host answers some llm.request failures (validation, an internal throw)
+        // with a generic `error` rather than `llm.error`; a stream that only listened
+        // for llm.* would never settle.
+        const stream = this.#llmStreams.get(msg.id);
+        if (stream) {
+          this.#llmStreams.delete(msg.id);
+          stream.onError(msg.code, msg.message);
         }
         return;
       }

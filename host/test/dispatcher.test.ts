@@ -78,3 +78,24 @@ describe('dispatcher', () => {
     });
   });
 });
+
+describe('dispatcher failures', () => {
+  it('a handler that throws still answers the request id, so the extension does not wait forever', async () => {
+    const sent: OutboundMsg[] = [];
+    const llm = {
+      keyStatus: async () => {
+        throw new Error('secret store exploded');
+      },
+      request: async () => {
+        throw new Error('proxy exploded');
+      },
+    } as unknown as LlmProxy;
+    const dispatcher = new Dispatcher({ send: (msg) => sent.push(msg), llm, runsDir: '/tmp/unused-runs' });
+    await dispatcher.handle({ type: 'key.status', id: 'k1' });
+    await dispatcher.handle({ type: 'llm.request', id: 'r1', url: 'chat/completions' });
+    expect(sent).toEqual([
+      { type: 'error', id: 'k1', code: 'internal', message: 'secret store exploded' },
+      { type: 'llm.error', id: 'r1', code: 'internal', message: 'proxy exploded' },
+    ]);
+  });
+});

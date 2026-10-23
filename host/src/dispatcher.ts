@@ -3,6 +3,7 @@ import { appendExtLog, ExtLogError, mirrorToHostLog, toEntry } from './extlog.ts
 import { getInjector, type InputInjector } from './input/index.ts';
 import type { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
+import { failureReply } from './outbound.ts';
 import type {
   ArtifactSaveMsg,
   ErrorCode,
@@ -50,7 +51,25 @@ export class Dispatcher {
     this.#deps.send({ type: 'error', id, code, message });
   }
 
+  /**
+   * Every request with an id gets a terminal reply. A handler that throws used to
+   * surface only as a host.log line in main.ts, leaving the extension's promise
+   * (or llm stream) for that id pending forever.
+   */
   async handle(raw: unknown): Promise<void> {
+    try {
+      await this.#handle(raw);
+    } catch (err) {
+      const message = (err as Error).message;
+      log('error', 'dispatcher threw', { error: message });
+      const { type, id } = (raw ?? {}) as { type?: unknown; id?: unknown };
+      if (typeof type === 'string' && typeof id === 'string') {
+        this.#deps.send(failureReply(type, id, 'internal', message));
+      }
+    }
+  }
+
+  async #handle(raw: unknown): Promise<void> {
     if (typeof raw !== 'object' || raw === null || typeof (raw as { type?: unknown }).type !== 'string') {
       return this.#fail(undefined, 'bad_request', 'message must be an object with a string "type"');
     }
