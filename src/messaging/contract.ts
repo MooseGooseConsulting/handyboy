@@ -103,6 +103,9 @@ export interface Readiness {
   reason?: string;
 }
 
+/** Role sources only: omitted sources retain Config's OpenRouter default. */
+export type ReadinessSelection = Pick<Config, 'leaderModelSource' | 'followerModelSource'>;
+
 /** A stored userscript (R-09/R-10). */
 export interface Userscript {
   id: string;
@@ -136,7 +139,8 @@ export interface PanelToWorker {
   'run.resume': { runId: RunId };
   'run.abort': { runId: RunId };
   'models.list': Record<string, never>;
-  'readiness.get': Record<string, never>;
+  /** Echo requestId so a late answer cannot validate a newer selection or refresh. */
+  'readiness.get': ReadinessSelection & { requestId: string };
   'userscript.run': { scriptId: string; code?: string };
   'userscript.list': Record<string, never>;
   'userscript.save': Userscript;
@@ -158,7 +162,7 @@ export interface PanelToWorker {
 export interface WorkerToPanel {
   'run.event': { runId: RunId; event: RunEvent };
   'models.list': { models: ModelInfo[] } | { error: string };
-  'readiness': Readiness;
+  'readiness': Readiness & { requestId: string };
   'userscript.result': UserscriptRunResult;
   'userscript.list': { scripts: Userscript[] };
   'userscript.saved': { filename: string; path: string; bytes: number; note?: string };

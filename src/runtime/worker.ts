@@ -22,6 +22,7 @@ import {
   type PanelToWorker,
   type PanelToWorkerMessage,
   type Readiness,
+  type ReadinessSelection,
   type RunEvent,
   type RunId,
   type WorkerToPanel,
@@ -51,7 +52,7 @@ export interface DevRunStart {
 
 /** The slice of `HostClient` the worker uses. */
 export interface HostPort {
-  keyStatus(): Promise<Readiness>;
+  keyStatus(source?: ModelSource): Promise<Readiness>;
   listModels(): Promise<ModelInfo[]>;
   appendRunLog(runId: string, event: RunEvent | HostRunEndEvent): void;
   onRunStart(handler: (msg: DevRunStart) => void): () => void;
@@ -203,29 +204,42 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
   }
 
-  async function readiness(): Promise<Readiness> {
-    try {
-      const status = await deps.host.keyStatus();
-      if (status.hostConnected) return status;
-      return {
-        hostConnected: false,
-        keyReady: false,
-        reason: status.reason ? `${HOST_UNREACHABLE_REASON} (${status.reason})` : HOST_UNREACHABLE_REASON,
-      };
-    } catch (error) {
-      return {
-        hostConnected: false,
-        keyReady: false,
-        reason: `${HOST_UNREACHABLE_REASON} (${describe(error)})`,
-      };
-    }
+  async function readiness(selection: ReadinessSelection): Promise<Readiness> {
+    // Match Config/createChatModel's legacy default, even when just one role omits it.
+    const sources = [...new Set([
+      selection.leaderModelSource ?? 'openrouter',
+      selection.followerModelSource ?? 'openrouter',
+    ])];
+    const statuses = await Promise.all(sources.map(async (source) => {
+      try {
+        return { source, status: await deps.host.keyStatus(source) };
+      } catch (error) {
+        return { source, status: { hostConnected: false, keyReady: false, reason: describe(error) } };
+      }
+    }));
+    const hostConnected = statuses.every(({ status }) => status.hostConnected);
+    const keyReady = hostConnected && statuses.every(({ status }) => status.keyReady);
+    const failures = statuses.filter(({ status }) => !status.hostConnected || !status.keyReady);
+    const reason = failures.map(({ source, status }) => {
+      if (!status.hostConnected) {
+        return `${source}: ${HOST_UNREACHABLE_REASON}${status.reason ? ` (${status.reason})` : ''}`;
+      }
+      return `${source}: ${status.reason ?? 'No provider key is available.'}`;
+    }).join('; ');
+    return { hostConnected, keyReady, ...(reason ? { reason } : {}) };
+  }
+
+  async function startReadyRun(options: StartOptions): Promise<StartResult> {
+    const status = await readiness(options.config);
+    if (!status.keyReady) throw new Error(status.reason);
+    return deps.runManager.start(options);
   }
 
   async function handlePanelMessage(channel: PanelChannel, message: PanelToWorkerMessage): Promise<void> {
     switch (message.type) {
       case 'run.start': {
         const { prompt, config } = message.payload;
-        await deps.runManager.start({ prompt, config, followerVision: message.payload.followerVision });
+        await startReadyRun({ prompt, config, followerVision: message.payload.followerVision });
         return;
       }
       case 'run.pause':
@@ -241,7 +255,9 @@ export function createWorker(deps: WorkerDeps): Worker {
         reply(channel, { type: 'models.list', payload: await models() });
         return;
       case 'readiness.get':
-        reply(channel, { type: 'readiness', payload: await readiness() });
+        reply(channel, { type: 'readiness', payload: {
+          ...await readiness(message.payload), requestId: message.payload.requestId,
+        } });
         return;
       case 'runlog.replay': {
         const { runId } = message.payload;
@@ -383,7 +399,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       // The url is opened by start itself: navigating here first, before start could
       // refuse, sent the tab of a run already in progress elsewhere, and start then
       // looked the active tab up a second time and could bind a different one.
-      const { done } = await deps.runManager.start({
+      const { done } = await startReadyRun({
         prompt: msg.prompt,
         config,
         runId: msg.runId,

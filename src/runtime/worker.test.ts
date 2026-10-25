@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { RunEndedEvent, RunHandle, StartRunOptions } from '@/src/agent/run';
 import { createChannel, createFakePortPair, type Envelope, type RunEvent } from '@/src/messaging';
 import type { Config } from '@/src/storage';
+import { FakeNativePort, HostClient } from '@/src/host/native';
 import { RunManager, type HostRunEndEvent, type RunLogSink, type TabsPort } from './runManager';
 import type { RuntimeDriver } from './pageTools';
 import { createWorker, type DevRunStart, type HostPort } from './worker';
@@ -439,6 +440,177 @@ describe('worker', () => {
       page: 'navigated to https://garden.example/rakes',
     });
     expect(pages.get(22)).toBe('Inbox');
+  });
+});
+
+/** Real worker/manager/native-client wiring; only the host and browser effects are fake. */
+function readinessFixture(stored = panelConfig()) {
+  const native = new FakeNativePort();
+  const host = new HostClient(() => native);
+  const createModel = vi.fn(() => model());
+  const saveLastRunId = vi.fn(async () => {});
+  const navigate = vi.fn();
+  const start = vi.fn((options: StartRunOptions) => idleHandle(options.runId!));
+  const manager = new RunManager({
+    driver: pageDriver(new Map([[11, 'fixture page']]), navigate),
+    tabs: {
+      activeTab: async () => ({ id: 11, url: 'https://example.test/' }),
+      get: async () => ({ id: 11, url: 'https://example.test/' }),
+    },
+    host,
+    createModel,
+    saveLastRunId,
+    runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+    listAvailableUserscripts: async () => [],
+    start,
+  });
+  const managerStart = vi.spyOn(manager, 'start');
+  const worker = createWorker({ host, runManager: manager, getConfig: async () => stored });
+  const [panelPort, workerPort] = createFakePortPair();
+  const messages: Envelope[] = [];
+  panelPort.onMessage((message) => messages.push(message));
+  worker.connect(workerPort);
+  const panel = createChannel(panelPort);
+  host.connect();
+  const queries = () => native.sent.filter((m) => m.type === 'key.status');
+  const answer = (missing?: string) => {
+    for (const query of queries()) {
+      native.emit({ type: 'key.status.result', id: query.id, ready: query.source !== missing,
+        ...(query.source === missing ? { reason: 'key not configured' } : {}) });
+    }
+  };
+  const expectNotStarted = () => {
+    expect(managerStart).not.toHaveBeenCalled();
+    expect(createModel).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(saveLastRunId).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(manager.activeRunId).toBeUndefined();
+    expect(native.sent.some((m) => m.type === 'llm.request')).toBe(false);
+  };
+  return { host, native, panel, messages, manager, managerStart, createModel, start,
+    queries, answer, expectNotStarted, close: () => { worker.dispose(); panel.close(); host.close(); } };
+}
+
+describe('selected-source readiness at the worker boundary', () => {
+  it.each([
+    ['openrouter', 'leader'], ['kilo', 'leader'], ['openrouter', 'follower'], ['kilo', 'follower'],
+  ] as const)('a missing %s key for the %s blocks both readiness and a direct start despite the other ready key', async (missing, role) => {
+    const f = readinessFixture();
+    try {
+      const other = missing === 'openrouter' ? 'kilo' : 'openrouter';
+      const config: Config = { ...panelConfig(), leaderModelSource: role === 'leader' ? missing : other,
+        followerModelSource: role === 'follower' ? missing : other };
+      f.panel.send('readiness.get', { ...config, requestId: 'selection-1' });
+      expect(f.queries().map((q) => q.source)).toEqual([config.leaderModelSource, config.followerModelSource]);
+      f.answer(missing);
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({
+        type: 'readiness', payload: { hostConnected: true, keyReady: false,
+          reason: `${missing}: key not configured`, requestId: 'selection-1' },
+      })));
+      f.panel.send('run.start', { prompt: 'fixture', config });
+      expect(f.queries()).toHaveLength(4); // Start revalidates, independent of any panel answer.
+      f.answer(missing);
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({
+        type: 'error', payload: { inReplyTo: 'run.start', message: `${missing}: key not configured` },
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it.each([
+    { name: 'mixed sources', selection: { leaderModelSource: 'kilo', followerModelSource: 'openrouter' }, sources: ['kilo', 'openrouter'] },
+    { name: 'shared Kilo source checked once', selection: { leaderModelSource: 'kilo', followerModelSource: 'kilo' }, sources: ['kilo'] },
+    { name: 'legacy omitted sources use OpenRouter once', selection: {}, sources: ['openrouter'] },
+    { name: 'only the omitted role defaults to OpenRouter', selection: { leaderModelSource: 'kilo' }, sources: ['kilo', 'openrouter'] },
+  ] as const)('$name starts only after all selected keys are ready', async ({ selection, sources }) => {
+    const f = readinessFixture();
+    try {
+      // Arbitrary model ids remain allowed, regardless of pricing or catalog membership.
+      const config = { ...panelConfig(), leaderModel: 'any-model', ...selection };
+      f.panel.send('run.start', { prompt: 'fixture', config });
+      expect(f.queries().map((q) => q.source)).toEqual(sources);
+      f.expectNotStarted();
+      if (sources.length > 1) {
+        f.native.emit({ type: 'key.status.result', id: f.queries()[0]!.id, ready: true });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        f.expectNotStarted(); // One ready source cannot release a mixed-source run.
+      }
+      f.answer();
+      await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
+      expect(f.managerStart).toHaveBeenCalledWith({ prompt: 'fixture', config, followerVision: undefined });
+      expect(f.createModel.mock.calls).toHaveLength(2);
+    } finally { f.close(); }
+  });
+
+  it.each(['disconnect', 'host error', 'thrown error'] as const)('%s fails closed with connection diagnostics before starting', async (failure) => {
+    const f = readinessFixture();
+    try {
+      if (failure === 'thrown error') vi.spyOn(f.host, 'keyStatus').mockRejectedValue(new Error('fixture transport failure'));
+      f.panel.send('readiness.get', { requestId: 'connection-check' });
+      f.panel.send('run.start', { prompt: 'fixture', config: panelConfig() });
+      if (failure === 'disconnect') f.native.disconnect();
+      if (failure === 'host error') {
+        for (const q of f.queries()) f.native.emit({ type: 'error', id: q.id, code: 'io', message: 'fixture transport failure' });
+      }
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({ type: 'error', payload: {
+        inReplyTo: 'run.start', message: expect.stringContaining('native host not reachable'),
+      } })));
+      expect(f.messages).toContainEqual(expect.objectContaining({ type: 'readiness', payload: {
+        requestId: 'connection-check', hostConnected: false, keyReady: false,
+        reason: expect.stringContaining('native host not reachable'),
+      } }));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it.each([false, true])('host-trigger startup checks the effective stored config with overrides=%s before navigation', async (override) => {
+    const f = readinessFixture({ ...panelConfig(), leaderModelSource: 'kilo', followerModelSource: 'kilo' });
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture', url: 'https://example.test/next',
+        ...(override ? { options: { leaderModelSource: 'openrouter' } } : {}) });
+      await vi.waitFor(() => expect(f.queries()).toHaveLength(override ? 2 : 1));
+      expect(f.queries().map((q) => q.source)).toEqual(override ? ['openrouter', 'kilo'] : ['kilo']);
+      f.answer(override ? 'openrouter' : 'kilo');
+      await vi.waitFor(() => expect(f.native.sent).toContainEqual(expect.objectContaining({
+        type: 'runlog.append', runId: 'cli-fixture', event: expect.objectContaining({
+          type: 'run.end', status: 'error', steps: 0,
+          message: `${override ? 'openrouter' : 'kilo'}: key not configured`,
+        }),
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it('a host-trigger override to a ready source starts even if the stored source has no key', async () => {
+    const f = readinessFixture();
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture',
+        options: { leaderModelSource: 'kilo', followerModelSource: 'kilo', observe: 'both' } });
+      await vi.waitFor(() => expect(f.queries().map((q) => q.source)).toEqual(['kilo']));
+      f.answer('openrouter');
+      await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
+      expect(f.managerStart).toHaveBeenCalledWith(expect.objectContaining({
+        config: { ...panelConfig(), leaderModelSource: 'kilo', followerModelSource: 'kilo', observe: 'both' },
+      }));
+    } finally { f.close(); }
+  });
+
+  it.each(['dom', 'pixels', 'both'] as const)('selected-source checking preserves %s behavior for a known text-only follower', async (observe) => {
+    const f = readinessFixture();
+    try {
+      f.panel.send('run.start', { prompt: 'fixture', config: { ...panelConfig(), observe }, followerVision: false });
+      f.answer();
+      await vi.waitFor(() => expect(f.managerStart).toHaveBeenCalledOnce());
+      const result = await f.managerStart.mock.results[0]!.value;
+      expect(result.ok).toBe(observe === 'dom');
+      if (observe === 'dom') expect(f.start).toHaveBeenCalledOnce();
+      else {
+        expect(f.createModel).not.toHaveBeenCalled();
+        expect(f.start).not.toHaveBeenCalled();
+        expect((await result.done).message).toContain('vision');
+      }
+    } finally { f.close(); }
   });
 });
 
