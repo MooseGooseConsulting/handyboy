@@ -450,7 +450,7 @@ export class RunManager {
       {
         onRebind: (oldTabId, freshTabId) => {
           recordTabReplaced(freshTabId, oldTabId);
-          console.warn(`[nanobrowser] run tab ${oldTabId} was replaced by tab ${freshTabId}`);
+          console.warn(`[handyboy] run tab ${oldTabId} was replaced by tab ${freshTabId}`);
         },
       },
     );
@@ -584,7 +584,7 @@ export class RunManager {
           // tab to the very tab that is mid-remove. `currentTabId`: Chrome may have
           // swapped the tab's id during the run.
           await this.#deps.tabs.remove?.(currentTabId(tab.id)).catch((error: unknown) => {
-            console.warn('[nanobrowser] could not close the run tab', error);
+            console.warn('[handyboy] could not close the run tab', error);
           });
         }
         this.#release(slot);
