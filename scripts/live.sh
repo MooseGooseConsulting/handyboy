@@ -75,11 +75,12 @@ cmd_setup() {
   # (a worktree builds into its own .output). Copy this build there so a reload sees it.
   # Every profile that has it gets the build: the CLI cannot tell which profile's worker
   # answers the socket, and a reload of an unsynced profile would test stale code.
-  local reg profile path us
+  local reg profile path us live_reg=0
   # A failed enumeration may have printed a partial list; never copy on that basis.
   reg="$(registrations)" || die "a Chrome registration exists but could not be read completely (see the NOTE above)"
   while IFS=$'\x1f' read -r profile path us; do
     [ -n "$profile" ] || continue
+    [ -d "$path" ] && live_reg=1
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ -z "$path" ]; then
       # A packaged install (crx or Web Store) loads from Chrome's own storage,
@@ -132,6 +133,11 @@ cmd_setup() {
   fi
 
   step "extension"
+  # A registered path can be a checkout that has since moved. Reloading then kills the
+  # working worker with nothing behind it to load, so stop before hb-reload instead.
+  if [ -n "$reg" ] && [ "$live_reg" = 0 ]; then
+    die "the registered build directory is gone; Load unpacked again from $EXT_DIR"
+  fi
   if host_up; then
     host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "hb-reload failed (host/bin/hb-logs)"
     echo "reloaded in place"
