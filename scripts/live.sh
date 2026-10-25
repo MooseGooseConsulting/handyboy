@@ -93,10 +93,11 @@ cmd_setup() {
   # (a worktree builds into its own .output). Copy this build there so a reload sees it.
   # Every profile that has it gets the build: the CLI cannot tell which profile's worker
   # answers the socket, and a reload of an unsynced profile would test stale code.
-  local reg profile path us
+  local reg profile path us live_reg=0
   reg="$(registrations)"
   while IFS=$'\t' read -r profile path us; do
     [ -n "$profile" ] || continue
+    [ -d "$path" ] && live_reg=1
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ "$path" != "$EXT_DIR" ]; then
       # rsync --delete empties whatever is there, so only overwrite a directory that still
@@ -135,6 +136,11 @@ cmd_setup() {
   fi
 
   step "extension"
+  # A registered path can be a checkout that has since moved. Reloading then kills the
+  # working worker with nothing behind it to load, so stop before hb-reload instead.
+  if [ -n "$reg" ] && [ "$live_reg" = 0 ]; then
+    die "the registered build directory is gone; Load unpacked again from $EXT_DIR"
+  fi
   if host_up; then
     host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "hb-reload failed (host/bin/hb-logs)"
     echo "reloaded in place"

@@ -23,7 +23,7 @@ export default defineBackground(() => {
   // Chrome does not start an MV3 service worker on browser launch unless the worker
   // registered a startup listener the last time it ran. Without this, a Chrome restart
   // leaves the worker inactive, so connectNative never runs and the host never exists
-  // for nb-run / e2e. The listener body can be empty; registration is the wake.
+  // for hb-run / e2e. The listener body can be empty; registration is the wake.
   // https://groups.google.com/a/chromium.org/g/chromium-extensions/c/XY6u0raKRJQ
   chrome.runtime.onStartup.addListener(() => {});
 

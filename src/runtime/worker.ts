@@ -387,7 +387,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
 
     try {
-      // nb-run sends no vision metadata, so followerVision stays unknown (allowed):
+      // hb-run sends no vision metadata, so followerVision stays unknown (allowed):
       // the pixels/text-only refusal only fires on the panel path, which looks the
       // follower up in its fetched catalog. A dev-trigger vision option is future work.
       const { done } = await deps.runManager.start({ prompt: msg.prompt, config, runId: msg.runId });
@@ -436,7 +436,7 @@ export function createWorker(deps: WorkerDeps): Worker {
 
   // A restart mid-run must terminate the run even when no panel ever reopens:
   // restore the last watched run once, so an unattended dev/CLI run gets its
-  // clean terminal event and nb-run its run.end instead of hanging. Best effort;
+  // clean terminal event and hb-run its run.end instead of hanging. Best effort;
   // a missing id or store simply means there is nothing to restore.
   if (deps.getLastRunId) {
     const getLastRunId = deps.getLastRunId;

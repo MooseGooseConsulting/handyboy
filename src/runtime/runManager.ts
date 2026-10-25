@@ -257,7 +257,7 @@ export class RunManager {
    * A restored log with no terminal event is a run that died with the old
    * worker: it gets one clean `run.ended{error}` naming the restart, published
    * like any other event so the panel, the host log and the store agree, plus the
-   * `run.end` frame nb-run exits on (devRun's `end()` died with the old worker,
+   * `run.end` frame hb-run exits on (devRun's `end()` died with the old worker,
    * so without this an unattended run would stream its terminal event and then
    * hang). The alternative — silently resuming a graph against a tab that may
    * have moved on — would be an invented continuation.
@@ -278,7 +278,7 @@ export class RunManager {
     if (last?.kind === 'run.ended') {
       // Finished before the restart — but devRun's run.end frame goes out after the
       // terminal snapshot lands, so it may still have died with the old worker while
-      // nb-run waits. Re-emit it from the stored terminal: the trigger closes
+      // hb-run waits. Re-emit it from the stored terminal: the trigger closes
       // subscribers idempotently, and log readers last-win, so a duplicate only
       // costs a log line while a missing frame hangs the client.
       try {
