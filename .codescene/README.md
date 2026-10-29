@@ -1,8 +1,13 @@
 # CodeScene configuration for handyboy
 
-This directory holds the repository's code-health rules, its PR quality gates, and the
-refactoring action plan that the rules are meant to feed. It exists because every file here is
-written by coding agents, and the harness those agents run inside is checked in beside the code:
+This directory holds the repository's code-health rules and its PR quality gates, and it is the
+place the refactoring action plan the rules are meant to feed will live. **That plan is not in this
+change.** It ships in the stacked pull request `docs/codescene-refactor-plan`, which adds
+`.codescene/refactor-action-plan.md` on top of this branch; every reference to it below is a
+forward reference to that stacked PR, and nothing in this configuration file depends on the plan
+existing. This directory's rules and gates work exactly as written with no plan present. It exists
+because every file here is written by coding agents, and the harness those agents run inside is
+checked in beside the code:
 `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, `.agents/hooks.json`,
 `.factory/settings.json`, the `.entire/` session config, `.github/hooks/entire.json`, and the two
 hook plugins those installers generate — `.opencode/plugins/entire.ts` and
@@ -31,7 +36,7 @@ edited by an agent.
 
 | Path | Files | What it is | Who consumes it |
 | --- | --- | --- | --- |
-| `src/ui/` | 49 | Side panel, run log, state reducers, shared fields — 37 of the repository's 37 `.tsx` files | `entrypoints/sidepanel/` |
+| `src/ui/` | 49 | Side panel, run log, state reducers, shared fields — 35 of the repository's 37 `.tsx` files (the other two are `entrypoints/sidepanel/App.tsx` and `main.tsx`) | `entrypoints/sidepanel/` |
 | `src/runtime/` | 11 | The single run slot (`runManager.ts`), the tool implementations (`pageTools.ts`), the panel message hub (`worker.ts`), durability and error log | the service worker and the graph |
 | `src/agent/` | 14 | The LangGraph Leader/Follower graph, the toolset the model sees, model handles, IndexedDB checkpointer, policy and state | `src/runtime/` |
 | `src/page/` | 8 | The injected page world: accessibility snapshot, accessible names, humanised actions, tab driver | `entrypoints/injected-content.ts` |
@@ -140,9 +145,11 @@ writes run logs and artifacts under `~/.local/share/handyboy/`, and serves the d
 because they are two processes; they carry the same numbers because a change that widens one end
 of the protocol has to answer to the same guardrail as the other.
 
-Nine structural rules at `1.0` and nothing relaxed. `Dispatcher.handle` (`host/src/dispatcher.ts`
-60–201) is cc 38 with three compound conditionals in a 116-line body covering eight message types
-plus an input family; `HostClient.onMessage` (`src/host/native.ts` 569–644) is cc 26 and
+Nine structural rules at `1.0` and nothing relaxed. `Dispatcher.handle` — the public wrapper at
+60–71 plus its private `#handle` at 73–201, which `cs` reports as one function at cc 38 and 116
+lines — covers seven single-type messages plus the four-variant `input.*` union (`InboundMsg` in
+`host/src/protocol.ts:97-105` has eight members; the eighth is `InputMsg`, whose `type` is itself
+that union). `HostClient.onMessage` (`src/host/native.ts` 569–644) is cc 26 and
 `HostClient.listModels` (441–474) is cc 17 with three bumps. Both files are measured, not
 exempted: `host/src/llm.ts` sits at 8.54, `src/host/native.ts` at 8.35, and they stay there.
 
@@ -179,7 +186,7 @@ Road Ahead` already report at full weight.
 ### 13. Catch-all
 
 All 23 rules at `1.0` with framework thresholds for the detected language. Everything not named
-above lands here: `src/ui/**` (49 files, 37 of them `.tsx`), `src/input/**`, `src/messaging/**`,
+above lands here: `src/ui/**` (49 files, 35 of them `.tsx`), `src/input/**`, `src/messaging/**`,
 `src/storage/**`, `src/stealth/**`, `entrypoints/**`, `scripts/**`, `docs/`, `.github/`, and any
 directory a future change introduces. A new directory starts under the full guardrail and has to
 earn a rule set of its own with measurements rather than inheriting a relaxed one.
@@ -307,7 +314,8 @@ reads the code in the pull request and nothing else: not a person, not a team, n
    to its own rule set only with a measurement in this file: `cs review` before and after on every
    file in it, and a line-of-code count for the largest.
 2. Never widen a threshold to make a file pass. If a file is too big or too branchy, the answer is
-   `.codescene/refactor-action-plan.md`, not a number.
+   the refactoring plan (`.codescene/refactor-action-plan.md`, added by the stacked
+   `docs/codescene-refactor-plan` PR), not a number.
 3. Never edit `.opencode/plugins/**` or `.pi/extensions/**`. Regenerate them with
    `entire enable --agent <agent>`.
 4. A 10.0 score on an excluded path means "not scored", not "clean". Say so when quoting it.

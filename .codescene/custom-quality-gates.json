@@ -1,5 +1,5 @@
 {
-  "usage": "PR quality gates for handyboy, evaluated first-match-wins from the top. This repository is authored entirely by coding agents - the harness is checked in with the code, in `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, `.agents/hooks.json`, `.factory/settings.json`, `.entire/`, `.github/hooks/entire.json`, `.opencode/plugins/` and `.pi/extensions/` - so a gate may only ever depend on the code in front of it. Every rule set below keys off a file path, the eleven explicit gate maps all set `tag_codeowners_for_critical_code` to false, and the catch-all names the `pay_down_tech_debt` profile rather than a map, which is the shape the schema documents for a baseline. A rule set with no matching_content_path leaves every gate off, so the two generated Entire hook plugins and every path whose health this repository does not own are listed first and explicitly disabled. The test suites, the native host and every first-party extension layer turn every gate on, because a repository whose code is written by agents has to be blocked by a regression in the code an agent just wrote, not by the pre-existing state of a file nobody touched.",
+  "usage": "PR quality gates for handyboy, evaluated first-match-wins from the top. This repository is authored entirely by coding agents - the harness is checked in with the code, in `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, `.agents/hooks.json`, `.factory/settings.json`, `.entire/`, `.github/hooks/entire.json`, `.opencode/plugins/` and `.pi/extensions/` - so a gate may only ever depend on the code in front of it. Every rule set below keys off a file path, the twelve explicit gate maps all set `tag_codeowners_for_critical_code` to false, and the catch-all names the `pay_down_tech_debt` profile rather than a map, which is the shape the schema documents for a baseline. A rule set with no matching_content_path leaves every gate off, so the two generated Entire hook plugins and every path whose health this repository does not own are listed first and explicitly disabled. The test suites, the native host and every first-party extension layer turn every gate on, because a repository whose code is written by agents has to be blocked by a regression in the code an agent just wrote, not by the pre-existing state of a file nobody touched.",
   "rule_sets": [
     {
       "matching_content_path": ".opencode/plugins/**",
@@ -97,7 +97,7 @@
         "refactoring_goals": true,
         "tag_codeowners_for_critical_code": false
       },
-      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false. The routing and proxy shapes at the top of `host/src/` are measured, not exempted: `Dispatcher.handle` sits at cc 38 across a 116-line body and `HostClient.listModels` at cc 17, and a change that makes either worse is refused."
+      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false. The routing and proxy shapes at the top of `host/src/` are measured, not exempted: `Dispatcher.handle` sits at cc 38 across a 116-line body, and a change that makes it worse is refused."
     },
     {
       "matching_content_path": "src/host/**/*.ts",
@@ -111,7 +111,7 @@
         "refactoring_goals": true,
         "tag_codeowners_for_critical_code": false
       },
-      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false."
+      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false. `HostClient.listModels` at cc 17 and `HostClient.onMessage` at cc 26 are measured here, not exempted."
     },
     {
       "matching_content_path": "src/page/**/*.ts",
@@ -125,7 +125,7 @@
         "refactoring_goals": true,
         "tag_codeowners_for_critical_code": false
       },
-      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false. `refactoring_goals` is on so a pull request touching `src/page/actions.ts` has to name the goal in .codescene/refactor-action-plan.md that it serves or does not violate."
+      "quality_gates_doc": "All enabled gates on; `tag_codeowners_for_critical_code` is false. `refactoring_goals` is on so a pull request touching `src/page/actions.ts` has to name the goal in .codescene/refactor-action-plan.md (added by the stacked docs/codescene-refactor-plan PR, not by this change) that it serves or does not violate."
     },
     {
       "matching_content_path": "src/agent/**/*.ts",
