@@ -119,12 +119,17 @@ Files: `src/page/actions.ts` (1108 / 612, score **5.44**).
 ### What We Hope to Achieve
 
 An agent asked to make `type` work on one more kind of editable element should change one function and
-know it did not alter how a click is aimed. Today `type` (757–801) holds the native-value path, the
-contenteditable `execCommand` path and the debugger escalation in one cc-13 body, while `pressTarget`
-(878–898), `barredByDisabledFieldset` (639–657) and `describeOccluder` (396–424) each carry a different
-slice of "which element does this gesture actually land on". The outcome: "does this button receive the
-press" becomes one exported predicate used by `click`, `hover`, `press` and `select` alike, so a fix to
-it fixes all four.
+know it did not alter how a click is aimed. Today `type` (757–801) holds two input paths — native value
+for `<input>`/`<textarea>`, `execCommand` for a contenteditable — in one cc-13 body, while
+`pressTarget` (878–898), `barredByDisabledFieldset` (639–657) and `describeOccluder` (396–424) each
+carry a different slice of "which element does this gesture actually land on".
+
+The outcome is two named decisions instead of one tangle. An **aim** decision, shared by `click` (668)
+and `hover` (709), because both place a pointer at a coordinate and `click` re-verifies it before
+pressing. And a **focus** decision, used only by `press` (905), because it dispatches a key event at
+whatever currently has focus. `select` (1035) is neither — it resolves the element, matches an option
+by value or label and assigns `sel.value` — and stays as it is. Naming the two decisions separately is
+the goal; collapsing them into one would change behaviour, not readability.
 
 ### Evidence
 
@@ -157,15 +162,19 @@ re-exports the module; `src/runtime/pageTools.ts:33` imports `ActionResult` and 
 1. Replace the 5-to-7-positional-argument signatures of `pointerInit` / `mouseInit` / `pointerAt` /
    `mouseAt` with frozen `PointerSpec` / `MouseSpec` objects. All call sites are in this file.
 2. Extract `aim(el, doc): { point } | { error }` from `actionPoint`, `tryHit`, `hitConfirms`,
-   `verifyAim` and `hitTarget`. `describeOccluder`'s wording must survive verbatim — no test asserts it
+   `verifyAim` and `hitTarget`. `click` (668) and `hover` (709) are its only callers; `press` and
+   `select` do not use it. `describeOccluder`'s wording must survive verbatim — no test asserts it
    today, which is exactly why it must stay a pure string builder.
 3. Flatten the `<legend>` exemption (646–652) into `legendExempts(el, fieldset)` so
    `barredByDisabledFieldset` reads as three guards.
 4. Combine `deepActive`, `descendFrame`, `noteFocus` and `pressTarget` into
    `focusedTarget(doc): { target, source }`, with the closed-shadow-root fallback (883–895) as one
-   named branch.
-5. Split `type` into `typeNative`, `typeContentEditable` and `typeEscalated`, with `type` dispatching.
-   The `execCommand` rationale at 783–786 travels with `typeContentEditable`.
+   named branch. This is `press`'s decision only.
+5. Split `type` into `typeNative` and `typeContentEditable`, with `type` keeping the element
+   resolution, the `ensureVisible` + `focus` preamble and the final `fail(...)` for a non-text element.
+   Do **not** add an "escalated" path: the debugger/CDP tier lives in `EscalatableInput`
+   (`src/runtime/pageTools.ts:304`) over `InputPagePort` (`:275`), and `type` never touches it. The
+   `execCommand` rationale at 783–786 travels with `typeContentEditable`.
 6. Move the humanised pointer path (`movementFor`, `frameOffset`, `screenOf`, the four event
    constructors, `dispatchHover`) into `src/page/pointer.ts`. No new exports; `src/page/index.ts` and
    `src/page/handler.ts` are untouched.
@@ -189,6 +198,9 @@ re-exports the module; `src/runtime/pageTools.ts:33` imports `ActionResult` and 
   observability) is a requirement and these numbers are the mechanism.
 - `isInViewport` / `scrollElementIntoView` / `ensureVisible` (68–121): the scroll-then-measure ordering
   the aim verification depends on. Reordering silently reintroduces off-screen clicks.
+- The input-tier boundary: `EscalatableInput` (`src/runtime/pageTools.ts:304`), `InputPagePort`
+  (`:275`), `createInputPagePort` (`:951`), `src/input/select.ts`. Debugger/CDP escalation and per-run
+  tier selection live in the runtime, not in `src/page/`; `actions.ts` must not grow an escalation path.
 - `src/page/driver.ts` and `src/page/tabReplacement.ts`: out of scope. `tests/page-driver.test.ts` and
   `tests/tab-replacement.test.ts` pin them.
 
@@ -252,9 +264,18 @@ Coupling: `src/runtime/index.ts` re-exports `./runManager`; `entrypoints/backgro
    change.**
 2. Extract `markAborted(slot)` / `honourAbort(slot)` for the `abortRequested` flag (224) and its three
    check sites.
-3. Split `#launch` into `resolvePhase`, `navigatePhase`, `startPhase` and `persistPhase`. The
-   `try`/`finally` that releases the slot stays in `#launch` — releasing from a helper would let a
-   thrown error escape without releasing.
+3. Split `#launch` into `resolvePhase`, `navigatePhase`, `startPhase` and `persistPhase`, composing
+   them in order. **Do not add a `try`/`finally` around them.** `#launch` has none today and must not
+   grow one: it returns `{ runId, ok: true, done }` at 594 while the run is still executing, so a
+   `finally` would clear `#active` the moment assembly finished and let a second run start while the
+   first is still running. The two cleanup paths are distinct and both must survive:
+   - *failure during assembly* — `#launch` refuses at 545–547 after `await detachInput()`, and `start`
+     (322–347) releases the slot in its own `catch` and when `result.ok` is false.
+   - *success* — `this.#release(slot)` at 590, inside the `.then` on `handle.done` (559–592) and only
+     after `detachInput`, the persistence tail and the optional tab removal. The comment at 581–588
+     records why that ordering exists.
+   The phases return values to a `#launch` that keeps the 549–594 success chain verbatim, including the
+   `abortRequested` forward at 554.
 4. Flatten `#remember` into `ringAppend(runId, event)` and `enqueuePersist(runId, event)`.
 5. Split `restoreReplay` into `replayRing(runId)` and `rearPersist(runId)`.
 6. Split the suite by subject (after the production code stops moving): tab-resolution cases to
@@ -266,6 +287,9 @@ Coupling: `src/runtime/index.ts` re-exports `./runManager`; `entrypoints/backgro
 - The slot invariant in `start` (322–347) and its comment (330–333): taking the slot after an await
   reintroduces the race where two starts both passed the guard and the second overwrote the slot,
   losing the first run's abort.
+- The second cleanup path: `this.#release(slot)` at 590, inside the `.then` on `handle.done` (559–592),
+  after `detachInput`, the persistence tail and the optional tab removal. Releasing when `#launch`
+  returns would let a second run start while the first is still running.
 - `RunManager`'s public methods (`start`, `pause`, `resume`, `abort`, `replay`, `onEvent`,
   `restoreReplay`, `resolveTabId`): `entrypoints/background.ts` and `src/runtime/worker.ts` drive them,
   and pause/resume/abort are the user's control (R-05).
@@ -433,9 +457,12 @@ Coupling: `host/src/main.ts:9` constructs the `Dispatcher`; `host/test/dispatche
 
 1. Add a union-coverage case to `host/test/dispatcher.test.ts`: every `InboundMsg['type']` is either
    routed to a handler or answered `unknown_type`. **This lands first.**
-2. Introduce `type Route = (d: Dispatcher, msg: InboundMsg) => Promise<void>` and
-   `const ROUTES: Record<InboundMsg['type'], Route>` over the eleven inbound `type` strings. `#handle`
-   becomes the two shape guards (74–82), the lookup, and the `default`.
+2. Introduce a **per-key mapped** route type so a handler cannot be attached to the wrong key:
+   `type Route<K extends InboundMsg['type']> = (d: Dispatcher, msg: Extract<InboundMsg, { type: K }>) => Promise<void>`
+   and `type Routes = { [K in InboundMsg['type']]: Route<K> }`. A single
+   `(d, msg: InboundMsg) => Promise<void>` would let a handler keyed under `'artifact.save'` compile
+   while reading `llm.request` fields. Cover the eleven inbound `type` strings. `#handle` becomes the
+   two shape guards (74–82), the lookup, and the `default`.
 3. Move each case body into its own method: `keyStatus`, `modelsList`, `llmRequest`, `llmAbort`,
    `runLogAppend`, `artifactSave`, `logAppend`, `input` — eight methods under 20 lines each. Bodies move
    verbatim, including every validation message and every `ErrorCode`.
