@@ -536,8 +536,11 @@ A target leaves this plan by being **deleted from it**, not by being marked done
 - **Done:** every finding the target set out to remove is gone (`Lines of Code in a Single File` under
   its cap, `Complex Method` under cc 10, `Large Method` under 70 lines, `Bumpy Road Ahead` at zero
   bumps) and the verification block has been run with its output in the pull request. Delete the
-  target's section from this file and from `03-row2-refactor-dossier.md` in the same change that lands
-  the last step. A finished target left in the plan is a lie about the work remaining.
+  target's section from `.codescene/refactor-action-plan.md` in the same change that lands the last
+  step. A finished target left in the plan is a lie about the work remaining. This file is the only
+  copy of the plan that is tracked; the longer narrative record lives outside the repository, in the
+  portfolio evidence directory, and a step that edits it from a checkout of this repository would not
+  be actionable.
 - **Superseded:** if a change elsewhere moves the code out from under a target, delete the target and
   say in the pull request what replaced it. Do not repoint it at a different file; a rewritten target
   has never been reviewed and reads as if it had.
