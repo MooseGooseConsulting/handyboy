@@ -121,8 +121,6 @@ export function usePanel(config: Config): PanelApi {
   const leaderModelSource = config.leaderModelSource ?? 'openrouter';
   const followerModelSource = config.followerModelSource ?? 'openrouter';
   const selection = `${leaderModelSource}/${followerModelSource}`;
-  const selectionRef = useRef(selection);
-  selectionRef.current = selection;
   const readinessRequest = useRef<{ id: string; selection: string } | undefined>(undefined);
   const readinessSequence = useRef(0);
   const [readySelection, setReadySelection] = useState<string | undefined>(undefined);
@@ -217,8 +215,9 @@ export function usePanel(config: Config): PanelApi {
           }
           return;
         case 'readiness':
-          if (!readinessRequest.current || message.payload.requestId !== readinessRequest.current.id
-            || readinessRequest.current.selection !== selectionRef.current) return;
+          // The request id binds the reply to the selection it was asked for; a reply for an
+          // earlier selection stays hidden by the readySelection gate below.
+          if (!readinessRequest.current || message.payload.requestId !== readinessRequest.current.id) return;
           setReadiness(message.payload);
           setReadySelection(readinessRequest.current.selection);
           setReadinessStatus('ready');

@@ -582,6 +582,23 @@ describe('selected-source readiness at the worker boundary', () => {
     } finally { f.close(); }
   });
 
+  it('a host-trigger cancel while readiness is pending ends the run aborted without starting it', async () => {
+    const f = readinessFixture();
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture', url: 'https://example.test/next' });
+      await vi.waitFor(() => expect(f.queries()).toHaveLength(1));
+      // No run-manager slot exists yet; the cancel must still stop the run once readiness resolves.
+      f.native.emit({ type: 'run.abort', runId: 'cli-fixture' });
+      f.answer();
+      await vi.waitFor(() => expect(f.native.sent).toContainEqual(expect.objectContaining({
+        type: 'runlog.append', runId: 'cli-fixture', event: expect.objectContaining({
+          type: 'run.end', status: 'aborted', steps: 0,
+        }),
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
   it('a host-trigger override to a ready source starts even if the stored source has no key', async () => {
     const f = readinessFixture();
     try {

@@ -129,6 +129,13 @@ function asPanelMessage(envelope: Envelope<unknown>): PanelToWorkerMessage | und
   return { type: envelope.type, payload: envelope.payload } as PanelToWorkerMessage;
 }
 
+/** A host-triggered run cancelled while its readiness check was still pending. */
+class RunCancelledBeforeStart extends Error {
+  constructor() {
+    super('cancelled before the run started');
+  }
+}
+
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -229,10 +236,22 @@ export function createWorker(deps: WorkerDeps): Worker {
     return { hostConnected, keyReady, ...(reason ? { reason } : {}) };
   }
 
+  // Host-triggered runs whose readiness check is still pending. No run-manager slot
+  // exists yet, so a `run.abort` arriving then is recorded here and honoured before start.
+  const pendingStarts = new Map<string, { cancelled: boolean }>();
+
   async function startReadyRun(options: StartOptions): Promise<StartResult> {
-    const status = await readiness(options.config);
-    if (!status.keyReady) throw new Error(status.reason);
-    return deps.runManager.start(options);
+    const runId = options.runId;
+    const pending = { cancelled: false };
+    if (runId !== undefined) pendingStarts.set(runId, pending);
+    try {
+      const status = await readiness(options.config);
+      if (pending.cancelled) throw new RunCancelledBeforeStart();
+      if (!status.keyReady) throw new Error(status.reason);
+      return deps.runManager.start(options);
+    } finally {
+      if (runId !== undefined && pendingStarts.get(runId) === pending) pendingStarts.delete(runId);
+    }
   }
 
   async function handlePanelMessage(channel: PanelChannel, message: PanelToWorkerMessage): Promise<void> {
@@ -408,7 +427,8 @@ export function createWorker(deps: WorkerDeps): Worker {
       const ended = await done;
       end(ended.status, ended.message, ended.steps);
     } catch (error) {
-      end('error', describe(error), 0);
+      if (error instanceof RunCancelledBeforeStart) end('aborted', error.message, 0);
+      else end('error', describe(error), 0);
     }
   }
 
@@ -420,12 +440,16 @@ export function createWorker(deps: WorkerDeps): Worker {
   // told the extension to. `cancel` on the dev socket now pushes this instead.
   const unsubscribeAbort = deps.host.onRunAbort((msg) => {
     const matched = deps.runManager.abort(msg.runId);
+    const pending = matched ? undefined : pendingStarts.get(msg.runId);
+    if (pending) pending.cancelled = true;
     deps.host.appendLog({
-      level: matched ? 'info' : 'warn',
+      level: matched || pending ? 'info' : 'warn',
       source: 'worker',
       message: matched
         ? `run.abort matched active run ${msg.runId}`
-        : `run.abort for ${msg.runId} found no matching active run (active: ${deps.runManager.activeRunId ?? 'none'})`,
+        : pending
+          ? `run.abort cancelled ${msg.runId} while its readiness check was pending`
+          : `run.abort for ${msg.runId} found no matching active run (active: ${deps.runManager.activeRunId ?? 'none'})`,
       at: now(),
     });
   });
