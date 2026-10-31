@@ -10,8 +10,10 @@ import { Dispatcher } from './dispatcher.ts';
 import { FrameParser } from './framing.ts';
 import { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
+import { mkdir } from 'node:fs/promises';
 import { makeSend } from './outbound.ts';
-import { artifactsDir, extLogPath, runsDir, socketPath } from './paths.ts';
+import { artifactsDir, dataDir, extLogPath, runsDir, socketPath } from './paths.ts';
+import { protectWindowsPath } from './permissions.ts';
 import { DopplerSecretProvider, SecretStore } from './secrets.ts';
 import { TriggerServer } from './trigger.ts';
 
@@ -24,6 +26,16 @@ const send = makeSend((frame) => {
 });
 
 async function main(): Promise<void> {
+  // Best-effort, as logging already treats it: an uncreatable data dir must not
+  // stop the host before it says hello. Only lock the ACL down once it exists.
+  let dataDirReady = true;
+  try {
+    await mkdir(dataDir(), { recursive: true });
+  } catch (err) {
+    dataDirReady = false;
+    log('warn', 'could not create data dir', { dir: dataDir(), error: (err as Error).message });
+  }
+  if (dataDirReady) await protectWindowsPath(dataDir(), 'directory');
   log('info', 'host starting', { dev, pid: process.pid });
 
   const secrets = new SecretStore(new DopplerSecretProvider());
