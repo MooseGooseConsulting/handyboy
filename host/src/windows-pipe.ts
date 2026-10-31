@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Duplex } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { log } from './log.ts';
 import { windowsPowerShell, windowsPowerShellEnv } from './permissions.ts';
 
 /** Private-at-creation Windows pipes, presented as ordinary streams to the trigger. */
@@ -9,6 +10,7 @@ export class WindowsPipeServer {
   #child?: ChildProcessWithoutNullStreams;
   #clients = new Map<string, Duplex>();
   #exit?: Promise<void>;
+  #closing = false;
 
   async listen(endpoint: string, onConnection: (socket: Duplex) => void): Promise<void> {
     const prefix = '\\\\.\\pipe\\';
@@ -17,7 +19,11 @@ export class WindowsPipeServer {
       fileURLToPath(new URL('../windows/pipe-server.ps1', import.meta.url)), '-PipeName', endpoint.slice(prefix.length)],
     { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: windowsPowerShellEnv() });
     this.#child = child;
-    this.#exit = new Promise((resolve) => child.once('close', () => {
+    let ready = false;
+    this.#exit = new Promise((resolve) => child.once('close', (code) => {
+      // After ready the startup promise is settled, so an unexpected exit would
+      // otherwise leave the trigger pipe dead with nothing in the log.
+      if (ready && !this.#closing) log('error', 'Windows pipe helper exited; trigger pipe unavailable', { code });
       for (const socket of this.#clients.values()) socket.destroy();
       this.#clients.clear();
       resolve();
@@ -33,7 +39,7 @@ export class WindowsPipeServer {
       child.stderr.on('data', (chunk) => { diagnostics = (diagnostics + String(chunk)).slice(-2000); });
       createInterface({ input: child.stdout }).on('line', (line) => {
         const [kind, id, data] = line.split(' ', 3);
-        if (kind === 'ready') { clearTimeout(timer); resolve(); return; }
+        if (kind === 'ready') { ready = true; clearTimeout(timer); resolve(); return; }
         if (kind === 'error') { fail(); child.kill(); return; }
         if (!id) return;
         if (kind === 'open') {
@@ -60,6 +66,7 @@ export class WindowsPipeServer {
   }
 
   async close(): Promise<void> {
+    this.#closing = true;
     this.#child?.stdin.end();
     await this.#exit;
     this.#child = undefined;

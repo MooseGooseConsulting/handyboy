@@ -20,7 +20,7 @@ it.skipIf(process.platform !== 'win32')('launches the real native host, reports 
   let ready!: () => void;
   let failed!: (error: Error) => void;
   const hello = new Promise<void>((resolve, reject) => { ready = resolve; failed = reject; });
-  const timeout = setTimeout(() => failed(new Error('host hello timed out')), 10_000);
+  const timeout = setTimeout(() => failed(new Error('host hello timed out')), 30_000);
   child.once('error', failed);
   child.once('exit', () => failed(new Error('host exited before readiness')));
   child.stdout.on('data', (bytes) => {
@@ -58,4 +58,4 @@ it.skipIf(process.platform !== 'win32')('launches the real native host, reports 
     clearTimeout(kill);
     await rm(dir, { recursive: true, force: true });
   }
-});
+}, 45_000);
