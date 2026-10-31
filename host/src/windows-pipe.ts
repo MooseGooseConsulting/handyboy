@@ -40,7 +40,11 @@ export class WindowsPipeServer {
       createInterface({ input: child.stdout }).on('line', (line) => {
         const [kind, id, data] = line.split(' ', 3);
         if (kind === 'ready') { ready = true; clearTimeout(timer); resolve(); return; }
-        if (kind === 'error') { fail(); child.kill(); return; }
+        if (kind === 'error') {
+          // After ready this is one client's fault; keep the pipe up for the rest.
+          if (ready) { log('warn', 'Windows pipe helper reported an error', { detail: line.slice(6) }); return; }
+          fail(); child.kill(); return;
+        }
         if (!id) return;
         if (kind === 'open') {
           const socket = new Duplex({
