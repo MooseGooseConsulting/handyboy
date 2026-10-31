@@ -146,7 +146,7 @@ From the repository directory in PowerShell:
 pnpm install --frozen-lockfile
 pnpm --dir host install --frozen-lockfile
 pnpm build
-pwsh -File host/install.ps1 -Dev
+powershell -NoProfile -ExecutionPolicy Bypass -File host/install.ps1 -Dev
 ```
 
 The installer registers the host for the current Windows user, derives the pinned

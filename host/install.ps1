@@ -37,7 +37,7 @@ $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powersh
 if ($LASTEXITCODE -ne 0) { throw 'Could not restrict the installation directory.' }
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 $launcher = Join-Path $InstallDirectory 'handyboy-host.cmd'
-$lines = @('@echo off', 'setlocal DisableDelayedExpansion')
+$lines = @('@echo off', 'chcp 65001 >nul', 'setlocal DisableDelayedExpansion')
 if ($Dev) { $lines += 'set "HANDYBOY_DEV=1"' }
 if ($dopplerDir) { $lines += 'set "PATH=' + $dopplerDir + ';%PATH%"' }
 $lines += '"' + $node + '" "' + $entry + '" %*'
