@@ -80,7 +80,6 @@ cmd_setup() {
   reg="$(registrations)" || die "a Chrome registration exists but could not be read completely (see the NOTE above)"
   while IFS=$'\x1f' read -r profile path us; do
     [ -n "$profile" ] || continue
-    [ -d "$path" ] && live_reg=1
     echo "registered in Chrome profile \"$profile\" from $path"
     if [ -z "$path" ]; then
       # A packaged install (crx or Web Store) loads from Chrome's own storage,
@@ -106,6 +105,9 @@ cmd_setup() {
       rsync -a --delete "$EXT_DIR/" "$path/" || die "could not copy the build to $path"
       echo "copied this build there"
     fi
+    # Only a registration that now holds this build survives hb-reload; a directory
+    # that merely exists (a moved checkout, unrelated contents) does not.
+    live_reg=1
     [ "$us" = "True" ] || echo "   NOTE: \"Allow User Scripts\" is off in \"$profile\"; userscript tasks fail until you turn it on in the extension's Details"
   done <<<"$reg"
 
@@ -136,7 +138,7 @@ cmd_setup() {
   # A registered path can be a checkout that has since moved. Reloading then kills the
   # working worker with nothing behind it to load, so stop before hb-reload instead.
   if [ -n "$reg" ] && [ "$live_reg" = 0 ]; then
-    die "the registered build directory is gone; Load unpacked again from $EXT_DIR"
+    die "no registered directory holds a Handyboy build any more; Load unpacked again from $EXT_DIR"
   fi
   if host_up; then
     host/bin/hb-reload --timeout 30 >/dev/null 2>&1 || die "hb-reload failed (host/bin/hb-logs)"
