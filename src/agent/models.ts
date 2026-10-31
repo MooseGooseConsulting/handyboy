@@ -44,6 +44,38 @@ export const RATE_LIMIT_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_
 /** Short waits for a 500/502/503/504/529 or a dropped connection. Separate from the 429 budget. */
 export const TRANSIENT_DELAYS_MS: readonly number[] = [400, 800];
 
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
+function requestTimeoutMs(value: unknown): number {
+  const ms = Number(value);
+  return Number.isInteger(ms) && ms > 0 && ms <= 86_400_000 ? ms : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+/** A fresh deadline per attempt, including body consumption by the response hardener. */
+export function withRequestTimeout(fetch: typeof globalThis.fetch, timeoutMs: number): typeof globalThis.fetch {
+  return async (input, init) => {
+    const deadline = new AbortController();
+    const caller = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    // Chrome versions with sidePanel support predate AbortSignal.any.
+    const onAbort = (): void => deadline.abort(caller!.reason);
+    if (caller?.aborted) onAbort();
+    else caller?.addEventListener('abort', onAbort, { once: true });
+    const signal = deadline.signal;
+    const timer = setTimeout(() => deadline.abort(new DOMException(
+      `Model request timed out after ${timeoutMs}ms`, 'TimeoutError',
+    )), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal });
+    } catch (error) {
+      // The host transport reports all aborts as AbortError; retain the deadline reason.
+      throw signal.aborted ? signal.reason : error;
+    } finally {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
 const TRANSIENT_STATUS = new Set([500, 502, 503, 504, 529]);
 
 /**
@@ -136,6 +168,8 @@ export interface CreateChatModelOptions {
   temperature?: number;
   /** Test seam: waits between rate-limit retries. */
   rateLimitDelaysMs?: readonly number[];
+  /** Per-attempt deadline. Defaults to WXT_LLM_TIMEOUT_MS, or five minutes. */
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -197,6 +231,8 @@ function errorResponse(status: number, message: string, upstream: Headers): Resp
  */
 export function createChatModel(options: CreateChatModelOptions): ChatOpenAI {
   const { model, fetch, source = 'openrouter', baseURL = baseUrlFor(source), temperature = 0, rateLimitDelaysMs } = options;
+  const timeoutMs = requestTimeoutMs(options.requestTimeoutMs ?? import.meta.env.WXT_LLM_TIMEOUT_MS);
+  const rateBudget = (rateLimitDelaysMs ?? RATE_LIMIT_DELAYS_MS).reduce((sum, ms) => sum + ms, 0);
   return new ChatOpenAI({
     model,
     temperature,
@@ -205,13 +241,17 @@ export function createChatModel(options: CreateChatModelOptions): ChatOpenAI {
     // one-minute budget. Leaving LangChain's default retries on would run that
     // whole schedule again for each SDK attempt.
     maxRetries: 0,
+    // The SDK wraps the whole fetch/retry loop in one signal. Its outer deadline
+    // must leave room for every attempt; the inner deadline resets on each retry.
+    timeout: timeoutMs * (1 + TRANSIENT_DELAYS_MS.length + (rateLimitDelaysMs ?? RATE_LIMIT_DELAYS_MS).length)
+      + rateBudget + TRANSIENT_DELAYS_MS.reduce((sum, ms) => sum + ms, 0) + 1_000,
     // Applied to BOTH gateways. It was OpenRouter-only on the reasoning that Kilo had
     // shown no such quirk; then the free Nemotron pair on Kilo failed a live eBay run with
     // "Cannot read properties of undefined (reading 'message')", which is LangChain
     // dereferencing `generations[0][0]` after a 200 with no `choices`. The check is
     // provider-agnostic, so there is no reason to leave either gateway unguarded.
     // Retry outside the hardening, so a 429 reported inside a 200 body is retried too.
-    configuration: { baseURL, fetch: retryRateLimited(hardenEmptyChoices(fetch), rateLimitDelaysMs) },
+    configuration: { baseURL, fetch: retryRateLimited(withRequestTimeout(hardenEmptyChoices(fetch), timeoutMs), rateLimitDelaysMs) },
   });
 }
 
