@@ -71,13 +71,31 @@ Sent once, immediately after startup.
 
 ```json
 { "type": "key.status", "id": "1" }
+{ "type": "key.status", "id": "2", "source": "kilo" }
 { "type": "key.status.result", "id": "1", "ready": true }
 { "type": "key.status.result", "id": "1", "ready": false, "reason": "GET /key returned 401" }
 ```
 
-Implemented by `GET https://openrouter.ai/api/v1/key` with the real key — it validates without
-spending a completion. `ready:false` with no network call when no secret was loaded. The key
-itself never appears in the response.
+With `source: "openrouter" | "kilo"`, the answer describes that source alone, including a
+missing key. Without `source`, the host reports whether all configured sources are ready;
+an absent, unconfigured source does not block that aggregate. A rejected configured key does.
+OpenRouter validation uses `GET https://openrouter.ai/api/v1/key` without spending a completion.
+Kilo readiness checks the loaded key's presence; it does not make a provider validation call.
+The key itself never appears in the response.
+
+The extension's run gate uses the selected sources, not the host aggregate. The panel sends
+`readiness.get` with `leaderModelSource`, `followerModelSource`, and a refresh `requestId`.
+An omitted role source means OpenRouter, matching legacy Config/model routing. The worker
+queries each distinct required source once and requires every answer to be connected and
+key-ready. Failures name the source and retain the host's reason. The `readiness` reply echoes
+`requestId`; a changed selection or a newer refresh invalidates earlier answers immediately.
+
+Both panel and host-trigger `run.start` recheck through that same worker gate before calling
+the run manager. The panel's supplied config is checked; a host trigger checks stored config
+after applying its options. Failure returns the panel's `error` (`inReplyTo: "run.start"`) or
+the host's `run.end` (`status: "error"`, zero steps), before allocating a run, saving session
+state, navigating, or constructing models. This checks source credentials only; all model
+choices and existing observe/vision checks remain available.
 
 ### `models.list` → `models.list.result`
 
@@ -349,9 +367,9 @@ happens once per `connectNative` session anyway.
 keychain as successors, and swapping the backend must not touch this protocol or the extension.
 Tests use `FakeSecretProvider` and never reach a real store.
 
-The wire-level `key.status` message (above) still validates OpenRouter specifically, with a live
-`GET /key` — Kilo has no documented equivalent validation endpoint, so its readiness is
-presence-only (`SecretStore.status('kilo')`), not a round trip.
+For a source-specific `key.status` (above), OpenRouter uses a live `GET /key`. Kilo has no
+documented equivalent validation endpoint, so its readiness is presence-only
+(`SecretStore.status('kilo')`), not a round trip.
 
 ## Environment
 

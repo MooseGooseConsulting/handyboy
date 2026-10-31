@@ -115,9 +115,15 @@ export function followerVisionFor(models: ModelInfo[], config: Config): boolean 
  * the scaffold's hub heartbeat (the hello/pong indicator) and the whole message contract,
  * so a broadcast run event is never delivered to the same panel twice.
  */
-export function usePanel(): PanelApi {
+export function usePanel(config: Config): PanelApi {
   const channelRef = useRef<PanelChannel | null>(null);
   const runIdRef = useRef<RunId | undefined>(undefined);
+  const leaderModelSource = config.leaderModelSource ?? 'openrouter';
+  const followerModelSource = config.followerModelSource ?? 'openrouter';
+  const selection = `${leaderModelSource}/${followerModelSource}`;
+  const readinessRequest = useRef<{ id: string; selection: string } | undefined>(undefined);
+  const readinessSequence = useRef(0);
+  const [readySelection, setReadySelection] = useState<string | undefined>(undefined);
 
   const [hub, setHub] = useState<HubState>({ status: 'connecting' });
   const [workerSilent, setWorkerSilent] = useState(false);
@@ -209,7 +215,11 @@ export function usePanel(): PanelApi {
           }
           return;
         case 'readiness':
+          // The request id binds the reply to the selection it was asked for; a reply for an
+          // earlier selection stays hidden by the readySelection gate below.
+          if (!readinessRequest.current || message.payload.requestId !== readinessRequest.current.id) return;
           setReadiness(message.payload);
+          setReadySelection(readinessRequest.current.selection);
           setReadinessStatus('ready');
           return;
         case 'userscript.list':
@@ -224,12 +234,18 @@ export function usePanel(): PanelApi {
           setScriptSaved(message.payload);
           return;
         case 'error':
+          if (message.payload.inReplyTo === 'run.start') setStarting(false);
           setWorkerError(message.payload.message);
           return;
       }
     });
 
-    channel.onClose(() => setHub((prev) => ({ ...prev, status: 'disconnected' })));
+    channel.onClose(() => {
+      readinessRequest.current = undefined;
+      setReadiness(undefined);
+      setReadinessStatus('error');
+      setHub((prev) => ({ ...prev, status: 'disconnected' }));
+    });
 
     const heartbeat = setInterval(() => {
       channel?.send(HUB_MESSAGE, { kind: 'ping', at: Date.now() });
@@ -239,8 +255,6 @@ export function usePanel(): PanelApi {
     // already in flight when the panel was last closed (R-07).
     channel.send('models.list', {});
     setModelsStatus('waiting');
-    channel.send('readiness.get', {});
-    setReadinessStatus('waiting');
     channel.send('userscript.list', {});
     setScriptsStatus('waiting');
 
@@ -268,9 +282,15 @@ export function usePanel(): PanelApi {
   }, [send]);
 
   const refreshReadiness = useCallback(() => {
+    const requestId = String(++readinessSequence.current);
+    readinessRequest.current = { id: requestId, selection };
+    setReadiness(undefined);
+    setReadySelection(undefined);
     setReadinessStatus('waiting');
-    send('readiness.get', {});
-  }, [send]);
+    send('readiness.get', { leaderModelSource, followerModelSource, requestId });
+  }, [send, selection, leaderModelSource, followerModelSource]);
+
+  useEffect(refreshReadiness, [refreshReadiness]);
 
   const refreshScripts = useCallback(() => {
     setScriptsStatus('waiting');
@@ -307,8 +327,10 @@ export function usePanel(): PanelApi {
     models,
     modelsStatus,
     modelsError,
-    readiness,
-    readinessStatus,
+    // Invalidate in the render that changes selection, before the refresh effect runs.
+    readiness: readySelection === selection ? readiness : undefined,
+    readinessStatus: readySelection === selection ? readinessStatus
+      : readinessStatus === 'error' ? 'error' : 'waiting',
     scripts,
     scriptsStatus,
     scriptResult,

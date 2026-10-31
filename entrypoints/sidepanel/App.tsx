@@ -22,8 +22,8 @@ const TABS = [
 
 /** The side panel is the primary and only user surface (R-05). */
 export default function App() {
-  const panel = usePanel();
   const { config } = useConfig();
+  const panel = usePanel(config);
   const [tab, setTab] = useState<TabValue>('run');
 
   return (

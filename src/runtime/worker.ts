@@ -22,6 +22,7 @@ import {
   type PanelToWorker,
   type PanelToWorkerMessage,
   type Readiness,
+  type ReadinessSelection,
   type RunEvent,
   type RunId,
   type WorkerToPanel,
@@ -51,7 +52,7 @@ export interface DevRunStart {
 
 /** The slice of `HostClient` the worker uses. */
 export interface HostPort {
-  keyStatus(): Promise<Readiness>;
+  keyStatus(source?: ModelSource): Promise<Readiness>;
   listModels(): Promise<ModelInfo[]>;
   appendRunLog(runId: string, event: RunEvent | HostRunEndEvent): void;
   onRunStart(handler: (msg: DevRunStart) => void): () => void;
@@ -126,6 +127,13 @@ const PANEL_TYPES: ReadonlySet<string> = new Set<keyof PanelToWorker>([
 function asPanelMessage(envelope: Envelope<unknown>): PanelToWorkerMessage | undefined {
   if (!PANEL_TYPES.has(envelope.type)) return undefined;
   return { type: envelope.type, payload: envelope.payload } as PanelToWorkerMessage;
+}
+
+/** A host-triggered run cancelled while its readiness check was still pending. */
+class RunCancelledBeforeStart extends Error {
+  constructor() {
+    super('cancelled before the run started');
+  }
 }
 
 function describe(error: unknown): string {
@@ -203,21 +211,46 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
   }
 
-  async function readiness(): Promise<Readiness> {
+  async function readiness(selection: ReadinessSelection): Promise<Readiness> {
+    // Match Config/createChatModel's legacy default, even when just one role omits it.
+    const sources = [...new Set([
+      selection.leaderModelSource ?? 'openrouter',
+      selection.followerModelSource ?? 'openrouter',
+    ])];
+    const statuses = await Promise.all(sources.map(async (source) => {
+      try {
+        return { source, status: await deps.host.keyStatus(source) };
+      } catch (error) {
+        return { source, status: { hostConnected: false, keyReady: false, reason: describe(error) } };
+      }
+    }));
+    const hostConnected = statuses.every(({ status }) => status.hostConnected);
+    const keyReady = hostConnected && statuses.every(({ status }) => status.keyReady);
+    const failures = statuses.filter(({ status }) => !status.hostConnected || !status.keyReady);
+    const reason = failures.map(({ source, status }) => {
+      if (!status.hostConnected) {
+        return `${source}: ${HOST_UNREACHABLE_REASON}${status.reason ? ` (${status.reason})` : ''}`;
+      }
+      return `${source}: ${status.reason ?? 'No provider key is available.'}`;
+    }).join('; ');
+    return { hostConnected, keyReady, ...(reason ? { reason } : {}) };
+  }
+
+  // Host-triggered runs whose readiness check is still pending. No run-manager slot
+  // exists yet, so a `run.abort` arriving then is recorded here and honoured before start.
+  const pendingStarts = new Map<string, { cancelled: boolean }>();
+
+  async function startReadyRun(options: StartOptions): Promise<StartResult> {
+    const runId = options.runId;
+    const pending = { cancelled: false };
+    if (runId !== undefined) pendingStarts.set(runId, pending);
     try {
-      const status = await deps.host.keyStatus();
-      if (status.hostConnected) return status;
-      return {
-        hostConnected: false,
-        keyReady: false,
-        reason: status.reason ? `${HOST_UNREACHABLE_REASON} (${status.reason})` : HOST_UNREACHABLE_REASON,
-      };
-    } catch (error) {
-      return {
-        hostConnected: false,
-        keyReady: false,
-        reason: `${HOST_UNREACHABLE_REASON} (${describe(error)})`,
-      };
+      const status = await readiness(options.config);
+      if (pending.cancelled) throw new RunCancelledBeforeStart();
+      if (!status.keyReady) throw new Error(status.reason);
+      return deps.runManager.start(options);
+    } finally {
+      if (runId !== undefined && pendingStarts.get(runId) === pending) pendingStarts.delete(runId);
     }
   }
 
@@ -225,7 +258,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     switch (message.type) {
       case 'run.start': {
         const { prompt, config } = message.payload;
-        await deps.runManager.start({ prompt, config, followerVision: message.payload.followerVision });
+        await startReadyRun({ prompt, config, followerVision: message.payload.followerVision });
         return;
       }
       case 'run.pause':
@@ -241,7 +274,9 @@ export function createWorker(deps: WorkerDeps): Worker {
         reply(channel, { type: 'models.list', payload: await models() });
         return;
       case 'readiness.get':
-        reply(channel, { type: 'readiness', payload: await readiness() });
+        reply(channel, { type: 'readiness', payload: {
+          ...await readiness(message.payload), requestId: message.payload.requestId,
+        } });
         return;
       case 'runlog.replay': {
         const { runId } = message.payload;
@@ -383,7 +418,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       // The url is opened by start itself: navigating here first, before start could
       // refuse, sent the tab of a run already in progress elsewhere, and start then
       // looked the active tab up a second time and could bind a different one.
-      const { done } = await deps.runManager.start({
+      const { done } = await startReadyRun({
         prompt: msg.prompt,
         config,
         runId: msg.runId,
@@ -392,7 +427,8 @@ export function createWorker(deps: WorkerDeps): Worker {
       const ended = await done;
       end(ended.status, ended.message, ended.steps);
     } catch (error) {
-      end('error', describe(error), 0);
+      if (error instanceof RunCancelledBeforeStart) end('aborted', error.message, 0);
+      else end('error', describe(error), 0);
     }
   }
 
@@ -404,12 +440,16 @@ export function createWorker(deps: WorkerDeps): Worker {
   // told the extension to. `cancel` on the dev socket now pushes this instead.
   const unsubscribeAbort = deps.host.onRunAbort((msg) => {
     const matched = deps.runManager.abort(msg.runId);
+    const pending = matched ? undefined : pendingStarts.get(msg.runId);
+    if (pending) pending.cancelled = true;
     deps.host.appendLog({
-      level: matched ? 'info' : 'warn',
+      level: matched || pending ? 'info' : 'warn',
       source: 'worker',
       message: matched
         ? `run.abort matched active run ${msg.runId}`
-        : `run.abort for ${msg.runId} found no matching active run (active: ${deps.runManager.activeRunId ?? 'none'})`,
+        : pending
+          ? `run.abort cancelled ${msg.runId} while its readiness check was pending`
+          : `run.abort for ${msg.runId} found no matching active run (active: ${deps.runManager.activeRunId ?? 'none'})`,
       at: now(),
     });
   });
