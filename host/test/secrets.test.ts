@@ -2,10 +2,11 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
+import type { execFile } from 'node:child_process';
 import { LlmProxy, type FetchLike } from '../src/llm.ts';
 import { log, resetLogForTests } from '../src/log.ts';
 import { hostLogPath } from '../src/paths.ts';
-import { FakeSecretProvider, SecretStore } from '../src/secrets.ts';
+import { DopplerSecretProvider, FakeSecretProvider, SecretStore } from '../src/secrets.ts';
 
 /** What the desktop secret store returns. Not the process environment. */
 const STORE_KEY = 'sk-or-v1.1111222233334444.5555666677778888';
@@ -124,3 +125,23 @@ async function readFlushedLog(file: string): Promise<string> {
   }
   throw new Error('host log was not written to the temp dir');
 }
+
+it('a banner-prefixed Doppler output marks the source configured-but-invalid, not absent', async () => {
+  // The doppler CLI printed a deprecation banner ahead of the key. The provider
+  // rejects the shape; the store must keep the source configured so a working
+  // Kilo key cannot hide it.
+  const exec = (_file: string, _args: string[], _opts: unknown, cb: (err: unknown, stdout: string) => void) =>
+    cb(null, 'DEPRECATION WARNING: set DOPPLER_TOKEN\nsk-or-v1-realkey0000aaaa1111');
+  const provider = new DopplerSecretProvider(exec as unknown as typeof execFile);
+  const lookup = await provider.get('OPENROUTER_API_KEY');
+  expect(lookup.value).toBeNull();
+  expect(lookup.invalid).toBe(true);
+  expect(lookup.reason).toContain('invalid');
+  expect(lookup.reason).not.toContain('DEPRECATION');
+
+  const secrets = new SecretStore(provider, { reloadCooldownMs: 0 });
+  await secrets.load();
+  expect(secrets.configured('openrouter')).toBe(true);
+  expect(secrets.status('openrouter').ready).toBe(false);
+  expect(secrets.status('openrouter').reason).toContain('invalid');
+});

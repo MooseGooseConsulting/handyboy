@@ -20,7 +20,7 @@ export interface TriggerDeps {
   socketPath: string;
   /** Push a message to the extension over the native port. */
   send: (msg: OutboundMsg) => void;
-  keyStatus: () => Promise<{ ready: boolean; reason?: string }>;
+  keyStatus: () => Promise<Extract<SocketResponse, { op: 'status' }>['key']>;
   extensionConnected: () => boolean;
   hostVersion: string;
   /** Test seam over `process.pid`. hb-reload watches it change to prove a new host came up. */

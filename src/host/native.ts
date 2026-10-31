@@ -28,6 +28,8 @@ export const MAX_BACKOFF_MS = 30_000;
 export interface KeyStatusMsg {
   type: 'key.status';
   id: string;
+  /** Ask about one source; omitted, the host answers across every configured source (one with a key, or one it rejected). */
+  source?: ModelSource;
 }
 
 export interface ModelsListMsg {
@@ -104,6 +106,7 @@ export interface KeyStatusResult {
   id: string;
   ready: boolean;
   reason?: string;
+  sources?: Record<ModelSource, { ready: boolean; reason?: string }>;
 }
 
 export interface ModelsListResult {
@@ -309,9 +312,7 @@ interface CatalogModelRaw {
  * string "0", or the id ending `:free`. `vision` when `architecture.input_modalities`
  * includes "image"; `tools` when `supported_parameters` includes "tools";
  * `contextLength` from `context_length`. `mayTrainOnYourPrompts` is carried through
- * when the source reports it (Kilo) -- it is exactly the signal that explains why a
- * model that 404s on OpenRouter (whose only endpoint trains on inputs, denied by our
- * `data_collection: deny` default for paid models) can still work on Kilo.
+ * when the source reports it (Kilo), so the panel can badge a model that trains on prompts.
  */
 function mapCatalogModel(raw: unknown, source: ModelSource): ModelInfo | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -415,10 +416,15 @@ export class HostClient {
     this.#settleAllPendingOnDisconnect();
   }
 
-  /** `GET /key` readiness (R-11): never assumed, always the host's validated answer. */
-  async keyStatus(): Promise<Readiness> {
+  /**
+   * Key readiness (R-11): never assumed, always the host's validated answer. With a
+   * `source`, the answer is for that source alone; without one, whether every
+   * configured source passes -- a Kilo-only setup is ready, a rejected OpenRouter
+   * key (live 401 or store-rejected shape) is not.
+   */
+  async keyStatus(source?: ModelSource): Promise<Readiness> {
     try {
-      const res = await this.#call<KeyStatusResult>({ type: 'key.status', id: nextId() });
+      const res = await this.#call<KeyStatusResult>({ type: 'key.status', id: nextId(), ...(source ? { source } : {}) });
       return { hostConnected: true, keyReady: res.ready, ...(res.reason ? { reason: res.reason } : {}) };
     } catch (err) {
       return { hostConnected: false, keyReady: false, reason: (err as Error).message };
@@ -584,6 +590,15 @@ export class HostClient {
         if (pending) {
           this.#pending.delete(msg.id);
           pending.reject(new HostError(msg.code, msg.message));
+          return;
+        }
+        // The host answers some llm.request failures (validation, an internal throw)
+        // with a generic `error` rather than `llm.error`; a stream that only listened
+        // for llm.* would never settle.
+        const stream = this.#llmStreams.get(msg.id);
+        if (stream) {
+          this.#llmStreams.delete(msg.id);
+          stream.onError(msg.code, msg.message);
         }
         return;
       }

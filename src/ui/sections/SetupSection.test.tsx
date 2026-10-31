@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { ModelInfo, Readiness } from '@/src/messaging';
 import { configItem, getConfig, type Config } from '@/src/storage';
+import { freeOnlyItem } from '../state/modelFilter';
 import { SetupSection } from './SetupSection';
 
 afterEach(cleanup);
@@ -81,6 +82,131 @@ async function planningInterval(): Promise<HTMLInputElement> {
 }
 
 describe('SetupSection', () => {
+  it('a Leader that trains on prompts gets a red warning but stays selected and runnable', async () => {
+    const museOpenRouter: ModelInfo = {
+      id: 'meta/muse-spark-1.3-contributor',
+      name: 'Meta: Muse Spark 1.3 Contributor',
+      free: false,
+      vision: false,
+      tools: true,
+      contextLength: 1000,
+      source: 'openrouter',
+    };
+    const museKilo: ModelInfo = { ...museOpenRouter, source: 'kilo', mayTrainOnYourPrompts: true };
+    await configItem.setValue(stored({ leaderModel: museOpenRouter.id, followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, museOpenRouter, museKilo] });
+
+    const warning = await screen.findByText(/may train on your prompts/);
+    expect(warning.textContent).toContain('Leader (Meta: Muse Spark 1.3 Contributor)');
+    expect(warning.textContent).not.toContain('Follower');
+    expect((await getConfig()).leaderModel).toBe(museOpenRouter.id);
+  });
+
+  it('a paid OpenRouter Leader gets an amber unknown warning instead of none when the Kilo catalog is missing', async () => {
+    const museOpenRouter: ModelInfo = {
+      id: 'meta/muse-spark-1.3-contributor',
+      name: 'Meta: Muse Spark 1.3 Contributor',
+      free: false,
+      vision: false,
+      tools: true,
+      contextLength: 1000,
+      source: 'openrouter',
+    };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: museOpenRouter.id, followerModel: known.id }));
+    renderSetup({ models: [known, museOpenRouter] });
+
+    const warning = await screen.findByText(/^Unknown whether/);
+    expect(warning.textContent).toContain('Leader (Meta: Muse Spark 1.3 Contributor)');
+    expect(screen.queryByText(/may train on your prompts/)).toBeNull();
+  });
+
+  it('an unknown Kilo model is not sent to OpenRouter privacy settings, which do not govern Kilo', async () => {
+    const kiloModel: ModelInfo = { ...catalog[0]!, id: 'kilo/unflagged', name: 'Kilo Unflagged', source: 'kilo' };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: kiloModel.id, leaderModelSource: 'kilo', followerModel: known.id }));
+    renderSetup({ models: [known, kiloModel] });
+
+    const warning = await screen.findByText(/^Unknown whether/);
+    expect(warning.textContent).toContain("Kilo's catalog gives no training flag");
+    expect(warning.textContent).not.toContain('OpenRouter');
+  });
+
+  it('a saved model missing from the loaded catalog still gets its warning, judged from the stored id', async () => {
+    await configItem.setValue(stored({ leaderModel: 'nvidia/nemotron-3-ultra-550b-a55b:free', followerModel: 'paid/not-loaded' }));
+    renderSetup({ models: catalog });
+
+    const red = await screen.findByText(/may train on your prompts/);
+    expect(red.textContent).toContain('Leader (nvidia/nemotron-3-ultra-550b-a55b:free)');
+    const amber = await screen.findByText(/^Unknown whether/);
+    expect(amber.textContent).toContain('Follower (paid/not-loaded)');
+  });
+
+  it('a stored OpenRouter pick is judged as the OpenRouter entry, not its same-id Kilo twin', async () => {
+    const openrouter: ModelInfo = { ...catalog[0]!, id: 'twin/model', name: 'Twin via OpenRouter', free: false, source: 'openrouter' };
+    const kilo: ModelInfo = { ...openrouter, name: 'Twin via Kilo', source: 'kilo', mayTrainOnYourPrompts: false };
+    const known: ModelInfo = { ...catalog[1]!, mayTrainOnYourPrompts: false };
+    await configItem.setValue(stored({ leaderModel: openrouter.id, followerModel: known.id }));
+    renderSetup({ models: [kilo, openrouter, known] });
+
+    const amber = await screen.findByText(/^Unknown whether/);
+    expect(amber.textContent).toContain('Leader (Twin via OpenRouter)');
+  });
+
+  it('no warning shows when neither selected model trains on prompts', async () => {
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: catalog.map((model) => ({ ...model, mayTrainOnYourPrompts: false })) });
+    await screen.findAllByText('Atlas Planner');
+    expect(screen.queryByText(/may train on your prompts/)).toBeNull();
+    expect(screen.queryByText(/^Unknown whether/)).toBeNull();
+  });
+
+  const paid: ModelInfo = {
+    id: 'paid-pick',
+    name: 'Atlas Premium',
+    free: false,
+    vision: false,
+    tools: true,
+    contextLength: 200_000,
+    source: 'openrouter',
+    mayTrainOnYourPrompts: false,
+  };
+
+  async function choose(role: 'Leader' | 'Follower', option: RegExp) {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: `${role} model` }));
+    await user.click(await screen.findByRole('option', { name: option }));
+  }
+
+  it('picking a free Follower leaves the paid Leader warning standing', async () => {
+    await freeOnlyItem.setValue(false);
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, paid] });
+    await screen.findAllByText('Atlas Planner');
+
+    await choose('Leader', /Atlas Premium/);
+    expect((await screen.findByRole('alert')).textContent).toContain('Leader is now a paid model (Atlas Premium)');
+
+    await choose('Follower', /Atlas Spare/);
+    await waitFor(async () => expect((await getConfig()).followerModel).toBe('spare-pick'));
+    expect(screen.getByRole('alert').textContent).toContain('Leader is now a paid model (Atlas Premium)');
+  });
+
+  it('resetting to defaults takes the paid-model warning away with the paid pick', async () => {
+    const user = userEvent.setup();
+    await freeOnlyItem.setValue(false);
+    await configItem.setValue(stored({ leaderModel: 'leader-pick', followerModel: 'follower-pick' }));
+    renderSetup({ models: [...catalog, paid] });
+    await screen.findAllByText('Atlas Planner');
+
+    await choose('Leader', /Atlas Premium/);
+    expect((await screen.findByRole('alert')).textContent).toContain('Leader is now a paid model');
+
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    await waitFor(async () => expect((await getConfig()).leaderModel).not.toBe('paid-pick'));
+    expect(screen.queryByText(/is now a paid model/)).toBeNull();
+  });
+
   it('clearing the planning interval would store NaN', async () => {
     const user = userEvent.setup();
     await configItem.setValue(stored({ planningInterval: 7 }));

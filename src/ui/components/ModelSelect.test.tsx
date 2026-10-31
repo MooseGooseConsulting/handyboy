@@ -25,4 +25,35 @@ describe('ModelSelect', () => {
 
     expect(onChange).toHaveBeenCalledWith('same', 'kilo');
   });
+
+  it('tabbing out of the picker closes its list instead of leaving it over the next field', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <ModelSelect id="leader" label="Leader model" models={models} value="" onChange={vi.fn()} />
+        <ModelSelect id="follower" label="Follower model" models={models} value="" onChange={vi.fn()} />
+      </>,
+    );
+    const leader = screen.getByRole('combobox', { name: 'Leader model' });
+
+    await user.click(leader);
+    expect(leader.getAttribute('aria-expanded')).toBe('true');
+
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Follower model' }));
+    expect(leader.getAttribute('aria-expanded')).toBe('false');
+    expect(document.getElementById(leader.getAttribute('aria-controls')!)?.hidden).toBe(true);
+  });
+
+  it('pressing on the open list itself, as on its scrollbar, keeps it open', async () => {
+    const user = userEvent.setup();
+    render(<ModelSelect id="leader" label="Leader model" models={models} value="" onChange={vi.fn()} />);
+    const leader = screen.getByRole('combobox', { name: 'Leader model' });
+
+    await user.click(leader);
+    await user.pointer({ keys: '[MouseLeft]', target: screen.getByRole('listbox', { name: 'Leader model' }) });
+
+    expect(document.activeElement).toBe(leader);
+    expect(leader.getAttribute('aria-expanded')).toBe('true');
+  });
 });

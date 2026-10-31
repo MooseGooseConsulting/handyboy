@@ -4,11 +4,15 @@
 # One human action is still required, exactly once ever: load .output/chrome-mv3 unpacked
 # at chrome://extensions. After that this script closes the whole loop --
 #
-#   pnpm build  ->  hb-reload  ->  hb-status  ->  hb-run  ->  assert + collect errors
+#   wxt build  ->  hb-reload  ->  hb-status  ->  hb-run  ->  assert + collect errors
 #
 # -- with no click on chrome://extensions and no DevTools window, because hb-reload drives
 # chrome.runtime.reload() through the host and every extension-side error is forwarded to
 # ext.log (docs/host-protocol.md).
+#
+# Chrome reloads from wherever "Load unpacked" pointed. Before reloading, every profile
+# that has Handyboy must be loading this checkout's build; otherwise the run would test
+# another directory's code and report it as this one's. `just setup` copies the build there.
 #
 # Defaults run the read-only Hyperagent threads task. Everything is overridable by flag or
 # environment; see usage() below.
@@ -42,6 +46,8 @@ EXPECT_FILE="${HB_E2E_EXPECT_FILE:-}"
 EXPECT_RESULT="${HB_E2E_EXPECT_RESULT-__default__}"
 EXPECT_FILE_SCHEMA="${HB_E2E_EXPECT_FILE_SCHEMA:-}"
 STREAM_IN="${HB_E2E_STREAM:-}"
+CHROME_DIR="${HB_LIVE_CHROME_DIR:-$HOME/.config/google-chrome}"
+EXT_DIR="$ROOT/.output/chrome-mv3"
 
 usage() {
   cat <<'USAGE'
@@ -57,6 +63,8 @@ usage: scripts/e2e.sh [options]
   --fidelity <in-page|escalated>                (env HB_E2E_FIDELITY)
   --reload-timeout <s>   seconds to wait for the reloaded extension
   --skip-build           reuse .output/chrome-mv3 as it stands
+                         (either way, Chrome's profiles are read from env
+                         HB_LIVE_CHROME_DIR, default ~/.config/google-chrome)
   --expect <status>      run.ended status to require (default done; e.g. blocked)
   --expect-file <name>   require <data>/handyboy/artifacts/<runId>/<name> to exist
                          (data is $HB_HOME/.local/share, else $XDG_DATA_HOME or ~/.local/share)
@@ -71,7 +79,8 @@ usage: scripts/e2e.sh [options]
   -h, --help
 
 Exit codes: 0 run ended with the expected status (default `done`), a done run left the
-result it was asked for, and no forwarded errors; 1 anything else.
+result it was asked for, and no forwarded errors; 1 anything else, including a Chrome
+profile that loads Handyboy from a directory that does not hold this build.
 USAGE
 }
 
@@ -129,11 +138,51 @@ if [ "$SKIP_BUILD" = "1" ]; then
   step "build (skipped)"
 else
   step "build"
-  pnpm build >/dev/null || { echo "e2e: pnpm build failed" >&2; exit 1; }
+  # The project's own wxt, not `pnpm build`: pnpm may be a version-manager shim with no
+  # version set, and the build is nothing but wxt.
+  [ -x node_modules/.bin/wxt ] \
+    || { echo "e2e: node_modules/.bin/wxt is missing; run: npx -y pnpm@10 install --frozen-lockfile" >&2; exit 1; }
+  node_modules/.bin/wxt build >/dev/null || { echo "e2e: wxt build failed" >&2; exit 1; }
   echo "built .output/chrome-mv3"
 fi
 
-# ---------------------------------------------------------------- 2. reload
+# ---------------------------------------------------------------- 2. which build reloads
+step "check Chrome loads this build"
+command -v python3 >/dev/null || { echo "e2e: python3 is required to read Chrome's Preferences" >&2; exit 2; }
+# ext_id, registrations, unsynced_registrations
+source "$ROOT/scripts/registrations.sh"
+if [ ! -f "$EXT_DIR/manifest.json" ]; then
+  echo "e2e: there is no build at $EXT_DIR; run just setup, or e2e.sh without --skip-build" >&2
+  exit 1
+fi
+if ! REGISTRATIONS_OUT="$(registrations)"; then
+  echo "e2e: a Chrome registration exists but could not be read completely (see the NOTE above), so which build a reload would run is unknown" >&2
+  exit 1
+fi
+if [ -z "$REGISTRATIONS_OUT" ]; then
+  cat >&2 <<MSG
+e2e: no Chrome profile under $CHROME_DIR has Handyboy registered, so there is no
+     telling which build a reload would run. Set HB_LIVE_CHROME_DIR to Chrome's config
+     dir, or run just setup. (Chrome writes Preferences lazily; a load seconds ago may
+     not show yet.)
+MSG
+  exit 1
+fi
+if ! UNSYNCED="$(unsynced_registrations "$EXT_DIR")"; then
+  echo "e2e: could not check every Chrome registration (see the NOTE above), so a reload might run an unchecked build" >&2
+  exit 1
+fi
+if [ -n "$UNSYNCED" ]; then
+  echo "e2e: a reload would not run this build. These profiles load Handyboy from elsewhere:" >&2
+  while IFS=$'\x1f' read -r profile path; do
+    echo "       \"$profile\": $path" >&2
+  done <<<"$UNSYNCED"
+  echo "     Run just setup from this checkout to copy the build there, or Load unpacked from $EXT_DIR." >&2
+  exit 1
+fi
+echo "every profile with Handyboy loads this build"
+
+# ---------------------------------------------------------------- 3. reload
 step "reload the extension in place"
 host/bin/hb-reload --timeout "$RELOAD_TIMEOUT"
 case $? in
@@ -147,14 +196,14 @@ MSG
   *) echo "e2e: hb-reload failed" >&2; exit 1 ;;
 esac
 
-# ---------------------------------------------------------------- 3. readiness
+# ---------------------------------------------------------------- 4. readiness
 step "host status"
 if ! host/bin/hb-status; then
   echo "e2e: the host is up but the OpenRouter key is not ready (R-11); see the status above" >&2
   exit 1
 fi
 
-# ---------------------------------------------------------------- 4. run
+# ---------------------------------------------------------------- 5. run
 step "run"
 echo "prompt:   $PROMPT"
 echo "url:      $URL"
@@ -184,7 +233,7 @@ trap - INT TERM
 
 fi
 
-# ---------------------------------------------------------------- 5. verdict
+# ---------------------------------------------------------------- 6. verdict
 step "result"
 FAILED=0
 
@@ -230,7 +279,7 @@ fi
 # there is at least one. Bare `jq -e` passes a filter that emits nothing.
 satisfies() { jq -e "[ $1 ] | length > 0 and all" >/dev/null 2>&1; }
 
-# ---------------------------------------------------------------- 5a. result shape
+# ---------------------------------------------------------------- 6a. result shape
 # A done status is the agent's own claim. When the run was supposed to finish, the done
 # summary has to be the answer the task asked for.
 if [ "$EXPECT" = "done" ] && [ "$STATUS" = "done" ]; then
@@ -258,7 +307,7 @@ if [ "$EXPECT" = "done" ] && [ "$STATUS" = "done" ]; then
   fi
 fi
 
-# ---------------------------------------------------------------- 5b. saved file
+# ---------------------------------------------------------------- 6b. saved file
 if [ -n "$EXPECT_FILE" ]; then
   step "saved file"
   RUN_ID="$(jq -rs '[.[] | .runId // empty] | last // empty' "$STREAM" 2>/dev/null)"
@@ -286,12 +335,18 @@ if [ -n "$EXPECT_FILE" ]; then
   fi
 fi
 
-# ---------------------------------------------------------------- 6. extension errors
+# ---------------------------------------------------------------- 7. extension errors
 step "extension errors during this run"
 ERRORS=""
-[ -z "$STREAM_IN" ] && ERRORS="$(host/bin/hb-logs --since "$SINCE" --level error 2>/dev/null)"
+LOGS_RC=0
+[ -z "$STREAM_IN" ] && { ERRORS="$(host/bin/hb-logs --since "$SINCE" --level error)"; LOGS_RC=$?; }
 if [ -n "$STREAM_IN" ]; then
   echo "(not checked: --stream verdicts a saved run, and its log window is unknown)"
+elif [ "$LOGS_RC" -ne 0 ]; then
+  # An unreadable log is not an empty one: the errors this gate exists to catch would
+  # pass unseen.
+  echo "e2e: hb-logs exited $LOGS_RC, so errors logged during the run are unknown" >&2
+  FAILED=1
 elif [ -n "$ERRORS" ]; then
   echo "$ERRORS"
   # A run that "succeeded" while the worker was throwing is not a pass: the whole point

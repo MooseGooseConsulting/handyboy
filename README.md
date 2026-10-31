@@ -124,12 +124,11 @@ runs outright. That mechanism was built, then deliberately removed: a rule about
 agent should behave had been hard-coded into the product, where it could tell the user no
 about their own money. See CLAUDE.md's "Models and money".
 
-Two OpenRouter quirks are handled in `src/agent/models.ts`, both discovered the hard way
-during live runs:
-
-- `:free` endpoints exist only under the training data policy, so they must be requested
-  with `data_collection: "allow"`. Paid models get `"deny"` because page content is sent
-  every step.
+An OpenRouter quirk is handled in `src/agent/models.ts`, discovered the hard way during
+live runs. Handyboy sends no `provider.data_collection`, so which endpoints may serve a
+request is decided by your OpenRouter privacy settings alone; a
+`404 No endpoints found matching your data policy` means those settings exclude every
+endpoint of the chosen model.
 - free endpoints intermittently answer `HTTP 200` with a body that has no `choices`, which
   used to crash the SDK. Those replies are rewritten into the status they should have
   carried so the retry policy engages.

@@ -38,3 +38,38 @@ describe('HostClient log forwarding', () => {
     expect(port.sent).toHaveLength(1);
   });
 });
+
+describe('HostClient readiness', () => {
+  it('asking about one source sends that source and reports the host answer for it', async () => {
+    const port = new FakeNativePort();
+    const client = new HostClient(() => port);
+    const pending = client.keyStatus('kilo');
+    const sent = port.sent[0];
+    expect(sent).toMatchObject({ type: 'key.status', source: 'kilo' });
+    if (sent?.type !== 'key.status') return;
+    port.emit({ type: 'key.status.result', id: sent.id, ready: false, reason: 'KILO_CODE_API_KEY not available' });
+    await expect(pending).resolves.toEqual({
+      hostConnected: true,
+      keyReady: false,
+      reason: 'KILO_CODE_API_KEY not available',
+    });
+  });
+});
+
+describe('HostClient settling', () => {
+  it('a generic host error for an llm request id settles that stream instead of leaving it pending', () => {
+    const port = new FakeNativePort();
+    const client = new HostClient(() => port);
+    const errors: Array<[string, string]> = [];
+    const id = client.sendLlmRequest(
+      { url: '' },
+      { onChunk: () => {}, onEnd: () => {}, onError: (code, message) => errors.push([code, message]) },
+    );
+    port.emit({ type: 'error', id, code: 'bad_request', message: 'llm.request requires a string "url"' });
+    expect(errors).toEqual([['bad_request', 'llm.request requires a string "url"']]);
+
+    // Settled means forgotten: a late duplicate must not fire the handler twice.
+    port.emit({ type: 'llm.error', id, code: 'upstream', message: 'late' });
+    expect(errors).toHaveLength(1);
+  });
+});

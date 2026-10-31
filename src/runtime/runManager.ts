@@ -167,6 +167,13 @@ export interface StartOptions {
   /** Supplied by the dev trigger, which subscribes by run id. */
   runId?: RunId;
   /**
+   * The dev trigger's `url`: the run's tab is sent here before the run begins.
+   * It happens inside `start`, after the run slot is held and every refusal has
+   * been checked, so a refused start never navigates another run's tab, and the
+   * tab navigated is the tab the run binds.
+   */
+  navigateTo?: string;
+  /**
    * Whether the Follower model can see images. Absent means unknown (runs that
    * predate the flag proceed as today); explicitly false plus `pixels`/`both`
    * is refused rather than run blind (M5 closes O-06).
@@ -206,10 +213,15 @@ export function refuseReason(url: string): string | undefined {
   return `refusing to run on a browser page (${url}): ${scheme} pages cannot be scripted; open a normal web page first`;
 }
 
+/**
+ * The one run slot. It is taken before `start` first awaits, so `handle` is
+ * absent while the run is still being assembled.
+ */
 interface ActiveRun {
   runId: RunId;
-  handle: RunHandle;
-  input: EscalatableInput;
+  handle?: RunHandle;
+  /** An abort that arrived before `handle` existed; honoured before the run begins. */
+  abortRequested?: boolean;
 }
 
 export class RunManager {
@@ -263,7 +275,9 @@ export class RunManager {
    * have moved on — would be an invented continuation.
    */
   async restoreReplay(runId: RunId): Promise<void> {
-    if (this.#ring.has(runId)) return;
+    // A live run's log is not a restart's leftovers: its stored prefix has no
+    // terminal event only because the run has not ended yet.
+    if (this.#ring.has(runId) || this.#active?.runId === runId) return;
     const stored = await this.#deps.replayStore?.load(runId).catch((error: unknown) => {
       console.warn('[handyboy] could not load persisted replay', error);
       return undefined;
@@ -271,7 +285,7 @@ export class RunManager {
     if (!stored) return;
     // Recheck after the await: two panels restoring the same run concurrently
     // would otherwise each publish their own synthetic terminal event.
-    if (this.#ring.has(runId)) return;
+    if (this.#ring.has(runId) || this.#active?.runId === runId) return;
     this.#ring.set(runId, [...stored]);
     const last = stored.at(-1);
     const now = this.#deps.now ?? Date.now;
@@ -306,22 +320,45 @@ export class RunManager {
   }
 
   async start(options: StartOptions): Promise<StartResult> {
-    const now = this.#deps.now ?? Date.now;
     const runId = options.runId ?? (this.#deps.newRunId ?? (() => crypto.randomUUID()))();
-    const { config, prompt } = options;
 
     if (this.#active) {
       return this.#refuse(runId, `a run is already in progress (${this.#active.runId}); abort it first`);
     }
 
-    const tab =
+    // Take the slot before the first await. Assembly awaits the tab lookup, the
+    // userscript catalog and the input attach; a second start in that window
+    // used to pass the guard too, so two runs drove the user's tab and the
+    // first lost its abort when the second overwrote the slot.
+    const slot: ActiveRun = { runId };
+    this.#active = slot;
+    try {
+      const result = await this.#launch(slot, options);
+      if (!result.ok) this.#release(slot);
+      return result;
+    } catch (error) {
+      this.#release(slot);
+      throw error;
+    }
+  }
+
+  #release(slot: ActiveRun): void {
+    if (this.#active === slot) this.#active = undefined;
+  }
+
+  async #launch(slot: ActiveRun, options: StartOptions): Promise<StartResult> {
+    const now = this.#deps.now ?? Date.now;
+    const { runId } = slot;
+    const { config, prompt } = options;
+
+    const found =
       options.tabId !== undefined
         ? await this.#deps.tabs.get(options.tabId)
         : await this.#deps.tabs.activeTab();
-    if (!tab) {
+    if (!found) {
       return this.#refuse(runId, 'no tab to act on: open the page you want the agent to work on');
     }
-    const refusal = refuseReason(tab.url);
+    const refusal = refuseReason(found.url);
     if (refusal) return this.#refuse(runId, refusal);
 
     if (!config.leaderModel || !config.followerModel) {
@@ -334,12 +371,52 @@ export class RunManager {
     const visionRefusal = validateObserveForVision(config.observe, options.followerVision);
     if (visionRefusal) return this.#refuse(runId, visionRefusal);
 
+    // Honour an abort that arrived while the tab was being looked up before
+    // anything changes the page: a cancelled pre-start run must not navigate
+    // the user's tab.
+    if (slot.abortRequested) {
+      return this.#refuse(runId, 'aborted by the user before the run began', 'aborted');
+    }
+
+    let tab: TargetTab = found;
+    if (options.navigateTo !== undefined) {
+      const url = options.navigateTo;
+      // Refused targets are refused before the tab moves: navigating first and
+      // checking only the landed URL would already have cleared the user's tab
+      // (e.g. to about:blank) before the refusal.
+      const targetRefusal = refuseReason(url);
+      if (targetRefusal) return this.#refuse(runId, targetRefusal);
+      const result = await this.#deps.driver
+        .navigate(tab.id, url)
+        .catch((error: unknown) => ({ ok: false as const, error: describe(error) }));
+      // A navigation already in flight cannot be undone, but honour an abort
+      // that arrived during it before the tab is re-read, input attaches, and
+      // the run is assembled on top of it.
+      if (slot.abortRequested) {
+        return this.#refuse(runId, 'aborted by the user before the run began', 'aborted');
+      }
+      if (!result.ok) {
+        return this.#refuse(runId, `could not open ${url}: ${result.error ?? `navigation to ${url} failed`}`);
+      }
+      // Re-read rather than assume: the run should see where the tab landed
+      // (redirects), and Chrome may have swapped the tab's id on the way.
+      const landed = await this.#deps.tabs.get(currentTabId(tab.id));
+      if (!landed) return this.#refuse(runId, `could not open ${url}: the tab closed`);
+      const landedRefusal = refuseReason(landed.url);
+      if (landedRefusal) return this.#refuse(runId, landedRefusal);
+      tab = landed;
+    }
+
     // Ordering guarantee: `run.started` is the first event of every run. Anything
     // emitted while the run is being assembled (e.g. `input.fidelity` from the
     // debugger attach) is held until it has gone out.
     let started = false;
+    let endedPublished = false;
     const pending: RunEvent[] = [];
-    const publish = (event: RunEvent): void => this.#publish(runId, event);
+    const publish = (event: RunEvent): void => {
+      if (event.kind === 'run.ended') endedPublished = true;
+      this.#publish(runId, event);
+    };
     const emit = (event: RunEvent): void => {
       if (event.kind === 'run.started') {
         started = true;
@@ -433,46 +510,70 @@ export class RunManager {
       return this.#refuse(runId, `could not attach input to the tab: ${describe(error)}`);
     }
 
+    const detachInput = (): Promise<void> =>
+      input.detach().catch((error: unknown) => {
+        console.warn('[handyboy] input detach failed', error);
+      });
+
+    if (slot.abortRequested) {
+      await detachInput();
+      return this.#refuse(runId, 'aborted by the user before the run began', 'aborted');
+    }
+
     setUserscriptProgressListener((scriptId, line) => {
       publish({ kind: 'userscript.output', scriptId, level: line.level, text: line.text, at: line.at });
     });
 
     const start = this.#deps.start ?? defaultStartRun;
-    const handle = start({
-      prompt,
-      config,
-      tools,
-      models,
-      onEvent: emit,
-      runId,
-      tabId: tab.id,
-      url: tab.url,
-      availableUserscripts,
-      refreshUserscripts: async () => listAvailable(await this.#liveUrl(tab)),
-      ...(this.#deps.checkpointer ? { checkpointer: this.#deps.checkpointer } : {}),
-    });
+    let handle: RunHandle;
+    try {
+      handle = start({
+        prompt,
+        config,
+        tools,
+        models,
+        onEvent: emit,
+        runId,
+        tabId: tab.id,
+        url: tab.url,
+        availableUserscripts,
+        refreshUserscripts: async () => listAvailable(await this.#liveUrl(tab)),
+        ...(this.#deps.checkpointer ? { checkpointer: this.#deps.checkpointer } : {}),
+      });
+    } catch (error) {
+      setUserscriptProgressListener(undefined);
+      await detachInput();
+      return this.#refuse(runId, `could not start the run: ${describe(error)}`);
+    }
 
-    this.#active = { runId, handle, input };
+    slot.handle = handle;
+    // `start` can emit `run.started` synchronously; a listener aborting in that
+    // window found no handle, so `abort()` only set `slot.abortRequested`.
+    // Forward the abort now that the handle exists, or the run would carry on
+    // after an abort the caller was told matched.
+    if (slot.abortRequested) handle.abort();
     void this.#deps.saveLastRunId?.(runId).catch((error: unknown) => {
       console.warn('[handyboy] could not persist session:lastRunId', error);
     });
 
     const done = handle.done
-      .catch(
-        (error: unknown): RunEndedEvent => ({
+      .catch((error: unknown): RunEndedEvent => {
+        const ended: RunEndedEvent = {
           kind: 'run.ended',
           status: 'error',
           message: describe(error),
-          steps: 0,
+          steps: stepsIn(this.#ring.get(runId) ?? []),
           at: now(),
-        }),
-      )
+        };
+        // The run died without announcing its end. Without this the panel, the
+        // host log and the replay store would all show it running forever.
+        if (!endedPublished) publish(ended);
+        return ended;
+      })
       .then(async (ended) => {
         setUserscriptProgressListener(undefined);
         // R-13 hygiene: the escalated session is held for exactly one run.
-        await input.detach().catch((error: unknown) => {
-          console.warn('[handyboy] input detach failed', error);
-        });
+        await detachInput();
         // Durability: done resolves only once the terminal snapshot has landed,
         // so a worker restart right after success cannot restore a stale prefix
         // and falsely mark the run interrupted.
@@ -486,7 +587,7 @@ export class RunManager {
             console.warn('[nanobrowser] could not close the run tab', error);
           });
         }
-        if (this.#active?.runId === runId) this.#active = undefined;
+        this.#release(slot);
         return ended;
       });
 
@@ -494,31 +595,25 @@ export class RunManager {
   }
 
   pause(runId: RunId): boolean {
-    if (this.#active?.runId !== runId) return false;
-    this.#active.handle.pause();
+    const handle = this.#active?.runId === runId ? this.#active.handle : undefined;
+    if (!handle) return false;
+    handle.pause();
     return true;
   }
 
   resume(runId: RunId): boolean {
-    if (this.#active?.runId !== runId) return false;
-    this.#active.handle.resume();
+    const handle = this.#active?.runId === runId ? this.#active.handle : undefined;
+    if (!handle) return false;
+    handle.resume();
     return true;
   }
 
   abort(runId: RunId): boolean {
-    if (this.#active?.runId !== runId) return false;
-    this.#active.handle.abort();
+    const slot = this.#active;
+    if (slot?.runId !== runId) return false;
+    if (slot.handle) slot.handle.abort();
+    else slot.abortRequested = true;
     return true;
-  }
-
-  /** Navigates the tab the run will act on. Used by the dev trigger's `url`. */
-  async navigateActiveTab(url: string): Promise<void> {
-    const tab = await this.#deps.tabs.activeTab();
-    if (!tab) throw new Error('no tab to navigate');
-    const refusal = refuseReason(tab.url);
-    if (refusal) throw new Error(refusal);
-    const result = await this.#deps.driver.navigate(tab.id, url);
-    if (!result.ok) throw new Error(result.error ?? `navigation to ${url} failed`);
   }
 
   /** The tab a run would target right now, refusal reason included. */
@@ -528,11 +623,11 @@ export class RunManager {
     return tab.id;
   }
 
-  #refuse(runId: RunId, message: string): StartResult {
+  #refuse(runId: RunId, message: string, status: RunEndedEvent['status'] = 'error'): StartResult {
     const now = this.#deps.now ?? Date.now;
     const ended: RunEndedEvent = {
       kind: 'run.ended',
-      status: 'error',
+      status,
       message,
       steps: 0,
       at: now(),
@@ -565,10 +660,21 @@ export class RunManager {
       buffer = [];
       this.#ring.set(runId, buffer);
       const maxRuns = this.#deps.ringRuns ?? DEFAULT_RING_RUNS;
+      // Never evict the live run or the one being added. Each refused start
+      // makes a ring entry, so a handful of them during a run used to push the
+      // live run out; its next event then started a one-event buffer that
+      // overwrote its durable log.
+      const activeRunId = this.#active?.runId;
       while (this.#ring.size > maxRuns) {
-        const oldest = this.#ring.keys().next();
-        if (oldest.done) break;
-        this.#ring.delete(oldest.value);
+        let victim: RunId | undefined;
+        for (const key of this.#ring.keys()) {
+          if (key !== activeRunId && key !== runId) {
+            victim = key;
+            break;
+          }
+        }
+        if (victim === undefined) break;
+        this.#ring.delete(victim);
       }
     }
     buffer.push(event);

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import type { Userscript, UserscriptRunResult } from '@/src/messaging';
 import { Button } from '../components/Button';
 import { Card, Field, Section } from '../components/Card';
 import { ConfirmButton } from '../components/ConfirmButton';
+import { TabPanelVisibleContext } from '../components/Tabs';
 import { cn } from '../lib/cn';
 import { formatDuration, prettyJson } from '../runlog/format';
 import { isWaiting, type AreaStatus } from '../state/status';
@@ -68,6 +69,14 @@ export function UserscriptsSection({
   const [matchesText, setMatchesText] = useState(() => draft.matches.join(' '));
   const [dirty, setDirty] = useState(false);
   const codeRef = useRef<HTMLTextAreaElement>(null);
+  const visible = useContext(TabPanelVisibleContext);
+  // A script handed to onSave that the list may not reflect yet: the worker stores it,
+  // re-stamps updatedAt, and sends a fresh list. Until then the list still holds the
+  // pre-save copy — for an existing script too — which must not replace the editor.
+  const savingId = useRef<string | undefined>(undefined);
+  const savingAt = useRef(0);
+  // The loaded script's delete is in flight: only a list without its id settles that.
+  const deletingId = useRef<string | undefined>(undefined);
 
   const load = (script: Userscript, asDirty: boolean) => {
     setDirty(asDirty);
@@ -78,7 +87,22 @@ export function UserscriptsSection({
   // Adopt a stored script the first time the list arrives, unless the user is mid-edit.
   useEffect(() => {
     if (dirty) return;
-    const match = scripts.find((script) => script.id === draft.id) ?? scripts[0];
+    const stored = scripts.find((script) => script.id === draft.id);
+    if (deletingId.current === draft.id) {
+      // Deleting the loaded script: a list that still contains it is a reply that raced
+      // the delete (or the echo of a just-completed save), and only an id-less list
+      // settles where the editor goes next.
+      if (stored) return;
+      deletingId.current = undefined;
+    }
+    if (savingId.current === draft.id) {
+      // A save is still catching up. Only the fresh list's entry is the saved version:
+      // the worker stamps it no earlier than the moment Save was clicked, so anything
+      // older is the pre-save copy and must stay out of the editor.
+      if (!stored || stored.updatedAt < savingAt.current) return;
+      savingId.current = undefined;
+    }
+    const match = stored ?? scripts[0];
     if (!match || match === draft) return;
     setDraft(match);
     setMatchesText(match.matches.join(' '));
@@ -89,18 +113,27 @@ export function UserscriptsSection({
     setDraft((prev) => ({ ...prev, ...patch }));
   };
 
-  // The error line is already the user's line, with the wrapper offset removed.
+  // The error line is already the user's line, with the wrapper offset removed. Each
+  // result jumps at most once: re-running the jump would yank the caret back to a stale
+  // error line on every edit or tab return while the user is fixing it. A jump stays
+  // pending until the panel is visible and the executed script is the loaded draft — a
+  // hidden panel has no layout to focus or scroll in, and the list can answer after the
+  // result — and is then consumed.
+  const draftIsRunScript = result != null && draft.id === result.scriptId;
+  const jumpedFor = useRef<UserscriptRunResult | undefined>(undefined);
   useEffect(() => {
+    if (jumpedFor.current === result) return;
     const match = result?.error?.match(/line (\d+)/);
     const area = codeRef.current;
-    if (!match || !area) return;
+    if (!match || !area || !visible || !draftIsRunScript) return;
     const line = Number(match[1]);
     // The newline that ends the previous line belongs before this line's first character.
-    const before = line > 1 ? draft.code.split('\n').slice(0, line - 1).join('\n').length + 1 : 0;
+    const before = line > 1 ? area.value.split('\n').slice(0, line - 1).join('\n').length + 1 : 0;
     area.focus();
     area.setSelectionRange(before, before);
     area.scrollTop = (line - 1) * 16;
-  }, [result?.error, draft.code]);
+    jumpedFor.current = result;
+  }, [result, visible, draftIsRunScript]);
 
   return (
     <div className="space-y-4">
@@ -153,7 +186,16 @@ export function UserscriptsSection({
                   ) : null}
                   <span className="ml-1 text-[11px] text-muted">{script.matches.join(' ')}</span>
                 </button>
-                <ConfirmButton label="delete" onConfirm={() => onDelete(script.id)} />
+                <ConfirmButton
+                  label="delete"
+                  onConfirm={() => {
+                    // The pending save is moot once the user destroys the script, and the
+                    // delete's reply — not a racing save echo — decides what loads next.
+                    if (savingId.current === script.id) savingId.current = undefined;
+                    deletingId.current = script.id;
+                    onDelete(script.id);
+                  }}
+                />
               </li>
             ))}
           </ul>
@@ -166,7 +208,9 @@ export function UserscriptsSection({
           <span className="flex gap-1">
             <Button
               onClick={() => {
-                onSave({ ...draft, updatedAt: Date.now() });
+                savingId.current = draft.id;
+                savingAt.current = Date.now();
+                onSave({ ...draft, updatedAt: savingAt.current });
                 setDirty(false);
               }}
             >
