@@ -3,13 +3,15 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { log } from './log.ts';
+import { WindowsPipeServer } from './windows-pipe.ts';
+import type { Duplex } from 'node:stream';
 import type { OutboundMsg, SocketRequest, SocketResponse } from './protocol.ts';
 
 /**
  * Dev-only trigger. Chrome spawns the host, so an outside runner needs a side door
- * into a process it did not start. A unix socket is filesystem-permissioned (0600),
- * outside the network namespace, and invisible to every page in the browser --
- * unlike a loopback TCP listener, which any page could reach.
+ * into a process it did not start. Unix uses a 0600 socket; Windows uses a named
+ * pipe created with a user/SYSTEM DACL. Neither exposes a loopback HTTP endpoint
+ * that a page could call.
  *
  * Gated on HANDYBOY_DEV=1 (or --dev in the manifest wrapper); never bound otherwise.
  */
@@ -31,8 +33,9 @@ export function newRunId(): string {
 
 export class TriggerServer {
   #server: net.Server | null = null;
+  #windows?: WindowsPipeServer;
   /** runId -> sockets streaming that run. */
-  readonly #subs = new Map<string, Set<net.Socket>>();
+  readonly #subs = new Map<string, Set<Duplex>>();
   readonly #deps: TriggerDeps;
 
   constructor(deps: TriggerDeps) {
@@ -41,6 +44,12 @@ export class TriggerServer {
 
   async start(): Promise<void> {
     const p = this.#deps.socketPath;
+    if (process.platform === 'win32') {
+      this.#windows = new WindowsPipeServer();
+      await this.#windows.listen(p, (socket) => this.#onConnection(socket));
+      log('info', 'dev trigger pipe listening', { path: p });
+      return;
+    }
     await fs.promises.mkdir(path.dirname(p), { recursive: true });
     // A stale socket from a crashed host would make bind fail with EADDRINUSE.
     try {
@@ -79,7 +88,7 @@ export class TriggerServer {
     log('info', 'dev trigger socket listening', { path: p });
   }
 
-  #onConnection(sock: net.Socket): void {
+  #onConnection(sock: Duplex): void {
     let buf = '';
     sock.on('error', () => sock.destroy());
     sock.on('close', () => {
@@ -96,7 +105,7 @@ export class TriggerServer {
     });
   }
 
-  async #onLine(sock: net.Socket, line: string): Promise<void> {
+  async #onLine(sock: Duplex, line: string): Promise<void> {
     let req: SocketRequest;
     try {
       req = JSON.parse(line) as SocketRequest;
@@ -194,12 +203,15 @@ export class TriggerServer {
   }
 
   async close(): Promise<void> {
+    await this.#windows?.close();
+    this.#windows = undefined;
     for (const set of this.#subs.values()) for (const s of set) s.destroy();
     this.#subs.clear();
     const server = this.#server;
     this.#server = null;
     if (!server) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (process.platform === 'win32') return;
     try {
       await fs.promises.unlink(this.#deps.socketPath);
     } catch {
@@ -208,6 +220,6 @@ export class TriggerServer {
   }
 }
 
-function write(sock: net.Socket, msg: SocketResponse): void {
+function write(sock: Duplex, msg: SocketResponse): void {
   if (!sock.destroyed) sock.write(JSON.stringify(msg) + '\n');
 }

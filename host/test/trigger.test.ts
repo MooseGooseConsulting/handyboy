@@ -34,7 +34,7 @@ function connectSocket(socketPath: string): Promise<boolean> {
   });
 }
 
-it('the host socket is not connectable under a mode wider than 0600 before start() returns', async () => {
+it.skipIf(process.platform === 'win32')('the host socket is not connectable under a mode wider than 0600 before start() returns', async () => {
   const hadHome = Object.prototype.hasOwnProperty.call(process.env, 'HB_HOME');
   const previousHome = process.env.HB_HOME;
   const hadStderr = Object.prototype.hasOwnProperty.call(process.env, 'HANDYBOY_LOG_STDERR');

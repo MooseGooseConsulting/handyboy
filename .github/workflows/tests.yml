@@ -11,7 +11,11 @@ permissions:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -34,6 +38,7 @@ jobs:
       - name: Typecheck extension
         run: pnpm typecheck
       - name: Test extension and existing invariants
+        shell: bash
         run: pnpm test
       - name: Typecheck host
         run: pnpm --dir host typecheck
