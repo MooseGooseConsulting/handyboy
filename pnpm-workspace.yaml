@@ -17,3 +17,6 @@ overrides:
 # build script.
 allowBuilds:
   spawn-sync: false
+minimumReleaseAgeExclude:
+  # Renovate security update: zod@4.6.6
+  - zod@4.6.6
