@@ -34,6 +34,12 @@ export interface ToolResult {
    * same size in the log as a one-line click.
    */
   chars?: number;
+  /**
+   * Model-visible text of a successful read (snapshot, extract, userscript).
+   * Absent for clicks and other short results. The summary stays panel-sized;
+   * the harness scorer uses this so a reported price has to appear in the read.
+   */
+  text?: string;
 }
 
 /**
@@ -58,9 +64,9 @@ export type RunEvent =
   /**
    * `tokens` is the snapshot's own chars/4 estimate, not the size of the prompt it rides in.
    * `unchanged` means the snapshot matched the last one sent, so the model got a note
-   * naming that step instead of the snapshot.
+   * naming that step instead of the snapshot. `url` is the page it was taken of.
    */
-  | { kind: 'observation'; mode: ObserveMode; tokens?: number; hasScreenshot: boolean; unchanged?: boolean; at: number }
+  | { kind: 'observation'; mode: ObserveMode; tokens?: number; url?: string; hasScreenshot: boolean; unchanged?: boolean; text?: string; at: number }
   | { kind: 'input.fidelity'; fidelity: InputFidelity; attached: boolean; at: number }
   | { kind: 'userscript.output'; scriptId: string; level: 'log' | 'warn' | 'error'; text: string; at: number }
   | { kind: 'file.saved'; runId: RunId; filename: string; bytes: number; path: string; at: number }
@@ -97,6 +103,9 @@ export interface Readiness {
   reason?: string;
 }
 
+/** Role sources only: omitted sources retain Config's OpenRouter default. */
+export type ReadinessSelection = Pick<Config, 'leaderModelSource' | 'followerModelSource'>;
+
 /** A stored userscript (R-09/R-10). */
 export interface Userscript {
   id: string;
@@ -130,7 +139,8 @@ export interface PanelToWorker {
   'run.resume': { runId: RunId };
   'run.abort': { runId: RunId };
   'models.list': Record<string, never>;
-  'readiness.get': Record<string, never>;
+  /** Echo requestId so a late answer cannot validate a newer selection or refresh. */
+  'readiness.get': ReadinessSelection & { requestId: string };
   'userscript.run': { scriptId: string; code?: string };
   'userscript.list': Record<string, never>;
   'userscript.save': Userscript;
@@ -152,7 +162,7 @@ export interface PanelToWorker {
 export interface WorkerToPanel {
   'run.event': { runId: RunId; event: RunEvent };
   'models.list': { models: ModelInfo[] } | { error: string };
-  'readiness': Readiness;
+  'readiness': Readiness & { requestId: string };
   'userscript.result': UserscriptRunResult;
   'userscript.list': { scripts: Userscript[] };
   'userscript.saved': { filename: string; path: string; bytes: number; note?: string };

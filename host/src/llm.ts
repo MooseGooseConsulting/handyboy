@@ -1,8 +1,22 @@
-import { normalizeRequest, type KnownOrigin } from './origins.ts';
+import { assertOnKnownBase, normalizeRequest, type KnownOrigin } from './origins.ts';
 import { CHUNK_BYTES, KILO_BASE, OPENROUTER_BASE, type LlmRequestMsg, type OutboundMsg } from './protocol.ts';
 import type { SecretStore } from './secrets.ts';
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+export interface SourceStatus {
+  ready: boolean;
+  reason?: string;
+}
+
+export interface KeyStatus extends SourceStatus {
+  /**
+   * Per-source detail. `sources.openrouter` is a validated status (live GET /key)
+   * except in Kilo-scoped responses, where it is presence-only — a Kilo answer
+   * never runs on OpenRouter, so the probe would be pure latency.
+   */
+  sources?: Record<KnownOrigin, SourceStatus>;
+}
+
+export type FetchLike =(input: string, init?: RequestInit) => Promise<Response>;
 
 export interface LlmDeps {
   fetch: FetchLike;
@@ -10,6 +24,15 @@ export interface LlmDeps {
   send: (msg: OutboundMsg) => void;
   referer?: string;
   title?: string;
+  /** Deadline for a complete upstream response, including the streamed body. */
+  requestTimeoutMs?: number;
+}
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
+export function requestTimeoutMs(value: unknown): number {
+  const ms = Number(value);
+  return Number.isInteger(ms) && ms > 0 && ms <= 86_400_000 ? ms : DEFAULT_REQUEST_TIMEOUT_MS;
 }
 
 /** Headers the client must not be able to set; the host owns them. */
@@ -23,11 +46,14 @@ const BASE_FOR: Record<KnownOrigin, string> = { openrouter: OPENROUTER_BASE, kil
  * never guess wrong). `normalizeRequest` throws `OffOriginError` for anything
  * not on a known origin -- a relative path has no origin of its own and
  * defaults to OpenRouter, preserving every path sent before Kilo existed.
+ * The resolved URL is checked again because resolution itself can leave the
+ * base (`../`, or a path segment that parses as `http:host`).
  */
 export function resolveUrl(pathOrUrl: string): { url: string; source: KnownOrigin } {
   const { path, origin } = normalizeRequest(pathOrUrl);
   const source: KnownOrigin = origin ?? 'openrouter';
   const url = new URL(path, BASE_FOR[source]);
+  assertOnKnownBase(url, source);
   return { url: url.toString(), source };
 }
 
@@ -57,12 +83,61 @@ export class LlmProxy {
   }
 
   /**
+   * Readiness per source. Reporting OpenRouter alone blocked a Kilo-only setup and
+   * passed a Kilo run with no Kilo key loaded. With `source`, `ready` is that source's
+   * answer; without it, `ready` means at least one source is configured (has a key,
+   * or one the store rejected) and every configured source passes its check, and
+   * `sources` says which is which.
+   */
+  async keyStatus(source?: KnownOrigin): Promise<KeyStatus> {
+    const first = await this.#keyStatusOnce(source);
+    const { secrets } = this.deps;
+    if (first.ready || secrets.allReady()) {
+      // A ready answer can still hide a source that was absent at load but has
+      // since been configured. Re-check in the background (cooldown-limited, so a
+      // never-configured source costs one lookup per window, not one per poll) and
+      // let a later poll report it; this response still returns immediately.
+      if (!secrets.allReady()) void secrets.reloadMissing().catch(() => {});
+      return first;
+    }
+    // Keys load once at host start; a transient Doppler failure there would
+    // otherwise read as "not ready" until Chrome respawns the host. Re-check only
+    // if the reload found something, so a rejected key is not GET /key'd twice.
+    const loaded = (s: KnownOrigin) => secrets.key(s) !== null;
+    const before = (['openrouter', 'kilo'] as const).filter(loaded).length;
+    await secrets.reloadMissing();
+    const after = (['openrouter', 'kilo'] as const).filter(loaded).length;
+    return after > before ? this.#keyStatusOnce(source) : first;
+  }
+
+  async #keyStatusOnce(source?: KnownOrigin): Promise<KeyStatus> {
+    const sources: Record<KnownOrigin, SourceStatus> = {
+      // A Kilo-scoped answer never runs on OpenRouter, so don't spend the live
+      // GET /key (20 s timeout) filling in sources.openrouter — presence is enough.
+      openrouter: source === 'kilo' ? this.deps.secrets.status('openrouter') : await this.#openRouterStatus(),
+      kilo: this.deps.secrets.status('kilo'),
+    };
+    if (source) {
+      const s = sources[source];
+      return { ready: s.ready, ...(s.reason ? { reason: s.reason } : {}), sources };
+    }
+    // A source the store never saw a value for is not configured and must not block
+    // the other. A configured source blocks when its key is present-but-invalid or
+    // loads and fails its check — a working Kilo key must not hide either.
+    const all = Object.entries(sources) as Array<[KnownOrigin, SourceStatus]>;
+    const counted = all.filter(([name]) => this.deps.secrets.configured(name));
+    if (counted.length > 0 && counted.every(([, s]) => s.ready)) return { ready: true, sources };
+    const blocking = counted.length > 0 ? counted.filter(([, s]) => !s.ready) : all;
+    const reason = blocking.map(([name, s]) => `${name}: ${s.reason ?? 'not ready'}`).join('; ');
+    return { ready: false, reason, sources };
+  }
+
+  /**
    * GET /key with the real key: validates readiness without spending a completion (R-11).
    * OpenRouter-specific -- Kilo has no documented equivalent validation endpoint, so its
-   * readiness is presence-only (`SecretStore.status('kilo')`, checked wherever that
-   * matters) rather than a live round trip.
+   * readiness is presence-only (`SecretStore.status('kilo')`) rather than a live round trip.
    */
-  async keyStatus(): Promise<{ ready: boolean; reason?: string }> {
+  async #openRouterStatus(): Promise<SourceStatus> {
     const key = this.deps.secrets.openRouterKey;
     if (!key) return { ready: false, reason: this.deps.secrets.missingReason ?? 'no key loaded' };
     try {
@@ -209,13 +284,16 @@ export class LlmProxy {
 
     const controller = new AbortController();
     this.#inflight.set(msg.id, controller);
+    const timeoutMs = requestTimeoutMs(this.deps.requestTimeoutMs);
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = AbortSignal.any([controller.signal, deadline]);
 
     try {
       const res = await this.deps.fetch(url, {
         method: msg.method ?? (msg.body === undefined ? 'GET' : 'POST'),
         headers,
         body: msg.body === undefined ? undefined : JSON.stringify(msg.body),
-        signal: controller.signal,
+        signal,
       });
 
       const reader = res.body?.getReader();
@@ -235,12 +313,13 @@ export class LlmProxy {
       const outHeaders = headersToObject(res.headers);
       send({ type: 'llm.end', id: msg.id, status: res.status, headers: outHeaders });
     } catch (err) {
-      const aborted = controller.signal.aborted;
+      const aborted = signal.aborted && signal.reason === controller.signal.reason;
+      const timedOut = signal.aborted && !aborted;
       send({
         type: 'llm.error',
         id: msg.id,
-        code: aborted ? 'aborted' : 'upstream',
-        message: aborted ? 'aborted by client' : (err as Error).message,
+        code: aborted ? 'aborted' : timedOut ? 'timeout' : 'upstream',
+        message: aborted ? 'aborted by client' : timedOut ? `Model request timed out after ${timeoutMs}ms` : (err as Error).message,
       });
     } finally {
       this.#inflight.delete(msg.id);

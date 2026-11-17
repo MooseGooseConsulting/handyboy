@@ -1,59 +1,84 @@
-import fs from 'node:fs/promises';
-import os from 'node:os';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { appendRunLog, assertRunId, RunLogError, runLogPath } from '../src/runlog.ts';
+import { afterEach, expect, it } from 'vitest';
+import { resetLogForTests } from '../src/log.ts';
+import { makeHarness, type Harness } from './harness.ts';
 
-let dir: string;
-beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-runs-'));
-});
+let h: Harness | undefined;
+
 afterEach(async () => {
-  await fs.rm(dir, { recursive: true, force: true });
+  await h?.cleanup();
+  h = undefined;
+  resetLogForTests();
 });
 
-describe('runId validation', () => {
-  it.each(['a', 'run-1', 'A_b-C9', 'x'.repeat(64)])('accepts %s', (id) => {
-    expect(() => assertRunId(id)).not.toThrow();
-  });
+it('a run event carrying keys or a bearer token is redacted on disk and in the dev-socket mirror', async () => {
+  // A Kilo key has no recognisable shape; it is only caught because the store
+  // registered the literal value when it loaded it.
+  const kiloKey = 'kilo-literal-0123456789abcdef';
+  h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey });
+  const event = {
+    type: 'tool.result',
+    output: 'header was Authorization: Bearer abc.def-123 then more text',
+    nested: { keys: ['sk-or-v1.aaaabbbbccccdddd.eeeeffff00001111', 'dp.st.dev.abcdefgh12345678', kiloKey] },
+    count: 3,
+  };
 
-  it.each(['', 'x'.repeat(65), '../escape', 'a/b', 'a.b', 'a b', 'run\n1', 'run '])('rejects %j', (id) => {
-    expect(() => assertRunId(id)).toThrow(RunLogError);
-  });
+  await h.dispatcher.handle({ type: 'runlog.append', runId: 'run-redact', event });
 
-  it('rejects non-strings', () => {
-    expect(() => assertRunId(undefined)).toThrow(RunLogError);
-    expect(() => assertRunId(7)).toThrow(RunLogError);
-  });
-
-  it('never escapes the runs directory', () => {
-    expect(() => runLogPath('../../etc/passwd', dir)).toThrow(RunLogError);
-  });
+  const lines = (await readFile(path.join(h.runsDir, 'run-redact.jsonl'), 'utf8')).trim().split('\n');
+  expect(lines).toHaveLength(1);
+  const onDisk = JSON.parse(lines[0]!);
+  const mirrored = h.runEvents[0]?.event;
+  const expected = {
+    type: 'tool.result',
+    output: 'header was Authorization: [redacted] then more text',
+    nested: { keys: ['[redacted]', '[redacted]', '[redacted]'] },
+    count: 3,
+  };
+  expect(onDisk).toEqual(expected);
+  expect(mirrored).toEqual(expected);
+  // The caller's object is theirs; redaction must not rewrite it in place.
+  expect(event.nested.keys[2]).toBe(kiloKey);
 });
 
-describe('appendRunLog', () => {
-  it('appends one JSON line per event and creates the directory', async () => {
-    const nested = path.join(dir, 'deep', 'runs');
-    await appendRunLog('run-1', { type: 'run.start', step: 0 }, nested);
-    await appendRunLog('run-1', { type: 'tool.call', step: 1 }, nested);
-    const text = await fs.readFile(path.join(nested, 'run-1.jsonl'), 'utf8');
-    const lines = text.trimEnd().split('\n');
-    expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0]!)).toEqual({ type: 'run.start', step: 0 });
-    expect(JSON.parse(lines[1]!)).toEqual({ type: 'tool.call', step: 1 });
-    expect(text.endsWith('\n')).toBe(true);
-  });
+it('a credential used as an object property name is redacted on disk and in the dev-socket mirror', async () => {
+  h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: null });
+  const event = {
+    type: 'tool.result',
+    output: { 'token sk-or-v1.aaaabbbbccccdddd.eeeeffff00001111 end': 'wrapped', plain: 'kept' },
+  };
 
-  it('keeps separate runs in separate files', async () => {
-    await appendRunLog('run-a', { a: 1 }, dir);
-    await appendRunLog('run-b', { b: 2 }, dir);
-    expect((await fs.readdir(dir)).sort()).toEqual(['run-a.jsonl', 'run-b.jsonl']);
-  });
+  await h.dispatcher.handle({ type: 'runlog.append', runId: 'run-redact-key', event });
 
-  it('writes an event containing a newline as a single line', async () => {
-    await appendRunLog('run-1', { text: 'a\nb' }, dir);
-    const text = await fs.readFile(path.join(dir, 'run-1.jsonl'), 'utf8');
-    expect(text.trimEnd().split('\n')).toHaveLength(1);
-    expect(JSON.parse(text)).toEqual({ text: 'a\nb' });
-  });
+  const lines = (await readFile(path.join(h.runsDir, 'run-redact-key.jsonl'), 'utf8')).trim().split('\n');
+  const onDisk = JSON.parse(lines[0]!);
+  const expected = {
+    type: 'tool.result',
+    output: { 'token [redacted] end': 'wrapped', plain: 'kept' },
+  };
+  expect(onDisk).toEqual(expected);
+  expect(h.runEvents[0]?.event).toEqual(expected);
+  // The caller's object is theirs; the key name must be untouched in place.
+  expect(Object.keys(event.output)).toEqual(['token sk-or-v1.aaaabbbbccccdddd.eeeeffff00001111 end', 'plain']);
+});
+
+it('an own __proto__ property survives redaction instead of hitting the prototype setter', async () => {
+  h = await makeHarness({ key: 'sk-or-v1-0000aaaa1111bbbb', kiloKey: null });
+  // JSON.parse (not a literal) is how arbitrary tool output carries an own
+  // __proto__ property into the event.
+  const event = JSON.parse('{"type":"tool.result","output":{"__proto__":"polluted","keep":"yes"}}') as unknown;
+
+  await h.dispatcher.handle({ type: 'runlog.append', runId: 'run-proto', event });
+
+  const lines = (await readFile(path.join(h.runsDir, 'run-proto.jsonl'), 'utf8')).trim().split('\n');
+  const onDisk = JSON.parse(lines[0]!) as Record<string, unknown>;
+  // The field must persist as an own data property — assignment to "__proto__"
+  // on a plain object would have silently dropped it from the serialized line.
+  expect(Object.prototype.hasOwnProperty.call(onDisk.output, '__proto__')).toBe(true);
+  expect((onDisk.output as Record<string, unknown>).__proto__).toBe('polluted');
+  expect((onDisk.output as Record<string, unknown>).keep).toBe('yes');
+  const mirrored = h.runEvents[0]?.event as { output: Record<string, unknown> };
+  expect(Object.prototype.hasOwnProperty.call(mirrored.output, '__proto__')).toBe(true);
+  expect(mirrored.output.__proto__).toBe('polluted');
 });

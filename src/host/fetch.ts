@@ -50,28 +50,18 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
-/** Injects `provider: { data_collection: "deny" }` (C-07) when the body has none. Never touches `model`. */
-function withDataCollectionDeny(parsed: unknown): unknown {
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed;
-  const obj = parsed as Record<string, unknown>;
-  if ('provider' in obj) return obj;
-  return { ...obj, provider: { data_collection: 'deny' } };
-}
-
 /**
- * Parses a request body as JSON and injects the OpenRouter privacy default; falls
- * back to the raw text if it isn't JSON. `provider` is an OpenRouter-shaped field
- * that Kilo does not use, so it is only injected for an OpenRouter-bound request.
+ * Parses a request body as JSON, falling back to the raw text if it isn't JSON. The
+ * body is forwarded as sent: no `provider.data_collection` is added, so the user's
+ * OpenRouter privacy settings alone decide which endpoints may serve it.
  */
-function parseBody(text: string | undefined, isOpenRouter: boolean): unknown {
+function parseBody(text: string | undefined): unknown {
   if (text === undefined || text.length === 0) return undefined;
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     return text;
   }
-  return isOpenRouter ? withDataCollectionDeny(parsed) : parsed;
 }
 
 function toBodyString(body: BodyInit | null | undefined): string | undefined {
@@ -188,10 +178,8 @@ export function createHostFetch(client: LlmClient): typeof fetch {
     if (!ALLOWED_PREFIXES.some((prefix) => url.startsWith(prefix))) {
       return Promise.reject(new TypeError(`refusing to proxy off-origin url: ${url}`));
     }
-    const isOpenRouter = url.startsWith(OPENROUTER_PREFIX);
-
     const start = (text: string | undefined): Promise<Response> =>
-      startRequest(client, { url, method, headers, body: parseBody(text, isOpenRouter) }, signal);
+      startRequest(client, { url, method, headers, body: parseBody(text) }, signal);
 
     return bodyPromise ? bodyPromise.then(start) : start(bodyText);
   };

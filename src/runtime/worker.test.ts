@@ -1,674 +1,701 @@
-/**
- * Every message in `src/messaging/contract.ts`, driven over `FakeBrowserPort`
- * exactly as the side panel drives it, plus the host-pushed dev trigger.
- *
- * The run manager here is the real one with a scripted `startRun` seam, so
- * "fanned out to two panels and to the host run log" is asserted end to end
- * rather than against a stub.
- */
 import { describe, expect, it, vi } from 'vitest';
-import {
-  createChannel,
-  createFakePortPair,
-  HUB_MESSAGE,
-  type Envelope,
-  type ModelInfo,
-  type PanelToWorker,
-  type Readiness,
-  type RunEvent,
-} from '@/src/messaging';
-import type { Config } from '@/src/storage';
-import { FakeChatModel } from '@/src/agent/models';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { RunEndedEvent, RunHandle, StartRunOptions } from '@/src/agent/run';
-import type { ExtLogEntry } from './errorLog';
-import { RunManager } from './runManager';
+import { createChannel, createFakePortPair, type Envelope, type RunEvent } from '@/src/messaging';
+import type { Config } from '@/src/storage';
+import { FakeNativePort, HostClient } from '@/src/host/native';
+import { RunManager, type HostRunEndEvent, type RunLogSink, type TabsPort } from './runManager';
 import type { RuntimeDriver } from './pageTools';
-import { memoryStores, type ReplayStore } from './durability';
-import {
-  applyRunOptions,
-  createWorker,
-  HOST_UNREACHABLE_REASON,
-  type DevRunStart,
-  type HostPort,
-  type Worker,
-} from './worker';
+import { createWorker, type DevRunStart, type HostPort } from './worker';
+import { createChatModel } from '@/src/agent/models';
+import { MemorySaver } from '@langchain/langgraph/web';
 
-const config: Config = {
-  leaderModel: 'fake/leader',
-  followerModel: 'fake/follower',
+const CLOCK = 1_700_000_000_000;
+
+const panelConfig = (): Config => ({
+  leaderModel: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+  followerModel: 'nvidia/nemotron-3.5-lightning:free',
   observe: 'dom',
   planningInterval: 5,
-  maxSteps: 10,
+  maxSteps: 50,
   inputFidelity: 'in-page',
-};
+});
 
-const ok = { ok: true as const };
-
-function fakeDriver(navigated: string[] = []): RuntimeDriver {
+function hostPort(): HostPort {
   return {
-    snapshot: async () => ({ ok: true, text: '', nodes: 0, truncated: false, approxTokens: 0, url: '', title: '' }),
-    screenshot: async () => ({ ok: true, dataUrl: 'data:image/png;base64,x', width: 1, height: 1 }),
-    extractText: async () => ({ ok: true, text: '', truncated: false }),
-    click: async () => ok,
-    type: async () => ok,
-    press: async () => ok,
-    select: async () => ok,
-    scroll: async () => ok,
-    hover: async () => ok,
-    ping_: async () => ({ ok: true, width: 800, height: 600 }),
-    getBox: async () => ({ ok: true, box: { x: 0, y: 0, width: 10, height: 10, centerX: 5, centerY: 5 } }),
-    navigate: async (_tabId, url) => {
-      navigated.push(url);
-      return ok;
+    async keyStatus() {
+      return { hostConnected: true, keyReady: true };
     },
-    download: async () => ({ ok: true, downloadId: 1 }),
-    saveFile: async () => ({ ok: true, downloadId: 2 }),
+    async listModels() {
+      return [];
+    },
+    appendRunLog() {},
+    onRunStart() {
+      return () => {};
+    },
+    onRunAbort() {
+      return () => {};
+    },
+    appendLog() {},
+    onExtReload() {
+      return () => {};
+    },
   };
 }
 
-const endedOk: RunEndedEvent = { kind: 'run.ended', status: 'done', message: 'objective complete', steps: 1, at: 9 };
+function model(): BaseChatModel {
+  return {} as BaseChatModel;
+}
 
-/** `startRun` seam: emits one `step`, then ends when `finish()` is called. */
-function scriptedStart() {
-  const seen: StartRunOptions[] = [];
-  let release: (() => void) | undefined;
-  const start = (options: StartRunOptions): RunHandle => {
-    seen.push(options);
-    const runId = options.runId ?? 'generated';
-    options.onEvent({
-      kind: 'run.started',
-      runId,
-      prompt: options.prompt,
-      config: options.config,
-      tabId: options.tabId ?? -1,
-      url: options.url ?? '',
-      at: 1,
+function idleHandle(runId: string): RunHandle {
+  return {
+    runId,
+    pause() {},
+    resume() {},
+    abort() {},
+    done: new Promise<RunEndedEvent>(() => {}),
+  };
+}
+
+function pageDriver(
+  pages: Map<number, string>,
+  navigate: (tabId: number, url: string) => void,
+): RuntimeDriver {
+  const ok = async () => ({ ok: true as const });
+  return {
+    async snapshot(tabId) {
+      const text = pages.get(tabId);
+      if (text === undefined) return { ok: false, error: 'unknown tab' };
+      return { ok: true, text };
+    },
+    screenshot: async () => ({ ok: true, dataUrl: 'data:image/png;base64,xx' }),
+    extractText: async () => ({ ok: true, text: '' }),
+    click: ok,
+    type: ok,
+    press: ok,
+    select: ok,
+    scroll: ok,
+    hover: ok,
+    ping_: async () => ({ ok: true, width: 1280, height: 720 }),
+    getBox: async () => ({ ok: true, box: { x: 0, y: 0, width: 8, height: 8, centerX: 4, centerY: 4 } }),
+    async navigate(tabId, url) {
+      navigate(tabId, url);
+      return { ok: true };
+    },
+    download: ok,
+    saveFile: ok,
+  };
+}
+
+function runEventsOf(port: { onMessage(handler: (message: Envelope) => void): () => void }): Array<{
+  runId: string;
+  event: RunEvent;
+}> {
+  const events: Array<{ runId: string; event: RunEvent }> = [];
+  port.onMessage((envelope) => {
+    if (envelope?.type !== 'run.event') return;
+    const payload = envelope.payload as { runId?: unknown; event?: RunEvent };
+    if (typeof payload?.runId !== 'string' || !payload.event) return;
+    events.push({ runId: payload.runId, event: payload.event });
+  });
+  return events;
+}
+
+describe('worker', () => {
+  it('sends the CLI run.end terminator after model timeouts exhaust retries', async () => {
+    let attempts = 0;
+    const hangingFetch: typeof fetch = async (_url, init) => {
+      attempts++;
+      return new Promise((_resolve, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+      });
+    };
+    const timedModel = createChatModel({ model: 'fixture:free', fetch: hangingFetch, requestTimeoutMs: 10 });
+    const host = hostPort();
+    let begin!: Parameters<HostPort['onRunStart']>[0];
+    host.onRunStart = (listener) => { begin = listener; return () => {}; };
+    let finish!: (event: HostRunEndEvent) => void;
+    const terminal = new Promise<HostRunEndEvent>((resolve) => { finish = resolve; });
+    host.appendRunLog = (_id, event) => {
+      if ('type' in event && event.type === 'run.end') finish(event);
+    };
+    const tab = { id: 11, url: 'https://example.com' };
+    const manager = new RunManager({
+      driver: pageDriver(new Map([[11, 'fixture page']]), () => {}),
+      tabs: { activeTab: async () => tab, get: async () => tab },
+      host, createModel: () => timedModel, checkpointer: new MemorySaver(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
     });
-    options.onEvent({ kind: 'step', n: 1, role: 'follower', at: 2 });
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+    const worker = createWorker({ host, runManager: manager, getConfig: async () => panelConfig() });
+    try {
+      begin({ runId: 'timeout-cli', prompt: 'read the page' });
+      const ended = await terminal;
+      expect(ended).toMatchObject({ type: 'run.end', runId: 'timeout-cli', status: 'error' });
+      expect(ended.message).toMatch(/timed? ?out/i);
+      expect(attempts).toBe(3);
+      expect(manager.activeRunId).toBeUndefined();
+    } finally {
+      worker.dispose();
+    }
+  });
+
+  it('a panel run binds the tab that was active when it started and does not navigate it, and a later focused tab does not replace it', async () => {
+    const tabs = new Map<number, { id: number; url: string }>([
+      [11, { id: 11, url: 'https://shop.example/item' }],
+      [22, { id: 22, url: 'https://other.example/home' }],
+    ]);
+    const pages = new Map<number, string>([
+      [11, 'Wool socks'],
+      [22, 'Garden rakes'],
+    ]);
+    let activeId = 11;
+    const tabPort: TabsPort = {
+      async activeTab() {
+        const tab = tabs.get(activeId);
+        return tab ? { ...tab } : undefined;
+      },
+      async get(tabId) {
+        const tab = tabs.get(tabId);
+        return tab ? { ...tab } : undefined;
+      },
+    };
+    let first = '';
+    let readAgain: () => Promise<string> = async () => '';
+    let refresh: () => Promise<Array<{ id: string; name: string }>> = async () => [];
+    let opened!: () => void;
+    const open = new Promise<void>((resolve) => {
+      opened = resolve;
     });
-    return {
-      runId,
-      pause: vi.fn(),
-      resume: vi.fn(),
-      abort: vi.fn(),
-      done: gate.then(() => {
-        options.onEvent(endedOk);
-        return endedOk;
+    const manager = new RunManager({
+      driver: pageDriver(pages, (tabId, url) => {
+        const tab = tabs.get(tabId);
+        if (tab) tab.url = url;
+        pages.set(tabId, `navigated to ${url}`);
       }),
-    };
+      tabs: tabPort,
+      host: { appendRunLog() {} } satisfies RunLogSink,
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async (url) => {
+        if (url === 'https://shop.example/item') return [{ id: 'wool', name: 'Wool extract' }];
+        return [{ id: 'rakes', name: 'Rake extract' }];
+      },
+      now: () => CLOCK,
+      start: (options: StartRunOptions) => {
+        void options.tools.snapshot().then(
+          (shot) => {
+            first = shot.text;
+            readAgain = () => options.tools.snapshot().then((next) => next.text);
+            const refreshUserscripts = options.refreshUserscripts;
+            refresh = () => refreshUserscripts?.() ?? Promise.resolve([]);
+            opened();
+          },
+          (error: unknown) => {
+            first = error instanceof Error ? error.message : String(error);
+            opened();
+          },
+        );
+        return idleHandle(options.runId ?? 'panel-run');
+      },
+    });
+    const worker = createWorker({
+      host: hostPort(),
+      runManager: manager,
+      getConfig: async () => ({
+        leaderModel: 'stored-model-not-for-this-run',
+        followerModel: 'stored-follower-not-for-this-run',
+        observe: 'pixels',
+        planningInterval: 9,
+        maxSteps: 3,
+        inputFidelity: 'escalated',
+      }),
+    });
+    const [panelPort, extensionPort] = createFakePortPair();
+    const panel = createChannel(panelPort);
+    const failures: string[] = [];
+    panelPort.onMessage((envelope) => {
+      if (envelope?.type === 'error') failures.push(JSON.stringify(envelope.payload));
+    });
+    worker.connect(extensionPort);
+    panel.send('run.start', { prompt: 'find wool socks', config: panelConfig() });
+    await open;
+
+    expect(failures).toEqual([]);
+    expect(first).toBe('Wool socks');
+    expect(tabs.get(11)).toEqual({ id: 11, url: 'https://shop.example/item' });
+    activeId = 22;
+    expect(await readAgain()).toBe('Wool socks');
+    expect(await refresh()).toEqual([{ id: 'wool', name: 'Wool extract' }]);
+    expect(tabs.get(11)).toEqual({ id: 11, url: 'https://shop.example/item' });
+  });
+
+  it('a second panel receives the same run events', async () => {
+    let published!: () => void;
+    const publishedRun = new Promise<void>((resolve) => {
+      published = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(new Map([[11, 'Wool socks']]), () => {}),
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get(tabId) {
+          return tabId === 11 ? { id: 11, url: 'https://shop.example/item' } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'run-wool-1',
+      start: (options) => {
+        options.onEvent({
+          kind: 'run.started',
+          runId: options.runId ?? '',
+          prompt: options.prompt,
+          config: options.config,
+          tabId: options.tabId ?? -1,
+          url: options.url ?? '',
+          at: CLOCK,
+        });
+        published();
+        return idleHandle(options.runId ?? 'panel-run');
+      },
+    });
+    const worker = createWorker({
+      host: hostPort(),
+      runManager: manager,
+      getConfig: async () => ({
+        leaderModel: 'stored-model-not-for-this-run',
+        followerModel: 'stored-follower-not-for-this-run',
+        observe: 'pixels',
+        planningInterval: 9,
+        maxSteps: 3,
+        inputFidelity: 'escalated',
+      }),
+    });
+    const [firstPort, firstExtension] = createFakePortPair();
+    const [secondPort, secondExtension] = createFakePortPair();
+    const firstEvents = runEventsOf(firstPort);
+    const secondEvents = runEventsOf(secondPort);
+    worker.connect(firstExtension);
+    worker.connect(secondExtension);
+    createChannel(firstPort).send('run.start', { prompt: 'find wool socks', config: panelConfig() });
+    await publishedRun;
+
+    const expected = [
+      {
+        runId: 'run-wool-1',
+        event: {
+          kind: 'run.started',
+          runId: 'run-wool-1',
+          prompt: 'find wool socks',
+          config: {
+            leaderModel: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+            followerModel: 'nvidia/nemotron-3.5-lightning:free',
+            observe: 'dom',
+            planningInterval: 5,
+            maxSteps: 50,
+            inputFidelity: 'in-page',
+          },
+          tabId: 11,
+          url: 'https://shop.example/item',
+          at: 1_700_000_000_000,
+        },
+      },
+      {
+        runId: 'run-wool-1',
+        event: {
+          kind: 'input.fidelity',
+          fidelity: 'in-page',
+          attached: false,
+          at: 1_700_000_000_000,
+        },
+      },
+    ];
+    expect(firstEvents).toEqual(expected);
+    expect(secondEvents).toEqual(expected);
+  });
+
+  it('a null or non-object envelope does not throw, and a later run.start still acts on the tab', async () => {
+    const pages = new Map<number, string>([
+      [11, 'Wool socks'],
+      [22, 'Garden rakes'],
+    ]);
+    let read = '';
+    let opened!: () => void;
+    const open = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(pages, () => {}),
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get(tabId) {
+          return tabId === 11 ? { id: 11, url: 'https://shop.example/item' } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      start: (options) => {
+        void options.tools.snapshot().then(
+          (shot) => {
+            read = shot.text;
+            opened();
+          },
+          (error: unknown) => {
+            read = error instanceof Error ? error.message : String(error);
+            opened();
+          },
+        );
+        return idleHandle(options.runId ?? 'panel-run');
+      },
+    });
+    const worker = createWorker({
+      host: hostPort(),
+      runManager: manager,
+      getConfig: async () => panelConfig(),
+    });
+    const [panelPort, extensionPort] = createFakePortPair();
+    const panel = createChannel(panelPort);
+    worker.connect(extensionPort);
+
+    expect(() => panelPort.postMessage(null as never)).not.toThrow();
+    expect(() => panelPort.postMessage(0 as never)).not.toThrow();
+    panel.send('run.start', { prompt: 'find wool socks', config: panelConfig() });
+    await open;
+    expect(read).toBe('Wool socks');
+  });
+
+  it('a dev trigger with a url while a panel run is in progress is refused without navigating the running tab', async () => {
+    const pages = new Map<number, string>([[11, 'Wool socks']]);
+    const navigations: Array<{ tabId: number; url: string }> = [];
+    let begun!: () => void;
+    const panelRunBegun = new Promise<void>((resolve) => {
+      begun = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(pages, (tabId, url) => navigations.push({ tabId, url })),
+      tabs: {
+        async activeTab() {
+          return { id: 11, url: 'https://shop.example/item' };
+        },
+        async get(tabId) {
+          return tabId === 11 ? { id: 11, url: 'https://shop.example/item' } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      newRunId: () => 'panel-run',
+      start: (options) => {
+        begun();
+        return idleHandle(options.runId ?? 'panel-run');
+      },
+    });
+    const dev = devHost();
+    const worker = createWorker({ host: dev.host, runManager: manager, getConfig: async () => panelConfig() });
+    const [panelPort, extensionPort] = createFakePortPair();
+    worker.connect(extensionPort);
+    createChannel(panelPort).send('run.start', { prompt: 'find wool socks', config: panelConfig() });
+    await panelRunBegun;
+
+    dev.trigger({ runId: 'dev-run', prompt: 'find garden rakes', url: 'https://garden.example/rakes' });
+    const end = await dev.ended('dev-run');
+
+    expect(navigations).toEqual([]);
+    expect(end).toMatchObject({
+      status: 'error',
+      message: 'a run is already in progress (panel-run); abort it first',
+      steps: 0,
+    });
+    expect(manager.activeRunId).toBe('panel-run');
+  });
+
+  it("a dev trigger's url is opened in the tab the run then binds, even when focus moves during the navigation", async () => {
+    const tabs = new Map<number, { id: number; url: string }>([
+      [11, { id: 11, url: 'https://shop.example/item' }],
+      [22, { id: 22, url: 'https://mail.example/inbox' }],
+    ]);
+    const pages = new Map<number, string>([
+      [11, 'Wool socks'],
+      [22, 'Inbox'],
+    ]);
+    let activeId = 11;
+    let bound: { tabId?: number; url?: string; page?: string } = {};
+    let opened!: () => void;
+    const open = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const manager = new RunManager({
+      driver: pageDriver(pages, (tabId, url) => {
+        const tab = tabs.get(tabId);
+        if (tab) tab.url = url;
+        pages.set(tabId, `navigated to ${url}`);
+        // The user switches tabs while the page loads.
+        activeId = 22;
+      }),
+      tabs: {
+        async activeTab() {
+          const tab = tabs.get(activeId);
+          return tab ? { ...tab } : undefined;
+        },
+        async get(tabId) {
+          const tab = tabs.get(tabId);
+          return tab ? { ...tab } : undefined;
+        },
+      },
+      host: { appendRunLog() {} },
+      createModel: () => model(),
+      runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+      listAvailableUserscripts: async () => [],
+      now: () => CLOCK,
+      start: (options) => {
+        void options.tools.snapshot().then((shot) => {
+          bound = { tabId: options.tabId, url: options.url, page: shot.text };
+          opened();
+        });
+        return idleHandle(options.runId ?? 'dev-run');
+      },
+    });
+    const dev = devHost();
+    createWorker({ host: dev.host, runManager: manager, getConfig: async () => panelConfig() });
+
+    dev.trigger({ runId: 'dev-run', prompt: 'find garden rakes', url: 'https://garden.example/rakes' });
+    await open;
+
+    expect(bound).toEqual({
+      tabId: 11,
+      url: 'https://garden.example/rakes',
+      page: 'navigated to https://garden.example/rakes',
+    });
+    expect(pages.get(22)).toBe('Inbox');
+  });
+});
+
+/** Real worker/manager/native-client wiring; only the host and browser effects are fake. */
+function readinessFixture(stored = panelConfig()) {
+  const native = new FakeNativePort();
+  const host = new HostClient(() => native);
+  const createModel = vi.fn(() => model());
+  const saveLastRunId = vi.fn(async () => {});
+  const navigate = vi.fn();
+  const start = vi.fn((options: StartRunOptions) => idleHandle(options.runId!));
+  const manager = new RunManager({
+    driver: pageDriver(new Map([[11, 'fixture page']]), navigate),
+    tabs: {
+      activeTab: async () => ({ id: 11, url: 'https://example.test/' }),
+      get: async () => ({ id: 11, url: 'https://example.test/' }),
+    },
+    host,
+    createModel,
+    saveLastRunId,
+    runUserscript: async () => ({ scriptId: 'unused', ok: true, console: [], durationMs: 0 }),
+    listAvailableUserscripts: async () => [],
+    start,
+  });
+  const managerStart = vi.spyOn(manager, 'start');
+  const worker = createWorker({ host, runManager: manager, getConfig: async () => stored });
+  const [panelPort, workerPort] = createFakePortPair();
+  const messages: Envelope[] = [];
+  panelPort.onMessage((message) => messages.push(message));
+  worker.connect(workerPort);
+  const panel = createChannel(panelPort);
+  host.connect();
+  const queries = () => native.sent.filter((m) => m.type === 'key.status');
+  const answer = (missing?: string) => {
+    for (const query of queries()) {
+      native.emit({ type: 'key.status.result', id: query.id, ready: query.source !== missing,
+        ...(query.source === missing ? { reason: 'key not configured' } : {}) });
+    }
   };
-  return { start, seen, finish: () => release?.() };
+  const expectNotStarted = () => {
+    expect(managerStart).not.toHaveBeenCalled();
+    expect(createModel).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(saveLastRunId).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(manager.activeRunId).toBeUndefined();
+    expect(native.sent.some((m) => m.type === 'llm.request')).toBe(false);
+  };
+  return { host, native, panel, messages, manager, managerStart, createModel, start,
+    queries, answer, expectNotStarted, close: () => { worker.dispose(); panel.close(); host.close(); } };
 }
 
-class FakeHost implements HostPort {
-  readonly log: Array<{ runId: string; event: unknown }> = [];
-  readonly listCalls: number[] = [];
-  models: ModelInfo[] = [
-    { id: 'a/one:free', name: 'One', free: true, vision: false, tools: true, contextLength: 8000 },
-  ];
-  modelsError: Error | undefined;
-  readiness: Readiness = { hostConnected: true, keyReady: true };
-  devTrigger: ((msg: DevRunStart) => void) | undefined;
-  abortTrigger: ((msg: { runId: string }) => void) | undefined;
-  reloadTrigger: (() => void) | undefined;
-  readonly logs: ExtLogEntry[] = [];
-  readonly artifacts: Array<{ runId: string; filename: string; content: string }> = [];
-
-  async saveArtifact(runId: string, filename: string, content: string): Promise<{ path: string; bytes: number }> {
-    this.artifacts.push({ runId, filename, content });
-    return { path: `/artifacts/${runId}/${filename}`, bytes: content.length };
-  }
-
-  async keyStatus(): Promise<Readiness> {
-    return this.readiness;
-  }
-  async listModels(): Promise<ModelInfo[]> {
-    this.listCalls.push(Date.now());
-    if (this.modelsError) throw this.modelsError;
-    return this.models;
-  }
-  appendRunLog(runId: string, event: unknown): void {
-    this.log.push({ runId, event });
-  }
-  onRunStart(handler: (msg: DevRunStart) => void): () => void {
-    this.devTrigger = handler;
-    return () => {
-      this.devTrigger = undefined;
-    };
-  }
-  onRunAbort(handler: (msg: { runId: string }) => void): () => void {
-    this.abortTrigger = handler;
-    return () => {
-      this.abortTrigger = undefined;
-    };
-  }
-  appendLog(entry: ExtLogEntry): void {
-    this.logs.push(entry);
-  }
-  onExtReload(handler: () => void): () => void {
-    this.reloadTrigger = handler;
-    return () => {
-      this.reloadTrigger = undefined;
-    };
-  }
-}
-
-interface Panel {
-  sent: Envelope<unknown>[];
-  send<K extends keyof PanelToWorker>(type: K, payload: PanelToWorker[K]): void;
-  ping(): void;
-  received(type: string): unknown[];
-}
-
-interface Harness {
-  worker: Worker;
-  host: FakeHost;
-  runManager: RunManager;
-  scripted: ReturnType<typeof scriptedStart>;
-  navigated: string[];
-  connect(): Panel;
-  now: { value: number };
-}
-
-function harness(
-  options: {
-    handleUserscript?: Parameters<typeof createWorker>[0]['handleUserscript'];
-    tabUrl?: string;
-    reloadExtension?: () => void;
-    getLastRunId?: () => Promise<string | null>;
-    replayStore?: ReplayStore;
-  } = {},
-): Harness {
-  const host = new FakeHost();
-  const scripted = scriptedStart();
-  const navigated: string[] = [];
-  const now = { value: 1_000 };
-  const url = options.tabUrl ?? 'https://example.test/';
-
-  const runManager = new RunManager({
-    driver: fakeDriver(navigated),
-    tabs: { activeTab: async () => ({ id: 3, url }), get: async () => ({ id: 3, url }) },
-    host,
-    createModel: (model) => new FakeChatModel({ label: model }),
-    runUserscript: async (scriptId) => ({ scriptId, ok: true, console: [], durationMs: 0 }),
-    start: scripted.start,
-    newRunId: () => 'run-1',
-    ...(options.replayStore ? { replayStore: options.replayStore } : {}),
+describe('selected-source readiness at the worker boundary', () => {
+  it.each([
+    ['openrouter', 'leader'], ['kilo', 'leader'], ['openrouter', 'follower'], ['kilo', 'follower'],
+  ] as const)('a missing %s key for the %s blocks both readiness and a direct start despite the other ready key', async (missing, role) => {
+    const f = readinessFixture();
+    try {
+      const other = missing === 'openrouter' ? 'kilo' : 'openrouter';
+      const config: Config = { ...panelConfig(), leaderModelSource: role === 'leader' ? missing : other,
+        followerModelSource: role === 'follower' ? missing : other };
+      f.panel.send('readiness.get', { ...config, requestId: 'selection-1' });
+      expect(f.queries().map((q) => q.source)).toEqual([config.leaderModelSource, config.followerModelSource]);
+      f.answer(missing);
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({
+        type: 'readiness', payload: { hostConnected: true, keyReady: false,
+          reason: `${missing}: key not configured`, requestId: 'selection-1' },
+      })));
+      f.panel.send('run.start', { prompt: 'fixture', config });
+      expect(f.queries()).toHaveLength(4); // Start revalidates, independent of any panel answer.
+      f.answer(missing);
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({
+        type: 'error', payload: { inReplyTo: 'run.start', message: `${missing}: key not configured` },
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
   });
 
-  const worker = createWorker({
-    host,
-    runManager,
-    getConfig: async () => config,
-    extensionVersion: '9.9.9',
-    now: () => now.value,
-    ...(options.handleUserscript ? { handleUserscript: options.handleUserscript } : {}),
-    ...(options.reloadExtension ? { reloadExtension: options.reloadExtension } : {}),
-    ...(options.getLastRunId ? { getLastRunId: options.getLastRunId } : {}),
+  it.each([
+    { name: 'mixed sources', selection: { leaderModelSource: 'kilo', followerModelSource: 'openrouter' }, sources: ['kilo', 'openrouter'] },
+    { name: 'shared Kilo source checked once', selection: { leaderModelSource: 'kilo', followerModelSource: 'kilo' }, sources: ['kilo'] },
+    { name: 'legacy omitted sources use OpenRouter once', selection: {}, sources: ['openrouter'] },
+    { name: 'only the omitted role defaults to OpenRouter', selection: { leaderModelSource: 'kilo' }, sources: ['kilo', 'openrouter'] },
+  ] as const)('$name starts only after all selected keys are ready', async ({ selection, sources }) => {
+    const f = readinessFixture();
+    try {
+      // Arbitrary model ids remain allowed, regardless of pricing or catalog membership.
+      const config = { ...panelConfig(), leaderModel: 'any-model', ...selection };
+      f.panel.send('run.start', { prompt: 'fixture', config });
+      expect(f.queries().map((q) => q.source)).toEqual(sources);
+      f.expectNotStarted();
+      if (sources.length > 1) {
+        f.native.emit({ type: 'key.status.result', id: f.queries()[0]!.id, ready: true });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        f.expectNotStarted(); // One ready source cannot release a mixed-source run.
+      }
+      f.answer();
+      await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
+      expect(f.managerStart).toHaveBeenCalledWith({ prompt: 'fixture', config, followerVision: undefined });
+      expect(f.createModel.mock.calls).toHaveLength(2);
+    } finally { f.close(); }
   });
 
+  it.each(['disconnect', 'host error', 'thrown error'] as const)('%s fails closed with connection diagnostics before starting', async (failure) => {
+    const f = readinessFixture();
+    try {
+      if (failure === 'thrown error') vi.spyOn(f.host, 'keyStatus').mockRejectedValue(new Error('fixture transport failure'));
+      f.panel.send('readiness.get', { requestId: 'connection-check' });
+      f.panel.send('run.start', { prompt: 'fixture', config: panelConfig() });
+      if (failure === 'disconnect') f.native.disconnect();
+      if (failure === 'host error') {
+        for (const q of f.queries()) f.native.emit({ type: 'error', id: q.id, code: 'io', message: 'fixture transport failure' });
+      }
+      await vi.waitFor(() => expect(f.messages).toContainEqual(expect.objectContaining({ type: 'error', payload: {
+        inReplyTo: 'run.start', message: expect.stringContaining('native host not reachable'),
+      } })));
+      expect(f.messages).toContainEqual(expect.objectContaining({ type: 'readiness', payload: {
+        requestId: 'connection-check', hostConnected: false, keyReady: false,
+        reason: expect.stringContaining('native host not reachable'),
+      } }));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it.each([false, true])('host-trigger startup checks the effective stored config with overrides=%s before navigation', async (override) => {
+    const f = readinessFixture({ ...panelConfig(), leaderModelSource: 'kilo', followerModelSource: 'kilo' });
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture', url: 'https://example.test/next',
+        ...(override ? { options: { leaderModelSource: 'openrouter' } } : {}) });
+      await vi.waitFor(() => expect(f.queries()).toHaveLength(override ? 2 : 1));
+      expect(f.queries().map((q) => q.source)).toEqual(override ? ['openrouter', 'kilo'] : ['kilo']);
+      f.answer(override ? 'openrouter' : 'kilo');
+      await vi.waitFor(() => expect(f.native.sent).toContainEqual(expect.objectContaining({
+        type: 'runlog.append', runId: 'cli-fixture', event: expect.objectContaining({
+          type: 'run.end', status: 'error', steps: 0,
+          message: `${override ? 'openrouter' : 'kilo'}: key not configured`,
+        }),
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it('a host-trigger cancel while readiness is pending ends the run aborted without starting it', async () => {
+    const f = readinessFixture();
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture', url: 'https://example.test/next' });
+      await vi.waitFor(() => expect(f.queries()).toHaveLength(1));
+      // No run-manager slot exists yet; the cancel must still stop the run once readiness resolves.
+      f.native.emit({ type: 'run.abort', runId: 'cli-fixture' });
+      f.answer();
+      await vi.waitFor(() => expect(f.native.sent).toContainEqual(expect.objectContaining({
+        type: 'runlog.append', runId: 'cli-fixture', event: expect.objectContaining({
+          type: 'run.end', status: 'aborted', steps: 0,
+        }),
+      })));
+      f.expectNotStarted();
+    } finally { f.close(); }
+  });
+
+  it('a host-trigger override to a ready source starts even if the stored source has no key', async () => {
+    const f = readinessFixture();
+    try {
+      f.native.emit({ type: 'run.start', runId: 'cli-fixture', prompt: 'fixture',
+        options: { leaderModelSource: 'kilo', followerModelSource: 'kilo', observe: 'both' } });
+      await vi.waitFor(() => expect(f.queries().map((q) => q.source)).toEqual(['kilo']));
+      f.answer('openrouter');
+      await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
+      expect(f.managerStart).toHaveBeenCalledWith(expect.objectContaining({
+        config: { ...panelConfig(), leaderModelSource: 'kilo', followerModelSource: 'kilo', observe: 'both' },
+      }));
+    } finally { f.close(); }
+  });
+
+  it.each(['dom', 'pixels', 'both'] as const)('selected-source checking preserves %s behavior for a known text-only follower', async (observe) => {
+    const f = readinessFixture();
+    try {
+      f.panel.send('run.start', { prompt: 'fixture', config: { ...panelConfig(), observe }, followerVision: false });
+      f.answer();
+      await vi.waitFor(() => expect(f.managerStart).toHaveBeenCalledOnce());
+      const result = await f.managerStart.mock.results[0]!.value;
+      expect(result.ok).toBe(observe === 'dom');
+      if (observe === 'dom') expect(f.start).toHaveBeenCalledOnce();
+      else {
+        expect(f.createModel).not.toHaveBeenCalled();
+        expect(f.start).not.toHaveBeenCalled();
+        expect((await result.done).message).toContain('vision');
+      }
+    } finally { f.close(); }
+  });
+});
+
+/** A host whose dev trigger the test fires, and whose `run.end` frames it can await. */
+function devHost(): {
+  host: HostPort;
+  trigger(msg: DevRunStart): void;
+  ended(runId: string): Promise<HostRunEndEvent>;
+} {
+  let onRunStart: ((msg: DevRunStart) => void) | undefined;
+  const ends = new Map<string, (event: HostRunEndEvent) => void>();
+  const host: HostPort = {
+    ...hostPort(),
+    appendRunLog(runId, event) {
+      if ('type' in event && event.type === 'run.end') ends.get(runId)?.(event);
+    },
+    onRunStart(handler) {
+      onRunStart = handler;
+      return () => {};
+    },
+  };
   return {
-    worker,
     host,
-    runManager,
-    scripted,
-    navigated,
-    now,
-    connect(): Panel {
-      const [workerSide, panelSide] = createFakePortPair();
-      // The panel end listens first, as it does in the browser: the side panel
-      // calls `chrome.runtime.connect` and attaches its handler before the
-      // worker's `onConnect` fires.
-      const channel = createChannel<unknown, unknown>(panelSide);
-      const sent: Envelope<unknown>[] = [];
-      channel.onMessage((envelope) => sent.push(envelope));
-      worker.connect(workerSide);
-      return {
-        sent,
-        send(type, payload) {
-          channel.send(type, payload);
-        },
-        ping() {
-          channel.send(HUB_MESSAGE, { kind: 'ping', at: 1 });
-        },
-        received(type) {
-          return sent.filter((e) => e.type === type).map((e) => e.payload);
-        },
-      };
+    trigger(msg) {
+      onRunStart?.(msg);
+    },
+    ended(runId) {
+      return new Promise((resolve) => ends.set(runId, resolve));
     },
   };
 }
-
-const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-
-describe('createWorker: hub', () => {
-  it('greets a panel on connect and answers its heartbeat', async () => {
-    const h = harness();
-    const panel = h.connect();
-    expect(panel.received(HUB_MESSAGE)).toEqual([{ kind: 'hello', extensionVersion: '9.9.9' }]);
-
-    panel.ping();
-    await settle();
-    expect(panel.received(HUB_MESSAGE).at(-1)).toEqual({ kind: 'pong', at: 1_000 });
-    expect(h.worker.panelCount).toBe(1);
-  });
-});
-
-describe('createWorker: models.list', () => {
-  it('answers from the host and then from the cache for ten minutes', async () => {
-    const h = harness();
-    const panel = h.connect();
-
-    panel.send('models.list', {});
-    await settle();
-    expect(panel.received('models.list')).toEqual([{ models: h.host.models }]);
-
-    panel.send('models.list', {});
-    await settle();
-    expect(h.host.listCalls).toHaveLength(1);
-
-    h.now.value += 10 * 60 * 1000 + 1;
-    panel.send('models.list', {});
-    await settle();
-    expect(h.host.listCalls).toHaveLength(2);
-  });
-
-  it('replies with an error, not a throw, when the host cannot list models', async () => {
-    const h = harness();
-    h.host.modelsError = new Error('host disconnected');
-    const panel = h.connect();
-    panel.send('models.list', {});
-    await settle();
-    expect(panel.received('models.list')).toEqual([{ error: 'host disconnected' }]);
-  });
-});
-
-describe('createWorker: readiness.get', () => {
-  it('passes a validated readiness through unchanged (R-11)', async () => {
-    const h = harness();
-    h.host.readiness = { hostConnected: true, keyReady: false, reason: 'no key in the store' };
-    const panel = h.connect();
-    panel.send('readiness.get', {});
-    await settle();
-    expect(panel.received('readiness')).toEqual([{ hostConnected: true, keyReady: false, reason: 'no key in the store' }]);
-  });
-
-  it('maps a host-connection failure to an actionable reason', async () => {
-    const h = harness();
-    h.host.readiness = { hostConnected: false, keyReady: false, reason: 'host disconnected' };
-    const panel = h.connect();
-    panel.send('readiness.get', {});
-    await settle();
-    const readiness = panel.received('readiness')[0] as Readiness;
-    expect(readiness.hostConnected).toBe(false);
-    expect(readiness.reason).toContain(HOST_UNREACHABLE_REASON);
-    expect(readiness.reason).toContain('host/install.sh');
-    expect(readiness.reason).toContain('host disconnected');
-  });
-});
-
-describe('createWorker: runs', () => {
-  it('fans every run event out to every panel and to the host run log (R-07)', async () => {
-    const h = harness();
-    const one = h.connect();
-    const two = h.connect();
-
-    one.send('run.start', { prompt: 'find the price', config });
-    await settle();
-    h.scripted.finish();
-    await settle();
-
-    const kinds = (panel: Panel): string[] =>
-      panel.received('run.event').map((p) => (p as { event: RunEvent }).event.kind);
-    expect(kinds(one)).toEqual(['run.started', 'input.fidelity', 'step', 'run.ended']);
-    expect(kinds(two)).toEqual(kinds(one));
-    expect(h.host.log.map((entry) => (entry.event as RunEvent).kind)).toEqual(kinds(one));
-    expect(h.host.log.every((entry) => entry.runId === 'run-1')).toBe(true);
-  });
-
-  it('refuses pixels for a known text-only follower named by the panel, instead of running blind', async () => {
-    const h = harness();
-    const panel = h.connect();
-    panel.send('run.start', {
-      prompt: 'go',
-      config: { ...config, observe: 'pixels' },
-      followerVision: false,
-    });
-    await settle();
-
-    const ended = panel
-      .received('run.event')
-      .map((p) => (p as { event: RunEvent }).event)
-      .find((e) => e.kind === 'run.ended');
-    expect(ended).toMatchObject({ kind: 'run.ended', status: 'error', steps: 0 });
-    expect((ended as { message: string }).message).toContain('cannot see images');
-  });
-
-  it('restores the last run at startup so an unattended run terminates without a panel', async () => {
-    const stores = memoryStores();
-    await stores.replay.save('run-9', [
-      { kind: 'run.started', runId: 'run-9', prompt: 'go', config, tabId: 3, url: 'https://example.test/', at: 1 },
-      { kind: 'step', n: 1, role: 'follower', at: 2 },
-    ]);
-    const h = harness({ getLastRunId: async () => 'run-9', replayStore: stores.replay });
-    await settle();
-    await settle();
-
-    // The interrupted run got its clean terminal event plus the run.end frame
-    // nb-run exits on — no panel ever connected.
-    const kinds = h.host.log.map((entry) => {
-      const event = entry.event as { kind?: string; type?: string };
-      return event.kind ?? event.type;
-    });
-    expect(kinds).toEqual(['run.ended', 'run.end']);
-    expect(h.host.log[0]?.event).toMatchObject({ status: 'error' });
-    expect(h.host.log[1]?.event).toMatchObject({ type: 'run.end', status: 'error' });
-    expect(h.runManager.replay('run-9').map((e) => e.kind)).toEqual(['run.started', 'step', 'run.ended']);
-  });
-
-  it('replays the buffered log for a reopened panel', async () => {
-    const h = harness();
-    const first = h.connect();
-    first.send('run.start', { prompt: 'go', config });
-    await settle();
-    h.scripted.finish();
-    await settle();
-
-    const reopened = h.connect();
-    reopened.send('runlog.replay', { runId: 'run-1' });
-    await settle();
-    const replay = reopened.received('runlog.replay')[0] as { runId: string; events: RunEvent[] };
-    expect(replay.runId).toBe('run-1');
-    expect(replay.events.map((e) => e.kind)).toEqual(['run.started', 'input.fidelity', 'step', 'run.ended']);
-  });
-
-  it('replays the durable log after a worker restart, ending the interrupted run cleanly (M6)', async () => {
-    const stores = memoryStores();
-    await stores.replay.save('run-9', [
-      {
-        kind: 'run.started',
-        runId: 'run-9',
-        prompt: 'go',
-        config,
-        tabId: 3,
-        url: 'https://example.test/',
-        at: 1,
-      },
-      { kind: 'step', n: 1, role: 'follower', at: 2 },
-    ]);
-
-    // A brand-new manager with an empty ring: everything it knows comes from the store.
-    const host = new FakeHost();
-    const restarted = new RunManager({
-      driver: fakeDriver(),
-      tabs: { activeTab: async () => ({ id: 3, url: 'https://example.test/' }), get: async () => ({ id: 3, url: 'https://example.test/' }) },
-      host,
-      createModel: (model) => new FakeChatModel({ label: model }),
-      runUserscript: async (scriptId) => ({ scriptId, ok: true, console: [], durationMs: 0 }),
-      replayStore: stores.replay,
-    });
-    const worker = createWorker({ host, runManager: restarted, getConfig: async () => config });
-
-    const [workerSide, panelSide] = createFakePortPair();
-    const channel = createChannel<unknown, unknown>(panelSide);
-    const sent: Envelope<unknown>[] = [];
-    channel.onMessage((envelope) => sent.push(envelope));
-    worker.connect(workerSide);
-    channel.send('runlog.replay', { runId: 'run-9' });
-    await settle();
-
-    const replay = sent.filter((e) => e.type === 'runlog.replay').map((e) => e.payload)[0] as {
-      runId: string;
-      events: RunEvent[];
-    };
-    expect(replay.runId).toBe('run-9');
-    expect(replay.events.map((e) => e.kind)).toEqual(['run.started', 'step', 'run.ended']);
-    expect(replay.events.at(-1)).toMatchObject({ status: 'error' });
-    expect((replay.events.at(-1) as { message: string }).message).toContain('restarted');
-  });
-
-  it('delegates pause, resume and abort to the live run', async () => {
-    const h = harness();
-    const panel = h.connect();
-    panel.send('run.start', { prompt: 'go', config });
-    await settle();
-
-    const pause = vi.spyOn(h.runManager, 'pause');
-    const abort = vi.spyOn(h.runManager, 'abort');
-    panel.send('run.pause', { runId: 'run-1' });
-    panel.send('run.abort', { runId: 'run-1' });
-    await settle();
-    expect(pause).toHaveBeenCalledWith('run-1');
-    expect(abort).toHaveBeenCalledWith('run-1');
-    h.scripted.finish();
-    await settle();
-  });
-
-  // Regression: killing the CLI client that started a dev-triggered run left it running
-  // forever -- there was no path from the dev socket to `runManager.abort`. `cancel` now
-  // pushes a host `run.abort`, which the worker must forward the same way a panel's does.
-  it('forwards a host-pushed run.abort to the live run, same as a panel-initiated one', async () => {
-    const h = harness();
-    h.host.devTrigger?.({ runId: 'run-dev', prompt: 'go', url: 'https://x.test/' });
-    await settle();
-
-    const abort = vi.spyOn(h.runManager, 'abort');
-    h.host.abortTrigger?.({ runId: 'run-dev' });
-    expect(abort).toHaveBeenCalledWith('run-dev');
-    expect(h.host.logs.at(-1)).toMatchObject({ level: 'info', message: expect.stringContaining('matched active run run-dev') });
-    h.scripted.finish();
-    await settle();
-  });
-
-  // A live test on real Chrome found the failure mode this covers: a `cancel` for a runId
-  // that is not (or no longer) active silently did nothing, with no way to tell the
-  // difference from the fix actually working. Logging the miss makes that diagnosable.
-  it('logs, rather than silently doing nothing, when a host-pushed run.abort matches no active run', async () => {
-    const h = harness();
-    h.host.abortTrigger?.({ runId: 'not-a-real-run' });
-    expect(h.host.logs.at(-1)).toMatchObject({
-      level: 'warn',
-      message: expect.stringContaining('not-a-real-run'),
-    });
-  });
-});
-
-describe('createWorker: userscripts', () => {
-  it('routes a userscript.run to the subsystem and returns its result on the port', async () => {
-    const seen: unknown[] = [];
-    const h = harness({
-      handleUserscript: async (message, context) => {
-        seen.push({ message, tabId: await context?.resolveTabId?.() });
-        if (message.type !== 'userscript.run') return undefined;
-        return {
-          type: 'userscript.result',
-          payload: { scriptId: message.payload.scriptId, ok: true, value: 2, console: [], durationMs: 3 },
-        };
-      },
-    });
-    const panel = h.connect();
-
-    panel.send('userscript.run', { scriptId: 's1', code: 'return 2;' });
-    await settle();
-
-    expect(seen).toEqual([
-      { message: { type: 'userscript.run', payload: { scriptId: 's1', code: 'return 2;' } }, tabId: 3 },
-    ]);
-    expect(panel.received('userscript.result')).toEqual([
-      { scriptId: 's1', ok: true, value: 2, console: [], durationMs: 3 },
-    ]);
-  });
-
-  it('routes list, save and delete and replies with the refreshed list', async () => {
-    const types: string[] = [];
-    const h = harness({
-      handleUserscript: async (message) => {
-        types.push(message.type);
-        return { type: 'userscript.list', payload: { scripts: [] } };
-      },
-    });
-    const panel = h.connect();
-    panel.send('userscript.list', {});
-    panel.send('userscript.save', { id: 'a', name: 'a', matches: ['*://x/*'], code: '1', updatedAt: 0 });
-    panel.send('userscript.delete', { id: 'a' });
-    await settle();
-    expect(types).toEqual(['userscript.list', 'userscript.save', 'userscript.delete']);
-    expect(panel.received('userscript.list')).toHaveLength(3);
-  });
-
-  it('saves each panel\'s own last result, not whichever panel ran last', async () => {
-    const h = harness({
-      handleUserscript: async (message) => {
-        if (message.type !== 'userscript.run') return undefined;
-        return {
-          type: 'userscript.result',
-          payload: { scriptId: message.payload.scriptId, ok: true, value: { from: message.payload.scriptId }, console: [], durationMs: 1 },
-        };
-      },
-    });
-    const first = h.connect();
-    const second = h.connect();
-
-    first.send('userscript.run', { scriptId: 'first', code: '' });
-    await settle();
-    second.send('userscript.run', { scriptId: 'second', code: '' });
-    await settle();
-    first.send('userscript.saveResult', {});
-    await settle();
-
-    expect(h.host.artifacts).toHaveLength(1);
-    expect(JSON.parse(h.host.artifacts[0]!.content)).toEqual({ from: 'first' });
-    expect(first.received('userscript.saved')).toEqual([
-      { filename: 'userscript.json', path: '/artifacts/panel/userscript.json', bytes: h.host.artifacts[0]!.content.length },
-    ]);
-  });
-
-  it('refuses to save before the panel has a result', async () => {
-    const h = harness();
-    const panel = h.connect();
-    panel.send('userscript.saveResult', {});
-    await settle();
-    expect(panel.received('error')).toEqual([{ message: 'no userscript result to save', inReplyTo: 'userscript.saveResult' }]);
-    expect(h.host.artifacts).toEqual([]);
-  });
-
-  it('reports a handler failure as an error message rather than dropping the reply', async () => {
-    const h = harness({
-      handleUserscript: async () => {
-        throw new Error('catalog is corrupt');
-      },
-    });
-    const panel = h.connect();
-    panel.send('userscript.list', {});
-    await settle();
-    expect(panel.received('error')).toEqual([{ message: 'catalog is corrupt', inReplyTo: 'userscript.list' }]);
-  });
-});
-
-describe('createWorker: dev trigger', () => {
-  it('starts the pushed run and answers with run.end when it finishes', async () => {
-    const h = harness();
-    const panel = h.connect();
-
-    h.host.devTrigger?.({ runId: 'run-dev', prompt: 'do the thing', url: 'https://x.test/start' });
-    await settle();
-
-    expect(h.navigated).toEqual(['https://x.test/start']);
-    expect(h.scripted.seen[0]?.runId).toBe('run-dev');
-    // The panel sees the dev run too — it is the same run log (R-07).
-    expect(panel.received('run.event')).not.toHaveLength(0);
-
-    h.scripted.finish();
-    await settle();
-
-    expect(h.host.log.at(-1)).toEqual({
-      runId: 'run-dev',
-      event: { type: 'run.end', runId: 'run-dev', status: 'done', message: 'objective complete', steps: 1, at: 1_000 },
-    });
-  });
-
-  it('answers with run.end(error) when the requested url cannot be opened', async () => {
-    const h = harness({ tabUrl: 'chrome://settings' });
-    h.host.devTrigger?.({ runId: 'run-dev', prompt: 'go', url: 'https://x.test/' });
-    await settle();
-    expect(h.host.log.at(-1)?.event).toMatchObject({ type: 'run.end', status: 'error' });
-    expect(h.navigated).toEqual([]);
-  });
-});
-
-describe('ext.reload (the dev self-reload)', () => {
-  it('calls the reload seam when the host pushes ext.reload', () => {
-    const reload = vi.fn();
-    const h = harness({ reloadExtension: reload });
-    expect(reload).not.toHaveBeenCalled();
-    h.host.reloadTrigger?.();
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it('forwards a reload failure to ext.log instead of throwing at the host', () => {
-    const h = harness({
-      reloadExtension: () => {
-        throw new Error('not allowed here');
-      },
-    });
-    expect(() => h.host.reloadTrigger?.()).not.toThrow();
-    expect(h.host.logs).toEqual([
-      { level: 'error', source: 'worker', message: 'ext.reload failed: not allowed here', at: 1_000 },
-    ]);
-  });
-
-  it('drops the subscription on dispose', () => {
-    const reload = vi.fn();
-    const h = harness({ reloadExtension: reload });
-    h.worker.dispose();
-    h.host.reloadTrigger?.();
-    expect(reload).not.toHaveBeenCalled();
-  });
-});
-
-describe('log.append relay', () => {
-  it('relays a panel diagnostic to the host, unchanged', () => {
-    const h = harness();
-    const panel = h.connect();
-    const entry = { level: 'error' as const, source: 'panel' as const, message: 'panel blew up', stack: 'at x', at: 7 };
-    panel.send('log.append', entry);
-    expect(h.host.logs).toEqual([entry]);
-  });
-
-  it('sends no reply, so a forwarded error cannot start a message ping-pong', () => {
-    const h = harness();
-    const panel = h.connect();
-    const before = panel.sent.length;
-    panel.send('log.append', { level: 'warn', source: 'panel', message: 'careful', at: 8 });
-    expect(panel.sent.length).toBe(before);
-  });
-});
-
-describe('applyRunOptions', () => {
-  it('carries the model source, so the CLI can reach a model that only works on one gateway', () => {
-    // meta/muse-spark-1.3-contributor 404s on OpenRouter and works on Kilo, so the id
-    // alone cannot say where a run should go.
-    const next = applyRunOptions(config, {
-      leaderModel: 'meta/muse-spark-1.3-contributor',
-      leaderModelSource: 'kilo',
-      followerModelSource: 'openrouter',
-    });
-    expect(next.leaderModelSource).toBe('kilo');
-    expect(next.followerModelSource).toBe('openrouter');
-  });
-
-  it('ignores a source that is not a known gateway', () => {
-    const next = applyRunOptions(config, { leaderModelSource: 'not-a-gateway' });
-    expect(next.leaderModelSource).toBe(config.leaderModelSource);
-  });
-
-  it('folds known dev-trigger options over the stored config and ignores the rest', () => {
-    expect(
-      applyRunOptions(config, { navMode: 'both', maxSteps: 3, inputFidelity: 'escalated', nonsense: true }),
-    ).toEqual({ ...config, observe: 'both', maxSteps: 3, inputFidelity: 'escalated' });
-    expect(applyRunOptions(config, { observe: 'sideways', maxSteps: -1 })).toEqual(config);
-    expect(applyRunOptions(config)).toEqual(config);
-  });
-});

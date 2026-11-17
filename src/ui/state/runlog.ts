@@ -183,7 +183,9 @@ export function toSections(events: RunEvent[]): LogSection[] {
 
   for (const entry of entries) {
     if (entry.kind === 'plain' && entry.event.kind === 'step') {
-      sections.push({ key: `section-${entry.event.n}`, n: entry.event.n, role: entry.event.role, entries: [] });
+      // Step numbers are not unique: the opening Leader turn is step 0, and every replan
+      // reuses the number of the Follower step it follows. The step event's own key is.
+      sections.push({ key: `section:${entry.key}`, n: entry.event.n, role: entry.event.role, entries: [] });
       continue;
     }
     sections[sections.length - 1]!.entries.push(entry);

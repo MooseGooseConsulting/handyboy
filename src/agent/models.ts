@@ -7,16 +7,11 @@
  * out. `apiKey` here is a non-secret placeholder only because the underlying
  * openai client refuses to construct without one.
  *
- * `provider.data_collection` is "deny" for paid models because page DOM and
- * screenshots are sent on every step (docs/research/models-and-grounding.md §6).
- * OpenRouter's `:free` endpoints exist only under the training data policy, so
- * "deny" yields `404 No endpoints found matching your data policy`; the user
- * chose free models knowingly (a live run on the free pair ended `error 404`
- * under "deny" before this mapping existed), so those get "allow".
+ * No `provider.data_collection` is sent: which endpoints may serve a request is
+ * left to the user's OpenRouter privacy settings. A per-request "deny" for paid
+ * models used to sit here and 404'd any paid model whose only endpoint trains on
+ * prompts (meta/muse-spark-1.3-contributor), a restriction the user never asked for.
  */
-export function dataCollectionFor(model: string): 'allow' | 'deny' {
-  return model.endsWith(':free') ? 'allow' : 'deny';
-}
 import { ChatOpenAI } from '@langchain/openai';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseChatModelParams } from '@langchain/core/language_models/chat_models';
@@ -38,6 +33,130 @@ function baseUrlFor(source: ModelSource): string {
   return source === 'kilo' ? KILO_BASE_URL : DEFAULT_BASE_URL;
 }
 
+/**
+ * Waits between retries of a rate-limited model call: about a minute in all. LangChain
+ * core (1.2.12) stops at once on a 429 with no Retry-After header ("headerless_429",
+ * classed as capacity, not retried), and that is exactly what OpenRouter's free tier
+ * sends. Live, one such 429 ended runs on gemma-4 and laguna after 0 to 4 steps.
+ */
+export const RATE_LIMIT_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_000, 30_000];
+
+/** Short waits for a 500/502/503/504/529 or a dropped connection. Separate from the 429 budget. */
+export const TRANSIENT_DELAYS_MS: readonly number[] = [400, 800];
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+
+function requestTimeoutMs(value: unknown): number {
+  const ms = Number(value);
+  return Number.isInteger(ms) && ms > 0 && ms <= 86_400_000 ? ms : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+/** A fresh deadline per attempt, including body consumption by the response hardener. */
+export function withRequestTimeout(fetch: typeof globalThis.fetch, timeoutMs: number): typeof globalThis.fetch {
+  return async (input, init) => {
+    const deadline = new AbortController();
+    const caller = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    // Chrome versions with sidePanel support predate AbortSignal.any.
+    const onAbort = (): void => deadline.abort(caller!.reason);
+    if (caller?.aborted) onAbort();
+    else caller?.addEventListener('abort', onAbort, { once: true });
+    const signal = deadline.signal;
+    const timer = setTimeout(() => deadline.abort(new DOMException(
+      `Model request timed out after ${timeoutMs}ms`, 'TimeoutError',
+    )), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal });
+    } catch (error) {
+      // The host transport reports all aborts as AbortError; retain the deadline reason.
+      throw signal.aborted ? signal.reason : error;
+    } finally {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
+const TRANSIENT_STATUS = new Set([500, 502, 503, 504, 529]);
+
+/**
+ * Retries 429s itself, honouring Retry-After (capped at 60 s), and stops waiting on abort.
+ * Transient 5xx responses and transport failures get their own short schedule so
+ * `maxRetries: 0` does not drop them, and they do not rerun the one-minute 429 budget.
+ */
+export function retryRateLimited(
+  fetch: typeof globalThis.fetch,
+  delaysMs: readonly number[] = RATE_LIMIT_DELAYS_MS,
+  transientDelaysMs: readonly number[] = TRANSIENT_DELAYS_MS,
+): typeof globalThis.fetch {
+  // Honour each Retry-After, but the waits together stay inside the schedule
+  // (about a minute for the default delays). A provider that sends Retry-After: 60
+  // on every 429 would otherwise hold the call for several minutes.
+  const budgetMs = delaysMs.reduce((sum, ms) => sum + ms, 0);
+  return async (input, init) => {
+    let waited = 0;
+    let rateAttempts = 0;
+    let transientAttempts = 0;
+    const signal = init?.signal ?? undefined;
+    for (;;) {
+      if (signal?.aborted) throw signal.reason ?? new Error('aborted');
+      let res: Response;
+      try {
+        res = await fetch(input, init);
+      } catch (error) {
+        if (transientAttempts >= transientDelaysMs.length) throw error;
+        const wait = transientDelaysMs[transientAttempts] ?? 0;
+        transientAttempts += 1;
+        if (wait > 0) await sleep(wait, signal);
+        continue;
+      }
+      if (TRANSIENT_STATUS.has(res.status) && transientAttempts < transientDelaysMs.length) {
+        const wait = transientDelaysMs[transientAttempts] ?? 0;
+        transientAttempts += 1;
+        await res.body?.cancel().catch(() => undefined);
+        if (wait > 0) await sleep(wait, signal);
+        continue;
+      }
+      if (res.status !== 429 || rateAttempts >= delaysMs.length) return res;
+      // A Retry-After of 0 needs none of the budget. Checking the budget first
+      // dropped that immediate retry once an earlier wait had used it up, and
+      // dropped every retry when the test delays were all zero.
+      const requested = retryAfterDelayMs(res.headers.get('retry-after'), delaysMs[rateAttempts]!);
+      if (requested > 0 && waited >= budgetMs) return res;
+      const wait = Math.min(requested, Math.max(0, budgetMs - waited));
+      rateAttempts += 1;
+      await res.body?.cancel().catch(() => undefined);
+      waited += wait;
+      if (wait > 0) await sleep(wait, signal);
+    }
+  };
+}
+
+/** Delay to the next attempt, in milliseconds, from one 429's Retry-After header. */
+export function retryAfterDelayMs(headerValue: string | null, fallbackMs: number): number {
+  const raw = headerValue?.trim();
+  if (!raw) return fallbackMs;
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw) > 0 ? Math.min(Number(raw) * 1000, 60_000) : 0;
+  const date = Date.parse(raw);
+  if (Number.isNaN(date)) return fallbackMs;
+  // A provider-issued date in the past is the same "go again now" as a 0.
+  return date > Date.now() ? Math.min(date - Date.now(), 60_000) : 0;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'));
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export interface CreateChatModelOptions {
   /** The provider's own model id, e.g. "nvidia/nemotron-3.5-lightning:free". Never prefixed with a source. */
   model: string;
@@ -47,6 +166,10 @@ export interface CreateChatModelOptions {
   source?: ModelSource;
   baseURL?: string;
   temperature?: number;
+  /** Test seam: waits between rate-limit retries. */
+  rateLimitDelaysMs?: readonly number[];
+  /** Per-attempt deadline. Defaults to WXT_LLM_TIMEOUT_MS, or five minutes. */
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -55,8 +178,8 @@ export interface CreateChatModelOptions {
  * `choices`. The openai SDK only retries on real error statuses, and LangChain
  * dereferences `choices[0]` and dies with "reading 'message'" otherwise (seen
  * live against `nvidia/nemotron-3-ultra-550b-a55b:free`, 2026-09-03). This
- * rewrites such replies into the status they should have carried so the SDK's
- * retry policy (429/5xx) engages.
+ * rewrites such replies into the status they should have carried so the
+ * wrapper's retry policy (429, and a short schedule for 5xx) engages.
  *
  * OpenRouter-specific: this is a quirk of *OpenRouter's* proxying (it forwards a
  * failed upstream provider call as if it succeeded). There is no live evidence
@@ -107,26 +230,28 @@ function errorResponse(status: number, message: string, upstream: Headers): Resp
  * them, not just the visible completion.
  */
 export function createChatModel(options: CreateChatModelOptions): ChatOpenAI {
-  const { model, fetch, source = 'openrouter', baseURL = baseUrlFor(source), temperature = 0 } = options;
-  const isOpenRouter = source === 'openrouter';
+  const { model, fetch, source = 'openrouter', baseURL = baseUrlFor(source), temperature = 0, rateLimitDelaysMs } = options;
+  const timeoutMs = requestTimeoutMs(options.requestTimeoutMs ?? import.meta.env.WXT_LLM_TIMEOUT_MS);
+  const rateBudget = (rateLimitDelaysMs ?? RATE_LIMIT_DELAYS_MS).reduce((sum, ms) => sum + ms, 0);
   return new ChatOpenAI({
     model,
     temperature,
     apiKey: PROXY_MANAGED_KEY,
-    maxRetries: 4,
+    // 429s are retried only inside retryRateLimited, which already spends the
+    // one-minute budget. Leaving LangChain's default retries on would run that
+    // whole schedule again for each SDK attempt.
+    maxRetries: 0,
+    // The SDK wraps the whole fetch/retry loop in one signal. Its outer deadline
+    // must leave room for every attempt; the inner deadline resets on each retry.
+    timeout: timeoutMs * (1 + TRANSIENT_DELAYS_MS.length + (rateLimitDelaysMs ?? RATE_LIMIT_DELAYS_MS).length)
+      + rateBudget + TRANSIENT_DELAYS_MS.reduce((sum, ms) => sum + ms, 0) + 1_000,
     // Applied to BOTH gateways. It was OpenRouter-only on the reasoning that Kilo had
     // shown no such quirk; then the free Nemotron pair on Kilo failed a live eBay run with
     // "Cannot read properties of undefined (reading 'message')", which is LangChain
     // dereferencing `generations[0][0]` after a 200 with no `choices`. The check is
     // provider-agnostic, so there is no reason to leave either gateway unguarded.
-    configuration: { baseURL, fetch: hardenEmptyChoices(fetch) },
-    // `provider.data_collection` is an OpenRouter-specific field; Kilo does not use it,
-    // and sending it there breaks models whose Kilo endpoint would otherwise work
-    // (live evidence: meta/muse-spark-1.3-contributor 404s on OpenRouter under `deny`
-    // but completes normally on Kilo -- only when this field is left out of the request).
-    ...(isOpenRouter
-      ? { modelKwargs: { provider: { data_collection: dataCollectionFor(model), allow_fallbacks: true } } }
-      : {}),
+    // Retry outside the hardening, so a 429 reported inside a 200 body is retried too.
+    configuration: { baseURL, fetch: retryRateLimited(withRequestTimeout(hardenEmptyChoices(fetch), timeoutMs), rateLimitDelaysMs) },
   });
 }
 

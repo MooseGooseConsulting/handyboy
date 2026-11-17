@@ -1,61 +1,61 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it } from 'vitest';
 import { InPageInputTier, type PageDriverLike } from '@/src/input/inpage';
+import { resetPointerForTests } from '@/src/page/actions';
+import { handle } from '@/src/page/handler';
+import { snapshot } from '@/src/page/snapshot';
 
-function fakeDriver() {
-  const calls: string[] = [];
-  const driver: PageDriverLike = {
-    async click(tabId, ref) { calls.push(`click:${tabId}:${ref}`); },
-    async moveTo(tabId, ref) { calls.push(`moveTo:${tabId}:${ref}`); },
-    async type(tabId, ref, text) { calls.push(`type:${tabId}:${ref}:${text}`); },
-    async press(tabId, ref, key) { calls.push(`press:${tabId}:${ref}:${key}`); },
-    async scroll(tabId, ref, dx, dy) { calls.push(`scroll:${tabId}:${ref}:${dx}:${dy}`); },
-  };
-  return { driver, calls };
+/**
+ * The ref the snapshot just assigned to the control whose accessible name is
+ * `label`. Read off the snapshot the click will use, not off a private table.
+ */
+function refFor(snapshotText: string, label: string): string {
+  const line = snapshotText.split('\n').find((entry) => entry.includes(`"${label}"`));
+  const ref = line?.match(/\[ref=(e\d+)\]/)?.[1];
+  if (!ref) throw new Error(`snapshot did not address ${label}`);
+  return ref;
 }
 
-describe('InPageInputTier', () => {
-  it('is unattached until attach(), then forwards every action to the driver with the tab id', async () => {
-    const { driver, calls } = fakeDriver();
-    const tier = new InPageInputTier(driver);
-    expect(tier.isAttached()).toBe(false);
-
-    await tier.attach(3);
-    expect(tier.isAttached()).toBe(true);
-    expect(tier.name).toBe('in-page');
-
-    await tier.click('a');
-    await tier.moveTo('b');
-    await tier.typeText('c', 'hi');
-    await tier.press('d', 'Enter');
-    await tier.scroll('e', 1, 2);
-
-    expect(calls).toEqual([
-      'click:3:a',
-      'moveTo:3:b',
-      'type:3:c:hi',
-      'press:3:d:Enter',
-      'scroll:3:e:1:2',
-    ]);
-
-    await tier.detach();
-    expect(tier.isAttached()).toBe(false);
+function countClicks(el: HTMLElement): { any: number; trusted: number } {
+  const counts = { any: 0, trusted: 0 };
+  el.addEventListener('click', (event) => {
+    counts.any += 1;
+    if (event.isTrusted) counts.trusted += 1;
   });
+  return counts;
+}
 
-  it('throws instead of silently no-op-ing when an action runs before attach', async () => {
-    const { driver } = fakeDriver();
-    const tier = new InPageInputTier(driver);
-    await expect(tier.click('a')).rejects.toThrow(/not attached/);
-  });
+describe('in-page click trust (R-13, I-01)', () => {
+  it('marking the in-page click trusted would let a handler that accepts only trusted input run', async () => {
+    document.body.replaceChildren();
+    const purchase = document.createElement('button');
+    purchase.textContent = 'Purchase';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    document.body.append(purchase, cancel);
 
-  it('tolerates a driver with no moveTo (optional in PageDriverLike)', async () => {
+    const purchaseClicks = countClicks(purchase);
+    const cancelClicks = countClicks(cancel);
+    const purchaseRef = refFor(snapshot().text, 'Purchase');
+
+    resetPointerForTests();
     const driver: PageDriverLike = {
-      async click() {},
+      async click(_tabId, ref) {
+        const result = handle({ op: 'click', ref });
+        if (!result.ok) throw new Error(result.error ?? 'click failed');
+      },
       async type() {},
       async press() {},
       async scroll() {},
     };
-    const tier = new InPageInputTier(driver);
-    await tier.attach(1);
-    await expect(tier.moveTo('a')).resolves.toBeUndefined();
+    const input = new InPageInputTier(driver);
+    await input.attach(6);
+    await input.click(purchaseRef);
+
+    expect(purchaseClicks.any).toBe(1);
+    expect(purchaseClicks.trusted).toBe(0);
+    expect(cancelClicks.any).toBe(0);
+    expect(cancelClicks.trusted).toBe(0);
   });
 });

@@ -9,7 +9,7 @@ import { NumberField } from '../components/NumberField';
 import { RadioGroup } from '../components/RadioGroup';
 import { Toggle } from '../components/Toggle';
 import { MAX_STEPS, PLANNING_INTERVAL } from '../state/gate';
-import { findModel } from '../state/models';
+import { findModel, sourceOf, trainingRisk, type TrainingRisk } from '../state/models';
 import { useFreeModelsOnly, useModelSourceFilter, type SourceFilter } from '../state/modelFilter';
 import { isWaiting, type AreaStatus } from '../state/status';
 import { useConfig } from '../state/useConfig';
@@ -50,10 +50,9 @@ export function SetupSection({
   const escalated: boolean = config.inputFidelity === 'escalated';
   const observeExplainer = OBSERVE_OPTIONS.find((option) => option.value === config.observe)?.title;
 
-  // "Selecting one must warn": these track the last picker to knowingly commit a paid
-  // model, so the warning stays specific to the role that just changed and clears once
-  // that role is free again.
-  const [paidWarning, setPaidWarning] = useState<{ role: 'Leader' | 'Follower'; model: ModelInfo } | null>(null);
+  // "Selecting one must warn": each role remembers the paid model it was knowingly set
+  // to here, so picking a free Follower does not silence a paid Leader's warning.
+  const [paidPicks, setPaidPicks] = useState<Partial<Record<'Leader' | 'Follower', ModelInfo>>>({});
 
   const pick =
     (role: 'Leader' | 'Follower', modelField: 'leaderModel' | 'followerModel', sourceField: 'leaderModelSource' | 'followerModelSource') =>
@@ -62,11 +61,45 @@ export function SetupSection({
       // existed byte-for-byte reproducible, and keeps the common case's patch small.
       update({ [modelField]: id, [sourceField]: source === 'openrouter' ? undefined : source } as Partial<typeof config>);
       const model = findModel(models, id, source);
-      setPaidWarning(model && !model.free ? { role, model } : null);
+      setPaidPicks((prev) => ({ ...prev, [role]: model && !model.free ? model : undefined }));
     };
 
-  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource);
-  const followerModel = findModel(models, config.followerModel, config.followerModelSource);
+  // An absent source means OpenRouter (Config), and that is where the run routes, so the
+  // lookup must not fall through to a same-id Kilo entry.
+  const leaderModel = findModel(models, config.leaderModel, config.leaderModelSource ?? 'openrouter');
+  const followerModel = findModel(models, config.followerModel, config.followerModelSource ?? 'openrouter');
+  // A saved model missing from the loaded catalog (still loading, or both catalogs failed)
+  // still runs, so it is judged from its stored id rather than dropped from the warnings.
+  const judged = (model: ModelInfo | undefined, id: string, source: ModelSource | undefined): ModelInfo | undefined =>
+    model ??
+    (id
+      ? { id, name: id, free: id.endsWith(':free'), vision: false, tools: false, contextLength: 0, source: source ?? 'openrouter' }
+      : undefined);
+  // Page content from the user's logged-in sessions goes out every step, so a role whose
+  // model trains on prompts is flagged in red, and one nobody reports on in amber. A
+  // warning, not a gate: the run still starts.
+  const rolesAt = (risk: TrainingRisk) =>
+    (
+      [
+        ['Leader', judged(leaderModel, config.leaderModel, config.leaderModelSource)],
+        ['Follower', judged(followerModel, config.followerModel, config.followerModelSource)],
+      ] as const
+    ).filter(([, model]) => model && trainingRisk(model, models) === risk);
+  const trainingRoles = rolesAt('trains');
+  const unknownRoles = rolesAt('unknown');
+  const describeRoles = (roles: typeof trainingRoles) =>
+    roles.map(([role, model]) => `${role} (${model!.name})`).join(' and ');
+  // A pick only warns while the config still holds it: Reset, or a change from another
+  // panel, moves the role off that model and the warning would describe a stale choice.
+  const paidWarnings = (
+    [
+      ['Leader', config.leaderModel, config.leaderModelSource],
+      ['Follower', config.followerModel, config.followerModelSource],
+    ] as const
+  ).flatMap(([role, id, source]) => {
+    const model = paidPicks[role];
+    return model && model.id === id && sourceOf(model) === (source ?? 'openrouter') ? [{ role, model }] : [];
+  });
 
   return (
     <div className="space-y-4">
@@ -114,6 +147,7 @@ export function SetupSection({
           <Badge tone="leader">{leaderModel?.name || config.leaderModel || 'no leader model'}</Badge>
           <span>/</span>
           <Badge tone="follower">{followerModel?.name || config.followerModel || 'no follower model'}</Badge>
+          {trainingRoles.length > 0 ? <Badge tone="bad">trains on prompts</Badge> : null}
         </p>
 
         <div className="mt-2 space-y-2">
@@ -143,10 +177,34 @@ export function SetupSection({
           </Field>
         </div>
 
-        {paidWarning ? (
+        {trainingRoles.length > 0 ? (
+          <p role="status" className="rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-300">
+            {describeRoles(trainingRoles)} {trainingRoles.length === 1 ? 'may train' : 'may each train'} on your
+            prompts: the page content of every step is sent to it.
+          </p>
+        ) : null}
+
+        {unknownRoles.length > 0 ? (
+          <p role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+            {unknownRoles.map(([role, model]) => (
+              <span key={role} className="block">
+                Unknown whether {describeRoles([[role, model]])} trains on your prompts:{' '}
+                {model && sourceOf(model) === 'kilo'
+                  ? "Kilo's catalog gives no training flag for it."
+                  : 'OpenRouter does not say, and Kilo has no matching entry flagged as training (or its catalog did not load). Your OpenRouter privacy settings decide.'}
+              </span>
+            ))}
+          </p>
+        ) : null}
+
+        {paidWarnings.length > 0 ? (
           <p role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-            {paidWarning.role} is now a paid model ({paidWarning.model.name}) — it costs money to run. Turn on
-            &ldquo;free only&rdquo; above and re-pick to go back to a free model.
+            {paidWarnings.map(({ role, model }) => (
+              <span key={role} className="block">
+                {role} is now a paid model ({model.name}) — it costs money to run. Turn on
+                &ldquo;free only&rdquo; above and re-pick to go back to a free model.
+              </span>
+            ))}
           </p>
         ) : null}
       </Section>

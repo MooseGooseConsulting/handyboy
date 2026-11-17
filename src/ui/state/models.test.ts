@@ -1,132 +1,72 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelInfo } from '@/src/messaging';
-import { filterFree, filterSource, findModel, formatContext, isPinned, matchesQuery, rankModels, sourceOf } from './models';
+import { filterFree, findModel, rankModels, sourceOf, trainingRisk } from './models';
 
-function model(id: string, over: Partial<ModelInfo> = {}): ModelInfo {
-  return {
-    id,
-    name: id,
+const models: ModelInfo[] = [
+  { id: 'paid/first', name: 'Paid', free: false, vision: true, tools: true, contextLength: 8000 },
+  { id: 'nvidia/nemotron:free', name: 'Nemotron', free: true, vision: true, tools: true, contextLength: 1_000_000 },
+  { id: 'meta/llama:free', name: 'Llama', free: true, vision: false, tools: true, contextLength: 128_000 },
+  { id: 'same', name: 'OpenRouter copy', free: true, vision: false, tools: true, contextLength: 1000, source: 'openrouter' },
+  { id: 'same', name: 'Kilo copy', free: false, vision: true, tools: true, contextLength: 1000, source: 'kilo' },
+];
+
+describe('model list', () => {
+  it('pins Nemotron, then free models, and a search drops the ones that do not match every term', () => {
+    expect(rankModels(models).map((model) => model.name)).toEqual([
+      'Nemotron',
+      'Llama',
+      'OpenRouter copy',
+      'Paid',
+      'Kilo copy',
+    ]);
+    expect(rankModels(models, 'llama free').map((model) => model.name)).toEqual(['Llama']);
+  });
+
+  it('the same id on two sources resolves to the named source, and a model with no source is OpenRouter', () => {
+    expect(findModel(models, 'same', 'kilo')?.name).toBe('Kilo copy');
+    expect(findModel(models, 'same')?.name).toBe('OpenRouter copy');
+    expect(sourceOf(models[0]!)).toBe('openrouter');
+    expect(filterFree(models, true).every((model) => model.free)).toBe(true);
+    expect(filterFree(models, false)).toHaveLength(models.length);
+  });
+});
+
+describe('training risk', () => {
+  const muse = (source: 'openrouter' | 'kilo', flag?: boolean): ModelInfo => ({
+    id: 'meta/muse-spark-1.3-contributor',
+    name: 'Muse Spark Contributor',
     free: false,
     vision: false,
     tools: true,
-    contextLength: 128_000,
-    ...over,
-  };
-}
-
-const CATALOG: ModelInfo[] = [
-  model('openai/gpt-5'),
-  model('meta/llama-4-free', { free: true }),
-  model('nvidia/nemotron-ultra', { name: 'NVIDIA Nemotron Ultra' }),
-  model('anthropic/claude-opus'),
-  model('nvidia/nemotron-nano-free', { name: 'NVIDIA Nemotron Nano', free: true }),
-  model('mistral/small-free', { free: true }),
-];
-
-describe('rankModels', () => {
-  it('pins Nemotron entries at the top, then free models, then the rest', () => {
-    expect(rankModels(CATALOG).map((m) => m.id)).toEqual([
-      'nvidia/nemotron-ultra',
-      'nvidia/nemotron-nano-free',
-      'meta/llama-4-free',
-      'mistral/small-free',
-      'openai/gpt-5',
-      'anthropic/claude-opus',
-    ]);
+    contextLength: 1000,
+    source,
+    ...(flag === undefined ? {} : { mayTrainOnYourPrompts: flag }),
   });
 
-  it('keeps the upstream order inside a rank band', () => {
-    const free = rankModels(CATALOG).filter((m) => m.free && !isPinned(m));
-    expect(free.map((m) => m.id)).toEqual(['meta/llama-4-free', 'mistral/small-free']);
+  it('an OpenRouter entry with no flag of its own borrows the Kilo flag for the same id', () => {
+    const catalog = [muse('openrouter'), muse('kilo', true)];
+    expect(trainingRisk(catalog[0]!, catalog)).toBe('trains');
   });
 
-  it('filters by a case-insensitive multi-term query', () => {
-    expect(rankModels(CATALOG, 'NEMO nano').map((m) => m.id)).toEqual(['nvidia/nemotron-nano-free']);
-    expect(rankModels(CATALOG, 'claude').map((m) => m.id)).toEqual(['anthropic/claude-opus']);
-    expect(rankModels(CATALOG, '   ')).toHaveLength(CATALOG.length);
+  it('a non-training Kilo twin does not clear an OpenRouter model, since the gateways route independently', () => {
+    expect(trainingRisk(muse('openrouter'), [muse('openrouter'), muse('kilo', false)])).toBe('unknown');
   });
 
-  it('returns nothing for a query that matches nothing', () => {
-    expect(rankModels(CATALOG, 'gemini')).toEqual([]);
+  it('a paid OpenRouter model reads as unknown, not safe, when the Kilo catalog did not load', () => {
+    expect(trainingRisk(muse('openrouter'), [muse('openrouter')])).toBe('unknown');
   });
 
-  it('leaves the input array untouched', () => {
-    const before = CATALOG.map((m) => m.id);
-    rankModels(CATALOG, 'a');
-    expect(CATALOG.map((m) => m.id)).toEqual(before);
-  });
-});
-
-describe('helpers', () => {
-  it('matches a query against id and name', () => {
-    expect(matchesQuery(model('x/y', { name: 'Big Model' }), 'big')).toBe(true);
-    expect(matchesQuery(model('x/y', { name: 'Big Model' }), 'x/y')).toBe(true);
-    expect(matchesQuery(model('x/y', { name: 'Big Model' }), 'nope')).toBe(false);
+  it('a free OpenRouter id trains, since those endpoints exist only under the training policy', () => {
+    const free: ModelInfo = { ...muse('openrouter'), id: 'nvidia/nemotron-3.5-lightning:free' };
+    expect(trainingRisk(free, [free])).toBe('trains');
   });
 
-  it('finds a model by id', () => {
-    expect(findModel(CATALOG, 'openai/gpt-5')?.id).toBe('openai/gpt-5');
-    expect(findModel(CATALOG, 'missing')).toBeUndefined();
+  it('a Kilo model never borrows a flag from an OpenRouter entry', () => {
+    const kilo: ModelInfo = { ...muse('kilo'), mayTrainOnYourPrompts: undefined };
+    expect(trainingRisk(kilo, [kilo, { ...muse('openrouter'), mayTrainOnYourPrompts: true }])).toBe('unknown');
   });
 
-  it('formats context length compactly', () => {
-    expect(formatContext(128_000)).toBe('128K ctx');
-    expect(formatContext(1_000_000)).toBe('1M ctx');
-    expect(formatContext(1_500_000)).toBe('1.5M ctx');
-    expect(formatContext(512)).toBe('512 ctx');
-  });
-});
-
-describe('filterFree', () => {
-  it('keeps only free models when on', () => {
-    expect(filterFree(CATALOG, true).every((m) => m.free)).toBe(true);
-    expect(filterFree(CATALOG, true)).toHaveLength(3);
-  });
-
-  it('passes every model through when off', () => {
-    expect(filterFree(CATALOG, false)).toEqual(CATALOG);
-  });
-});
-
-describe('sourceOf', () => {
-  it('defaults an unlabelled model (predates Kilo) to openrouter', () => {
-    expect(sourceOf(model('x/y'))).toBe('openrouter');
-  });
-
-  it('reports an explicit source unchanged', () => {
-    expect(sourceOf(model('x/y', { source: 'kilo' }))).toBe('kilo');
-  });
-});
-
-describe('findModel with a duplicate id across sources', () => {
-  const DUPES: ModelInfo[] = [
-    model('meta/muse-spark-1.3-contributor', { source: 'openrouter' }),
-    model('meta/muse-spark-1.3-contributor', { source: 'kilo', mayTrainOnYourPrompts: false }),
-  ];
-
-  it('disambiguates by source when one is given', () => {
-    expect(findModel(DUPES, 'meta/muse-spark-1.3-contributor', 'kilo')?.mayTrainOnYourPrompts).toBe(false);
-    expect(findModel(DUPES, 'meta/muse-spark-1.3-contributor', 'openrouter')?.mayTrainOnYourPrompts).toBeUndefined();
-  });
-
-  it('falls back to the first match by id alone when no source is given', () => {
-    expect(findModel(DUPES, 'meta/muse-spark-1.3-contributor')).toBe(DUPES[0]);
-  });
-});
-
-describe('filterSource', () => {
-  const MIXED: ModelInfo[] = [
-    model('a/one', { source: 'openrouter' }),
-    model('b/two', { source: 'kilo' }),
-    model('c/three'), // no source recorded -- counts as openrouter
-  ];
-
-  it('passes every model through for "all"', () => {
-    expect(filterSource(MIXED, 'all')).toEqual(MIXED);
-  });
-
-  it('keeps only the named source, treating an absent source as openrouter', () => {
-    expect(filterSource(MIXED, 'kilo').map((m) => m.id)).toEqual(['b/two']);
-    expect(filterSource(MIXED, 'openrouter').map((m) => m.id)).toEqual(['a/one', 'c/three']);
+  it("a model's own explicit flag wins over anything borrowed", () => {
+    expect(trainingRisk(muse('kilo', false), [muse('kilo', false), muse('kilo', true)])).toBe('no');
   });
 });

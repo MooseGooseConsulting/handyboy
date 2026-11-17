@@ -16,12 +16,19 @@ import type { PageRequest, PageResponse, PingResult } from './handler';
 import type { ExtractTextOptions, ExtractTextResult } from './extractText';
 import type { SnapshotOptions, SnapshotResult } from './snapshot';
 import type { ActionResult, BoxResult, ScrollOptions, TypeOptions } from './actions';
+import { currentTabId, trackTabReplacements, type TabReplacedEvent } from './tabReplacement';
 
 /** Build-output path of the unlisted script. Must match the entrypoint's file name. */
 export const INJECTED_FILE = 'injected-content.js';
 
 export interface TabUpdateInfo {
   status?: string;
+}
+
+/** Payload of `chrome.tabs.onActivated`. */
+export interface TabActivationInfo {
+  tabId: number;
+  windowId: number;
 }
 
 export interface ChromeApi {
@@ -34,12 +41,19 @@ export interface ChromeApi {
   tabs: {
     sendMessage(tabId: number, message: PageRequest): Promise<PageResponse | undefined>;
     update(tabId: number, props: { url: string }): Promise<unknown>;
-    get(tabId: number): Promise<{ windowId?: number; status?: string; url?: string }>;
+    get(tabId: number): Promise<{ windowId?: number; active?: boolean; status?: string; url?: string }>;
     captureVisibleTab(windowId: number, options: { format: 'png' | 'jpeg' }): Promise<string>;
     onUpdated: {
       addListener(fn: (tabId: number, info: TabUpdateInfo) => void): void;
       removeListener(fn: (tabId: number, info: TabUpdateInfo) => void): void;
     };
+    /** Optional so test fakes need not model it; the real API always has it. */
+    onActivated?: {
+      addListener(fn: (info: TabActivationInfo) => void): void;
+      removeListener(fn: (info: TabActivationInfo) => void): void;
+    };
+    /** Optional so test fakes need not model it; the real API always has it. */
+    onReplaced?: TabReplacedEvent;
   };
   /** Absent unless the `downloads` permission is granted. */
   downloads?: {
@@ -95,6 +109,7 @@ export class PageDriver {
 
   constructor(api: ChromeApi = chromeApi(), options: { navigateTimeoutMs?: number; opTimeoutMs?: number } = {}) {
     this.api = api;
+    trackTabReplacements(api.tabs.onReplaced);
     this.navigateTimeoutMs = options.navigateTimeoutMs ?? 30_000;
     this.opTimeoutMs = options.opTimeoutMs ?? 20_000;
   }
@@ -126,6 +141,7 @@ export class PageDriver {
    * to one frame per tab.
    */
   async ensureInjected(tabId: number): Promise<ActionResult> {
+    tabId = currentTabId(tabId);
     if (await this.ping(tabId)) {
       this.injected.add(tabId);
       return { ok: true };
@@ -140,6 +156,24 @@ export class PageDriver {
       );
     } catch (err) {
       return { ok: false, error: `injection failed: ${errorOf(err)}` };
+    }
+    // A `tabs.onReplaced` swap recorded while executeScript was in flight leaves the
+    // script in the dead tab. The replacement page has no script yet, so pinging it
+    // fails until this injects there. A missing tab is not replaced by the active tab.
+    const resolved = currentTabId(tabId);
+    if (resolved !== tabId) {
+      try {
+        await this.withTimeout(
+          this.api.scripting.executeScript({
+            target: { tabId: resolved, allFrames: false },
+            files: [INJECTED_FILE],
+          }),
+          'script injection',
+        );
+      } catch (err) {
+        return { ok: false, error: `injection failed: ${errorOf(err)}` };
+      }
+      tabId = resolved;
     }
     if (!(await this.ping(tabId))) {
       return { ok: false, error: 'injected script did not respond to ping' };
@@ -172,12 +206,17 @@ export class PageDriver {
   private async send<T extends PageResponse>(tabId: number, request: PageRequest): Promise<T> {
     const ready = await this.ensureInjected(tabId);
     if (!ready.ok) return ready as T;
+    // Injection waited through ping/inject/ping round trips; the tab id can be replaced
+    // while it runs (prerender activation, a redirect chain). Re-resolve here and target
+    // *that* id: sending to the id the injection started on fails "No tab with id" and
+    // cost a live run its whole remaining session.
+    const target = currentTabId(tabId);
     try {
-      const res = await this.withTimeout(this.api.tabs.sendMessage(tabId, request), `page op "${request.op}"`);
+      const res = await this.withTimeout(this.api.tabs.sendMessage(target, request), `page op "${request.op}"`);
       if (!res) return { ok: false, error: 'no response from page' } as T;
       return res as T;
     } catch (err) {
-      this.injected.delete(tabId);
+      this.injected.delete(target);
       return { ok: false, error: errorOf(err) } as T;
     }
   }
@@ -230,36 +269,86 @@ export class PageDriver {
    * CSS-pixel viewport and `devicePixelRatio` are read from the injected side and the device
    * dimensions derived — that is what lets a `[ref=eNN]` box from `getBox()` be located in
    * the screenshot.
+   *
+   * `captureVisibleTab` takes a window, not a tab: it captures whichever tab is showing in
+   * the run tab's window. With the run's tab in the background that is some other page, and
+   * handing it to the model as "the page" would have it act on something it never saw. So
+   * the capture is refused unless the run's tab is the active one, and thrown away if that
+   * stopped being true while it was taken. Which tab a run uses is not decided here.
+   *
+   * Checking only before and after the capture is not enough on its own: a switch away and
+   * back (A→B→A) leaves the run tab active at both checkpoints while `captureVisibleTab`
+   * may still have sampled the other tab. Activations are therefore watched for the whole
+   * capture, and the image is discarded if the run tab was ever deactivated.
    */
   async screenshot(tabId: number): Promise<ScreenshotResult> {
     const metrics = (await this.send<PingResult>(tabId, { op: 'ping' })) as PingResult;
     if (!metrics.ok) return { ok: false, error: metrics.error ?? 'page did not report metrics' };
-    let windowId: number;
+    const before = await this.visibleWindowOf(tabId);
+    if (typeof before !== 'number') return before;
+    // Deactivation is latched, so a switch away and back still discards the capture. Only
+    // activations in the captured window count: onActivated fires for every window, and
+    // activating a tab elsewhere does not hide the run tab.
+    let deactivated = false;
+    const onActivated = this.api.tabs.onActivated;
+    const watcher = (info: TabActivationInfo): void => {
+      if (info.windowId === before && info.tabId !== currentTabId(tabId)) deactivated = true;
+    };
+    if (onActivated) onActivated.addListener(watcher);
+    let dataUrl: string;
     try {
-      const tab = await this.api.tabs.get(tabId);
-      if (typeof tab.windowId !== 'number') return { ok: false, error: 'tab has no window' };
-      windowId = tab.windowId;
+      dataUrl = await this.withTimeout(this.api.tabs.captureVisibleTab(before, { format: 'png' }), 'captureVisibleTab');
+    } catch (err) {
+      return { ok: false, error: `captureVisibleTab failed: ${errorOf(err)}` };
+    } finally {
+      // R-02 "leave no listeners behind": removed on success, timeout and throw alike.
+      if (onActivated) onActivated.removeListener(watcher);
+    }
+    // Checked again afterwards: the user can switch tabs while the capture is in flight,
+    // and the image would then be of whatever they switched to.
+    const after = await this.visibleWindowOf(tabId);
+    if (typeof after !== 'number') return { ok: false, error: `screenshot discarded: ${after.error}` };
+    if (after !== before) {
+      return { ok: false, error: 'screenshot discarded: the tab moved to another window while it was captured' };
+    }
+    if (deactivated) {
+      return { ok: false, error: 'screenshot discarded: the run tab was switched away from while it was captured' };
+    }
+    const dpr = metrics.devicePixelRatio || 1;
+    return {
+      ok: true,
+      dataUrl,
+      width: metrics.width,
+      height: metrics.height,
+      devicePixelRatio: dpr,
+      deviceWidth: Math.round(metrics.width * dpr),
+      deviceHeight: Math.round(metrics.height * dpr),
+    };
+  }
+
+  /**
+   * The window to capture `tabId` from, or why it cannot be captured. Only `active: true`
+   * passes: a tab Chrome does not report as active is treated as hidden, so a missing
+   * field fails closed rather than capturing a page that may not be the run's.
+   */
+  private async visibleWindowOf(tabId: number): Promise<number | { ok: false; error: string }> {
+    const target = currentTabId(tabId);
+    let tab: { windowId?: number; active?: boolean };
+    try {
+      tab = await this.withTimeout(this.api.tabs.get(target), 'tabs.get');
     } catch (err) {
       return { ok: false, error: `tabs.get failed: ${errorOf(err)}` };
     }
-    try {
-      const dataUrl = await this.withTimeout(
-        this.api.tabs.captureVisibleTab(windowId, { format: 'png' }),
-        'captureVisibleTab',
-      );
-      const dpr = metrics.devicePixelRatio || 1;
+    if (typeof tab.windowId !== 'number') return { ok: false, error: 'tab has no window' };
+    if (tab.active !== true) {
       return {
-        ok: true,
-        dataUrl,
-        width: metrics.width,
-        height: metrics.height,
-        devicePixelRatio: dpr,
-        deviceWidth: Math.round(metrics.width * dpr),
-        deviceHeight: Math.round(metrics.height * dpr),
+        ok: false,
+        error:
+          `tab ${target} is not the active tab of its window; captureVisibleTab captures only ` +
+          'the active tab, so the screenshot would show a different page',
       };
-    } catch (err) {
-      return { ok: false, error: `captureVisibleTab failed: ${errorOf(err)}` };
     }
+    return tab.windowId;
   }
 
   /**
@@ -270,14 +359,16 @@ export class PageDriver {
    * injection state is dropped up front: the page script does not survive a navigation.
    */
   async navigate(tabId: number, url: string): Promise<ActionResult> {
+    tabId = currentTabId(tabId);
     this.invalidate(tabId);
     const { onUpdated } = this.api.tabs;
     return new Promise<ActionResult>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
 
+      // Compared against the current id, so a tab swapped mid-navigation still settles it.
       const listener = (updatedTabId: number, info: TabUpdateInfo): void => {
-        if (updatedTabId !== tabId || info.status !== 'complete') return;
+        if (updatedTabId !== currentTabId(tabId) || info.status !== 'complete') return;
         finish({ ok: true });
       };
 

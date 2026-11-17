@@ -33,6 +33,8 @@ void _signalParity;
 export interface SnapshotResult {
   text: string;
   tokens?: number;
+  /** The page the snapshot was taken of, so the run log records where the agent was. */
+  url?: string;
 }
 
 export interface ScreenshotResult {
@@ -65,7 +67,8 @@ export interface WriteUserscriptRequest {
  * Implementations live outside `src/agent`.
  */
 export interface PageTools {
-  snapshot(): Promise<SnapshotResult>;
+  /** `urlOnly` reads the page URL without replacing the current ref table. */
+  snapshot(options?: { urlOnly?: boolean }): Promise<SnapshotResult>;
   screenshot(): Promise<ScreenshotResult>;
   extractText(maxChars?: number, startChar?: number): Promise<string>;
   /** Viewport box of one ref, so `both` mode can correlate refs to screenshot regions. */
@@ -89,6 +92,7 @@ export interface PageTools {
    * just carries the request and returns whatever the write path reports.
    */
   writeUserscript(request: WriteUserscriptRequest): Promise<string>;
+  deleteUserscript(scriptId: string): Promise<string>;
   /**
    * Saves `content` (or, when `fromLastUserscript` is true, the full untruncated
    * result of the most recent `run_userscript` call) as a file. `content` has
@@ -399,6 +403,16 @@ export function createPageToolset(page: PageTools, options: { readOnly?: boolean
         ...controlEnvelope,
       }),
     }),
+    tool(async ({ scriptId }) => page.deleteUserscript(scriptId), {
+      name: 'delete_userscript',
+      description:
+        'Delete an obsolete script you wrote to free a saved-script slot. ' +
+        'Use the exact id from list_userscripts. User-written and bundled scripts cannot be deleted by this tool.',
+      schema: z.object({
+        scriptId: z.string().min(1).describe('The exact id of an agent-written script to delete.'),
+        ...controlEnvelope,
+      }),
+    }),
     tool(async ({ scriptId, name, matches, code }) => page.writeUserscript({ scriptId, name, matches, code }), {
       name: 'write_userscript',
       description:
@@ -475,9 +489,16 @@ export function createPageToolset(page: PageTools, options: { readOnly?: boolean
     tool(async ({ summary }) => page.done(summary), {
       name: 'done',
       description:
-        'The whole objective is finished. Say what was accomplished. This ends the run.',
+        'The whole objective is finished. This ends the run, and summary is what the user gets back.',
       schema: z.object({
-        summary: z.string().describe('What was accomplished, in one or two sentences.'),
+        // Was "What was accomplished, in one or two sentences." Live runs asked for JSON got
+        // prose like "extracted the title and price" instead: the schema outranked the task.
+        summary: z
+          .string()
+          .describe(
+            'The result the user asked for, with the actual values you read. If the objective names a format ' +
+              '(JSON, a list, a table), this is exactly that output and nothing else. Otherwise one or two sentences.',
+          ),
         ...controlEnvelope,
       }),
     }),
@@ -743,6 +764,11 @@ export class FakePageTools implements PageTools {
   async writeUserscript(request: WriteUserscriptRequest): Promise<string> {
     this.#record('writeUserscript', request);
     return `saved userscript ${request.scriptId ?? 'fake-script-id'}`;
+  }
+
+  async deleteUserscript(scriptId: string): Promise<string> {
+    this.#record('deleteUserscript', scriptId);
+    return `deleted userscript ${scriptId}`;
   }
 
   async saveFile(filename: string, content: string | undefined, fromLastUserscript: boolean): Promise<string> {

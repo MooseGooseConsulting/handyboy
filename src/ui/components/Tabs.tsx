@@ -1,4 +1,12 @@
+import { createContext } from 'react';
 import { cn } from '../lib/cn';
+
+/**
+ * Whether the enclosing tab panel is the one on screen. Panels stay mounted while
+ * hidden, so anything that acts on layout (scrolling, measuring) must wait until its
+ * panel is shown again. Outside any panel, content counts as visible.
+ */
+export const TabPanelVisibleContext = createContext(true);
 
 export interface TabItem<T extends string> {
   value: T;
@@ -80,7 +88,9 @@ export function TabPanel<T extends string>({
       hidden={!selected}
       className={cn('min-h-0 flex-1 flex-col', selected ? 'flex' : 'hidden')}
     >
-      {selected ? children : null}
+      {/* Hidden, not unmounted: the sections hold work in progress in local state (the
+          typed objective, an unsaved userscript), and switching tabs must not discard it. */}
+      <TabPanelVisibleContext.Provider value={selected}>{children}</TabPanelVisibleContext.Provider>
     </div>
   );
 }

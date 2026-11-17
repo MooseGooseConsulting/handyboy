@@ -14,6 +14,13 @@ const KNOWN_BASES: Record<KnownOrigin, { origin: string; prefix: string }> = {
   kilo: { origin: new URL(KILO_BASE).origin, prefix: '/api/gateway' },
 };
 
+/**
+ * The WHATWG URL parser reads `\` as `/` and silently drops tabs, newlines and
+ * leading C0 bytes, so a target carrying any of them can parse to a different
+ * host than the string checks below saw. No API path needs them; refuse outright.
+ */
+const PARSER_REWRITTEN = /[\\\x00-\x1f\x7f]/;
+
 /** Drops leading and trailing slashes. A query string, if present, stays. */
 function trimEdgeSlashes(s: string): string {
   const q = s.indexOf('?');
@@ -29,14 +36,27 @@ function trimEdgeSlashes(s: string): string {
  * rather than being silently rewritten, so a client cannot aim the host at
  * another host and have a credential attached to it (C-06/security seam).
  *
+ * "Absolute" is whatever the URL parser itself accepts without a base, not a
+ * `scheme://` regex: `http:evil.example` has no slashes yet parses as
+ * `http://evil.example/`, and treating it as a relative path let it escape.
+ *
  * A relative path (no scheme) has no origin of its own -- callers that need one
  * default it themselves (`resolveUrl` in llm.ts defaults to OpenRouter, for
- * backward compatibility with paths sent before Kilo existed).
+ * backward compatibility with paths sent before Kilo existed). The returned path
+ * is not yet proof of anything: resolving it against a base can still escape
+ * (`../`, or a path that itself reads as `http:...`), which is why `resolveUrl`
+ * re-checks the final URL with `assertOnKnownBase`.
  */
 export function normalizeRequest(url: string): { path: string; origin: KnownOrigin | null } {
   const s = url.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s) || s.startsWith('//')) {
+  if (PARSER_REWRITTEN.test(s)) {
+    throw new OffOriginError('refusing request target containing a backslash or control character');
+  }
+  if (s.startsWith('//') || URL.canParse(s)) {
     const abs = new URL(s.startsWith('//') ? `https:${s}` : s);
+    if (abs.username || abs.password) {
+      throw new OffOriginError('refusing request target carrying credentials in the url');
+    }
     const entry = (Object.entries(KNOWN_BASES) as Array<[KnownOrigin, { origin: string; prefix: string }]>).find(
       ([, v]) => v.origin === abs.origin,
     );
@@ -45,8 +65,30 @@ export function normalizeRequest(url: string): { path: string; origin: KnownOrig
     }
     const [origin, { prefix }] = entry;
     const prefixRe = new RegExp(`^${escapeRegExp(prefix)}(?=/|$)`);
+    if (!prefixRe.test(abs.pathname)) {
+      throw new OffOriginError(`refusing ${origin} url outside ${prefix}`);
+    }
     const path = abs.pathname.replace(prefixRe, '') + abs.search;
     return { path: trimEdgeSlashes(path), origin };
   }
   return { path: trimEdgeSlashes(s), origin: null };
+}
+
+/**
+ * The last word before a credential is attached: the URL that will actually be
+ * fetched must sit on the source's exact origin, under its API prefix, with no
+ * userinfo. Checking the input string alone is not enough -- every escape found
+ * so far parsed to a different host only once resolved against the base.
+ */
+export function assertOnKnownBase(url: URL, source: KnownOrigin): void {
+  const { origin, prefix } = KNOWN_BASES[source];
+  if (url.origin !== origin) {
+    throw new OffOriginError(`refusing to proxy off-origin url: ${url.origin}`);
+  }
+  if (url.username || url.password) {
+    throw new OffOriginError('refusing request target carrying credentials in the url');
+  }
+  if (!url.pathname.startsWith(`${prefix}/`)) {
+    throw new OffOriginError(`refusing ${source} url outside ${prefix}`);
+  }
 }

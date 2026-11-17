@@ -45,6 +45,7 @@ export const BLOB_STORE = 'blobs';
 
 /** Marks a channel that was versioned but carried no value. */
 const EMPTY_BLOB = '__empty__';
+/** Pre-rename name on purpose: renaming it would orphan checkpoints already in IndexedDB. */
 export const DEFAULT_DB_NAME = 'nanobrowser-agent-checkpoints';
 
 interface CheckpointRecord {

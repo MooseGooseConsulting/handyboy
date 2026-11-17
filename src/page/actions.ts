@@ -19,7 +19,7 @@
  * Event cortège and pointer-field realism follow
  * docs/research/trusted-input-and-stealth.md §hygiene rules 4, 5, 7 and 12.
  */
-import { resolveRef } from './snapshot';
+import { existingRef, resolveRef, shadowRootOf } from './snapshot';
 import { jitterInBox, planPath } from '../input/humanize';
 
 export interface ActionResult {
@@ -124,6 +124,7 @@ export function resetPointerForTests(): void {
   lastPoint = null;
   prevClient = null;
   lastDelta = { x: 0, y: 0 };
+  focusedByUs = null;
 }
 
 /** Movement deltas for an event at `point`, advancing the module's position state. */
@@ -364,15 +365,62 @@ function actionPoint(el: HTMLElement): { point: Point } | { error: string } {
   const doc = el.ownerDocument;
   const canVerify = !!doc && typeof doc.elementFromPoint === 'function';
   let lastVerdict: AimVerdict = 'unverifiable';
+  let lastPoint: Point | undefined;
   for (const point of tries) {
     if (!canVerify) return { point };
     const verdict = verifyAim(el, doc, point);
     if (verdict === 'confirmed' || verdict === 'unverifiable') return { point };
     lastVerdict = verdict;
+    lastPoint = point;
   }
-  return lastVerdict === 'outside'
-    ? { error: 'element is outside the viewport at its click point' }
-    : { error: 'element is occluded at its click point by another element' };
+  if (lastVerdict === 'outside') return { error: 'element is outside the viewport at its click point' };
+  const probed = lastPoint ? tryHit(doc, lastPoint.clientX, lastPoint.clientY) : undefined;
+  const by = probed?.tested && probed.hit ? describeOccluder(probed.hit) : 'another element';
+  return { error: `element is occluded at its click point by ${by}` };
+}
+
+/** Visible-ish text with a space between nodes, so "privacy" + "Accept" do not run together. */
+function textOf(el: Element): string {
+  const parts: string[] = [];
+  const doc = el.ownerDocument;
+  const walker = doc?.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
+  for (let n = walker?.nextNode(); n && parts.join(' ').length < 80; n = walker!.nextNode()) parts.push(n.nodeValue ?? '');
+  return parts.join(' ');
+}
+
+/**
+ * Names what covers the target, so the agent can deal with it (close a cookie banner,
+ * dismiss an autocomplete list) instead of retrying the same click. Live runs on four
+ * sites refused eight clicks with only "another element" to go on.
+ */
+function describeOccluder(hit: Element): string {
+  const attr = (e: Element, n: string) => e.getAttribute?.(n) ?? '';
+  // The closest landmark-ish container says more than the leaf (a <span> in a banner).
+  // Only a match counts: walking off the end of the cap used to leave `box` on a
+  // distant ancestor, so a deep page reported a wrapper instead of the leaf hit.
+  let landmark: Element | null = null;
+  let box: Element | null = hit;
+  for (let i = 0; box && i < 12; i++, box = box.parentElement) {
+    const role = attr(box, 'role');
+    const idc = `${box.id} ${typeof box.className === 'string' ? box.className : ''}`;
+    if (/dialog|banner|alert|listbox|menu/.test(role) || /cookie|consent|gdpr|modal|overlay|popup|autocomplete|suggest/i.test(idc)) {
+      landmark = box;
+      break;
+    }
+  }
+  const subject = landmark ?? hit;
+  // The ref is resolved from the subject, not from the leaf hit: when the point lands on
+  // an interactive child of the described container (the "Accept" button inside the
+  // consent dialog), the child's own ref would act on the child — submitting the consent —
+  // instead of the dialog the description just named. An interactive child never sits on
+  // the subject's ancestor chain, so this chain cannot hand out the child's ref.
+  let refd: Element | null = subject;
+  let ref: string | undefined;
+  for (let i = 0; refd && i < 8 && !ref; i++, refd = refd.parentElement) ref = existingRef(refd);
+  const id = subject.id ? `#${subject.id}` : '';
+  const role = attr(subject, 'role') ? ` role="${attr(subject, 'role')}"` : '';
+  const text = (attr(subject, 'aria-label') || textOf(subject)).replace(/\s+/g, ' ').trim().slice(0, 60);
+  return `<${subject.localName}${id}${role}>${text ? ` "${text}"` : ''}${ref ? ` [ref=${ref}]` : ''}`;
 }
 
 /**
@@ -413,7 +461,12 @@ function tryHit(doc: Document, x: number, y: number): { tested: true; hit: Eleme
 function hitConfirms(el: HTMLElement, hit: Element): boolean {
   if (el.contains(hit)) return true;
   const root = el.getRootNode();
-  return root instanceof ShadowRoot && (hit === root.host || root.host.contains(hit));
+  // An open shadow root can be drilled, so a sibling that covers the target is a
+  // different element. A closed root cannot be drilled from the document, so a hit
+  // on the host itself is the best evidence. A light-DOM child of that host is a
+  // different element covering the target, not a stand-in for it.
+  if (!(root instanceof ShadowRoot) || root.mode !== 'closed') return false;
+  return hit === root.host;
 }
 
 type AimVerdict = 'confirmed' | 'occluded' | 'outside' | 'unverifiable';
@@ -568,10 +621,57 @@ function arrive(
  * `pressure` is 0.5 while the button is down and 0 while it is up (ranked-leak row 6);
  * `buttons` is consistent across the sequence.
  */
+function matchesDisabled(el: HTMLElement): boolean | null {
+  if (typeof el.matches !== 'function') return null;
+  try {
+    return el.matches(':disabled');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A disabled fieldset bars form controls, except those in its first legend.
+ * Links and custom clickables are not form controls, so the fieldset does not
+ * disable them. `:disabled` already encodes that; the walk is only for a DOM
+ * that rejects the selector.
+ */
+function barredByDisabledFieldset(el: HTMLElement): boolean {
+  if (!/^(button|input|select|textarea)$/.test(el.localName)) return false;
+  let node: Node | null = el;
+  const seen = new Set<Node>();
+  while (node && !seen.has(node)) {
+    seen.add(node);
+    if (node instanceof HTMLFieldSetElement && node.disabled) {
+      const legend = el.closest('legend');
+      if (legend && legend.parentElement === node) {
+        const first = Array.from(node.children).find((child) => child.localName === 'legend');
+        if (first && (first === legend || first.contains(el))) return false;
+      }
+      return true;
+    }
+    if (node instanceof ShadowRoot) node = node.host;
+    else node = node.parentNode;
+  }
+  return false;
+}
+
+function isDisabledControl(el: HTMLElement): boolean {
+  // `.disabled` reflects only the element's own attribute. A control inside a
+  // disabled fieldset can report `.disabled === false` while `:disabled` matches.
+  const matched = matchesDisabled(el);
+  if (matched !== null) return matched;
+  if ('disabled' in el && (el as { disabled?: boolean }).disabled === true) return true;
+  return barredByDisabledFieldset(el);
+}
+
 export function click(ref: string): ActionResult {
   const found = element(ref);
   if ('error' in found) return fail(found.error);
   const el = found.el;
+  // A disabled control does not receive the click. Dispatching pointer and click
+  // events would still run page handlers on a control the user cannot activate.
+  if (isDisabledControl(el)) return fail('element is disabled');
   ensureVisible(el);
   const placed = actionPoint(el);
   if ('error' in placed) return fail(placed.error);
@@ -595,6 +695,7 @@ export function click(ref: string): ActionResult {
   mouseAt(el, 'mousedown', point, 1, 1, screen);
   try {
     el.focus({ preventScroll: true });
+    noteFocus(el);
   } catch {
     // Non-focusable elements throw or no-op; the click still stands.
   }
@@ -667,10 +768,13 @@ export function type(ref: string, text: string, options: TypeOptions = {}): Acti
 
   const tag = el.localName.toLowerCase();
   if (tag === 'input' || tag === 'textarea') {
-    const current = (el as HTMLInputElement).value ?? '';
+    const field = el as HTMLInputElement;
+    if (field.readOnly || isDisabledControl(field)) return fail('element is not editable');
+    const current = field.value ?? '';
     const next = clear ? text : current + text;
     if (!setNativeValue(el, next)) return fail('no native value setter on this element');
     fireInputAndChange(el);
+    noteFocus(el);
     return { ok: true };
   }
 
@@ -689,6 +793,7 @@ export function type(ref: string, text: string, options: TypeOptions = {}): Acti
     } catch {
       return fail('execCommand("insertText") is unavailable');
     }
+    noteFocus(el);
     return { ok: true };
   }
 
@@ -729,19 +834,198 @@ function codeFor(key: string): string {
  * Use this for `Enter`/`Escape`/arrow-key handlers, not for entering text — that is `type()`,
  * and real typing is an R-13 escalation.
  */
+/** The element `type` or `click` last focused, including one inside a closed shadow root. */
+let focusedByUs: HTMLElement | null = null;
+
+function noteFocus(el: HTMLElement): void {
+  focusedByUs = el;
+}
+
+function deepActive(doc: Document): Element | null {
+  let current: Element | null = doc.activeElement;
+  const seen = new Set<Node>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const root = shadowRootOf(current);
+    const inner = root?.activeElement ?? null;
+    if (!inner || inner === current) break;
+    current = inner;
+  }
+  return current;
+}
+
+/** Same-origin iframe documents only. A cross-origin frame throws or returns null and is left alone. */
+function descendFrame(el: Element): Element {
+  const seen = new Set<Node>();
+  let current = el;
+  while (current.localName === 'iframe' && !seen.has(current)) {
+    seen.add(current);
+    const frame = current as HTMLIFrameElement;
+    let child: Document | null = null;
+    try {
+      child = frame.contentDocument;
+    } catch {
+      return current;
+    }
+    if (!child) return current;
+    const inner = deepActive(child);
+    if (!inner || inner === child.body || inner === child.documentElement) return current;
+    current = inner;
+  }
+  return current;
+}
+
+function pressTarget(doc: Document): Element | null {
+  let target = deepActive(doc);
+  if (target) target = descendFrame(target);
+  if (focusedByUs?.isConnected) {
+    const root = focusedByUs.getRootNode();
+    if (root instanceof ShadowRoot) {
+      const activeInRoot = root.activeElement;
+      const hostFocused = !target || target === root.host;
+      // deepActive stops at a closed host when the shadow root is not visible
+      // through chrome.dom. The root we already focused still knows which
+      // element inside it has focus, and that element is the key target.
+      if (hostFocused && activeInRoot instanceof Element && activeInRoot !== root.host) {
+        target = activeInRoot;
+      } else if (hostFocused && (activeInRoot === focusedByUs || activeInRoot === null || activeInRoot === root.host)) {
+        target = focusedByUs;
+      }
+    }
+  }
+  if (target) target = descendFrame(target);
+  return target ?? doc.body ?? doc.documentElement;
+}
+
+function keyEvent(target: Element, type: string, init: KeyboardEventInit): KeyboardEvent {
+  const Ctor = target.ownerDocument?.defaultView?.KeyboardEvent ?? KeyboardEvent;
+  return new Ctor(type, init);
+}
+
 export function press(key: string): ActionResult {
   const doc = (globalThis as unknown as { document: Document }).document;
-  const target: Element = (doc.activeElement as Element | null) ?? doc.body ?? doc.documentElement;
+  const target: Element | null = pressTarget(doc);
   if (!target) return fail('no focused element to receive the key');
   const code = codeFor(key);
   const init: KeyboardEventInit = { key, code, bubbles: true, cancelable: true, composed: true };
-  dispatch(target, new KeyboardEvent('keydown', init));
+  const keydown = keyEvent(target, 'keydown', init);
+  dispatch(target, keydown);
   // keypress only ever fired for character-producing keys; Enter is the historical exception.
+  let keypress: KeyboardEvent | null = null;
   if (key.length === 1 || key === 'Enter') {
-    dispatch(target, new KeyboardEvent('keypress', init));
+    keypress = keyEvent(target, 'keypress', init);
+    dispatch(target, keypress);
   }
-  dispatch(target, new KeyboardEvent('keyup', init));
+  // Implicit submission is the default action of the Enter keypress, which a browser
+  // runs before keyup. A keyup handler that clears or rewrites the field must not
+  // change the value that gets submitted.
+  if (key === 'Enter' && !keydown.defaultPrevented && !keypress?.defaultPrevented) implicitSubmit(target);
+  dispatch(target, keyEvent(target, 'keyup', init));
   return { ok: true };
+}
+
+/**
+ * Enter in a text field submits its form: the browser's implicit submission, which an
+ * untrusted keydown never triggers. Without it a plain HTML search box could not be
+ * submitted at all; live runs on TechMikeNY and ServeTheHome typed the query and
+ * pressed Enter repeatedly with the page never moving.
+ *
+ * Shaped like the browser's own implicit submission (HTML §4.10.22.3): when the form
+ * has a submit button, the *default button* is activated — that click carries the
+ * button's own handler, its name/value pair and its `formaction`, which a blind
+ * `requestSubmit()` discards. Only a buttonless form submits via `requestSubmit` (so the
+ * page's own validation and submit handlers still run), and only while at most one field
+ * blocks implicit submission: with two or more, a real browser does nothing on Enter.
+ */
+function implicitSubmit(target: Element): void {
+  const field = target as HTMLInputElement;
+  if (target.localName !== 'input' || !field.form) return;
+  if (!TEXT_SUBMIT_TYPES.has((field.type || 'text').toLowerCase())) return;
+  const form = field.form;
+  const button = defaultSubmitButton(form);
+  if (button) {
+    // A disabled default button blocks implicit submission. Activating a later
+    // enabled button would submit through a different name/value and formaction.
+    if (button.disabled) return;
+    // Activation, not a synthetic submit: `.click()` IS the default button's activation
+    // behaviour, so the handler, name/value and formaction all apply as if clicked.
+    button.click();
+    return;
+  }
+  if (blockingFieldCount(form) > 1) return;
+  // requestSubmit throws only for an invalid submitter; the next observation shows
+  // whether the page moved, which is what the agent checks anyway.
+  try {
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.submit();
+  } catch {
+    /* see above */
+  }
+}
+
+const TEXT_SUBMIT_TYPES: ReadonlySet<string> = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+
+/** The input types Chrome counts as blocking implicit submission on a buttonless form. */
+const BLOCKING_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'search',
+  'url',
+  'tel',
+  'email',
+  'password',
+  'date',
+  'month',
+  'week',
+  'time',
+  'datetime-local',
+  'number',
+]);
+
+/** The spec's default button: the first submit button in tree order whose form owner is `form`.
+ *
+ * Disabled buttons stay in that order. Implicit submission activates the default button
+ * only when it is enabled; skipping a disabled one and clicking a later button submits
+ * through a different action than a browser would.
+ *
+ * Form owner, not ancestry: a descendant with `form="other"` belongs to that other form,
+ * and a button outside this form can belong to it. `querySelectorAll` walks the form's
+ * root (the document, or the shadow root that contains the form) in tree order.
+ *
+ * The `.type` IDL property, not the attribute, decides "submit button": a `<button>`
+ * with a missing, empty or invalid `type` attribute is still in the Submit Button state
+ * (HTML §4.10.6), and the IDL normalizes case. An attribute-only selector would miss all
+ * of those and drop the very common typeless `<button>Search</button>` into the
+ * buttonless requestSubmit path, losing the button's own handler.
+ */
+function defaultSubmitButton(form: HTMLFormElement): HTMLButtonElement | HTMLInputElement | null {
+  const root = form.getRootNode();
+  const scope = root instanceof Document || root instanceof ShadowRoot ? root : form.ownerDocument;
+  if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+  for (const el of Array.from(scope.querySelectorAll('button, input'))) {
+    const button = el as HTMLButtonElement | HTMLInputElement;
+    if (button.form !== form) continue;
+    const type = (button.type || '').toLowerCase();
+    if (type !== 'submit' && type !== 'image') continue;
+    return button;
+  }
+  return null;
+}
+
+/**
+ * Fields that block a buttonless form's implicit submission: text-ish inputs that are
+ * neither disabled nor readonly. Checked against the spec's list, which is wider than
+ * `TEXT_SUBMIT_TYPES` — a date field cannot be *submitted from* with Enter here (we do
+ * not press keys into it), but it still blocks a form's implicit submission.
+ */
+function blockingFieldCount(form: HTMLFormElement): number {
+  let count = 0;
+  for (const el of Array.from(form.elements)) {
+    if (el.localName !== 'input') continue;
+    const input = el as HTMLInputElement;
+    if (input.disabled || input.readOnly) continue;
+    if (BLOCKING_INPUT_TYPES.has((input.type || '').toLowerCase())) count += 1;
+  }
+  return count;
 }
 
 /**

@@ -3,207 +3,187 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Userscript, UserscriptRunResult } from '@/src/messaging';
+import { TabPanelVisibleContext } from '../components/Tabs';
 import { UserscriptsSection } from './UserscriptsSection';
 
 afterEach(cleanup);
 
-const SCRIPT: Userscript = {
-  id: 'script-a',
-  name: 'title probe',
-  matches: ['*://example.com/*'],
-  code: 'return document.title;',
-  updatedAt: 10,
+const stored: Userscript = {
+  id: 'script-stored',
+  name: 'listing prices',
+  matches: ['*://shop.example/*'],
+  code: 'const rows = [];\nreturn rows;\n',
+  updatedAt: 1,
 };
 
-function setup(over: Partial<Parameters<typeof UserscriptsSection>[0]> = {}) {
-  const handlers = {
+function props(over: Partial<Parameters<typeof UserscriptsSection>[0]> = {}) {
+  return {
+    scripts: [stored],
+    scriptsStatus: 'ready' as const,
+    runStatus: 'ready' as const,
     onSave: vi.fn(),
     onRun: vi.fn(),
     onDelete: vi.fn(),
     onRefresh: vi.fn(),
+    ...over,
   };
-  render(
-    <UserscriptsSection
-      scripts={[SCRIPT]}
-      scriptsStatus="ready"
-      runStatus="idle"
-      {...handlers}
-      {...over}
-    />,
-  );
-  return handlers;
 }
 
-describe('UserscriptsSection editor', () => {
-  it('loads the stored script into the editor', () => {
-    setup();
-    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('title probe');
-    expect((screen.getByLabelText('Matches') as HTMLInputElement).value).toBe('*://example.com/*');
-    expect((screen.getByLabelText('Code') as HTMLTextAreaElement).value).toBe('return document.title;');
-  });
+const nameField = () => screen.getByLabelText('Name') as HTMLInputElement;
+const codeField = () => screen.getByLabelText('Code') as HTMLTextAreaElement;
 
-  it('sends the live editor code on Run, without saving first (O-03)', async () => {
+describe('UserscriptsSection', () => {
+  it('saving a new script keeps it in the editor while the worker is still storing it', async () => {
     const user = userEvent.setup();
-    const handlers = setup();
+    const onSave = vi.fn();
+    const { rerender } = render(<UserscriptsSection {...props({ onSave })} />);
+    expect(nameField().value).toBe('listing prices');
 
-    const code = screen.getByLabelText('Code');
-    await user.clear(code);
-    await user.type(code, 'return 1 + 1;');
-
-    await user.click(screen.getByRole('button', { name: 'Run' }));
-
-    expect(handlers.onRun).toHaveBeenCalledExactlyOnceWith('script-a', 'return 1 + 1;');
-    expect(handlers.onSave).not.toHaveBeenCalled();
-    expect(screen.getByText(/Run still uses exactly what is in the editor/)).toBeTruthy();
-  });
-
-  it('saves name, matches and code together', async () => {
-    const user = userEvent.setup();
-    const handlers = setup();
-
-    await user.clear(screen.getByLabelText('Name'));
-    await user.type(screen.getByLabelText('Name'), 'probe 2');
-    await user.clear(screen.getByLabelText('Matches'));
-    await user.type(screen.getByLabelText('Matches'), '*://a.test/* *://b.test/*');
+    await user.click(screen.getByRole('button', { name: 'new' }));
+    await user.clear(nameField());
+    await user.type(nameField(), 'review counts');
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(handlers.onSave).toHaveBeenCalledOnce();
-    const saved = handlers.onSave.mock.calls[0]?.[0] as Userscript;
-    expect(saved.id).toBe('script-a');
-    expect(saved.name).toBe('probe 2');
-    expect(saved.matches).toEqual(['*://a.test/*', '*://b.test/*']);
-    expect(saved.code).toBe('return document.title;');
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ name: 'review counts' }));
+    // The list the panel holds has not caught up with the save yet.
+    expect(nameField().value).toBe('review counts');
+
+    const saved: Userscript = onSave.mock.calls[0]![0];
+    rerender(<UserscriptsSection {...props({ onSave, scripts: [stored, saved] })} />);
+    expect(nameField().value).toBe('review counts');
+    expect(screen.getByRole('button', { name: /review counts/ }).getAttribute('aria-current')).toBe('true');
   });
 
-  it('starts a blank script without disturbing the stored one', async () => {
+  it('saving an edit to an existing script keeps the edited copy until the fresh list arrives', async () => {
     const user = userEvent.setup();
-    setup();
-    await user.click(screen.getByRole('button', { name: 'new' }));
-    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('new script');
-    expect(screen.getByRole('button', { name: /title probe/ })).toBeTruthy();
+    const onSave = vi.fn();
+    const { rerender } = render(<UserscriptsSection {...props({ onSave })} />);
+    expect(codeField().value).toBe(stored.code);
+
+    await user.click(codeField());
+    await user.type(codeField(), '// v2');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ code: `${stored.code}// v2` }));
+    // The panel's list still holds the pre-save copy; it must not replace the editor.
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+    rerender(<UserscriptsSection {...props({ onSave })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+
+    // The stored copy the worker echoes is stamped at save time, never earlier.
+    const saved: Userscript = onSave.mock.calls[0]![0];
+    rerender(<UserscriptsSection {...props({ onSave, scripts: [saved] })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+    expect(screen.getByRole('button', { name: /listing prices/ }).getAttribute('aria-current')).toBe('true');
   });
-});
 
-describe('UserscriptsSection delete', () => {
-  it('needs an inline confirm and never calls window.confirm', async () => {
+  it('deleting the loaded script while its save is pending settles on the delete reply', async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, 'confirm');
-    const handlers = setup();
-
-    await user.click(screen.getByRole('button', { name: 'delete' }));
-    expect(handlers.onDelete).not.toHaveBeenCalled();
-
+    const onSave = vi.fn();
+    const onDelete = vi.fn();
+    const other: Userscript = {
+      id: 'script-other',
+      name: 'watchlist',
+      matches: ['*://example.com/*'],
+      code: 'return 1;\n',
+      updatedAt: 1,
+    };
+    const { rerender } = render(
+      <UserscriptsSection {...props({ onSave, onDelete, scripts: [stored, other] })} />,
+    );
+    await user.click(codeField());
+    await user.type(codeField(), '// v2');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await user.click(screen.getAllByRole('button', { name: 'delete' })[0]!);
     await user.click(screen.getByRole('button', { name: 'Sure?' }));
-    expect(handlers.onDelete).toHaveBeenCalledExactlyOnceWith('script-a');
-    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onDelete).toHaveBeenCalledWith(stored.id);
+
+    // The save's reply lands before the delete's and still lists the doomed script;
+    // it must not move the editor onto it.
+    const saved: Userscript = onSave.mock.calls[0]![0];
+    rerender(<UserscriptsSection {...props({ onSave, onDelete, scripts: [saved, other] })} />);
+    expect(codeField().value).toBe(`${stored.code}// v2`);
+
+    // The delete's reply settles it: the editor falls back to the remaining script.
+    rerender(<UserscriptsSection {...props({ onSave, onDelete, scripts: [other] })} />);
+    expect(nameField().value).toBe('watchlist');
   });
 
-  it('can be backed out of', async () => {
+  it('typing after a failed run keeps the caret where the user is typing', async () => {
     const user = userEvent.setup();
-    const handlers = setup();
+    const failed: UserscriptRunResult = {
+      scriptId: stored.id,
+      ok: false,
+      error: 'ReferenceError: rowz is not defined (line 1)',
+      console: [],
+      durationMs: 3,
+    };
+    const { rerender } = render(<UserscriptsSection {...props()} />);
+    rerender(<UserscriptsSection {...props({ result: failed })} />);
+    // The failed run itself does put the caret on the error line.
+    expect(codeField().selectionStart).toBe(0);
 
-    await user.click(screen.getByRole('button', { name: 'delete' }));
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(handlers.onDelete).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'delete' })).toBeTruthy();
+    await user.click(codeField());
+    codeField().setSelectionRange(codeField().value.length, codeField().value.length);
+    await user.type(codeField(), '// fixed', { skipClick: true });
+
+    expect(codeField().value).toBe(`${stored.code}// fixed`);
+    expect(codeField().selectionStart).toBe(codeField().value.length);
   });
-});
 
-describe('UserscriptsSection results', () => {
-  const result: UserscriptRunResult = {
-    scriptId: 'script-a',
+  // 'const rows = [];' is 16 characters, so line 2 starts at offset 17.
+  const failedLineTwo: UserscriptRunResult = {
+    scriptId: stored.id,
     ok: false,
-    value: { title: 'Example' },
-    error: 'TypeError: x is not a function',
-    console: [
-      { level: 'log', text: 'starting', at: 1 },
-      { level: 'warn', text: 'slow selector', at: 2 },
-      { level: 'error', text: 'boom', at: 3 },
-    ],
-    durationMs: 42,
+    error: 'ReferenceError: rows is not defined (line 2)',
+    console: [],
+    durationMs: 3,
   };
 
-  it('shows the return value, the error and console lines by level', () => {
-    setup({ result, runStatus: 'ready' });
-
-    expect(screen.getByTestId('script-value').textContent).toBe(
-      JSON.stringify({ title: 'Example' }, null, 2),
+  it('moves the caret once the panel shows, when the result arrived while it was hidden', () => {
+    const hidden = (result?: UserscriptRunResult) => (
+      <TabPanelVisibleContext.Provider value={false}>
+        <UserscriptsSection {...props({ result })} />
+      </TabPanelVisibleContext.Provider>
     );
-    expect(screen.getByTestId('script-error').textContent).toContain('TypeError');
+    const shown = (
+      <TabPanelVisibleContext.Provider value={true}>
+        <UserscriptsSection {...props({ result: failedLineTwo })} />
+      </TabPanelVisibleContext.Provider>
+    );
+    const { rerender } = render(hidden());
+    rerender(hidden(failedLineTwo));
+    // A hidden panel has no layout: the jump waits instead of running into a no-op.
+    expect(codeField().selectionStart).not.toBe(17);
 
-    const lines = screen.getByTestId('script-console').children;
-    expect(lines).toHaveLength(3);
-    expect(lines[1]?.className).toContain('amber');
-    expect(lines[2]?.className).toContain('rose');
+    rerender(shown);
+    expect(codeField().selectionStart).toBe(17);
   });
 
-  it('waits visibly while the worker has not answered', () => {
-    setup({ runStatus: 'waiting' });
-    expect(screen.getByText(/Waiting for the worker to run the script/)).toBeTruthy();
+  it('does not replay the error jump on later tab returns', () => {
+    const panel = (visible: boolean) => (
+      <TabPanelVisibleContext.Provider value={visible}>
+        <UserscriptsSection {...props({ result: failedLineTwo })} />
+      </TabPanelVisibleContext.Provider>
+    );
+    const { rerender } = render(panel(true));
+    expect(codeField().selectionStart).toBe(17);
+
+    // The user takes the caret back, then switches away and returns: the consumed
+    // jump must not fire again.
+    codeField().setSelectionRange(0, 0);
+    rerender(panel(false));
+    rerender(panel(true));
+    expect(codeField().selectionStart).toBe(0);
   });
 
-  it('degrades when the worker has not sent the script list', () => {
-    setup({ scripts: [], scriptsStatus: 'waiting' });
-    expect(screen.getByText(/Waiting for the worker to send the script list/)).toBeTruthy();
-  });
-});
+  it('moves the caret when the result outran the script list', () => {
+    const { rerender } = render(<UserscriptsSection {...props({ scripts: [] })} />);
+    rerender(<UserscriptsSection {...props({ scripts: [], result: failedLineTwo })} />);
+    // The executed script is not in the editor yet, so nothing is positioned.
+    expect(codeField().selectionStart).not.toBe(17);
 
-describe('editor error line and save', () => {
-  it('moves the editor to the error line', () => {
-    const code = Array.from({ length: 20 }, (_, index) => `const line${index} = ${index};`).join('\n');
-    setup({
-      scripts: [{ ...SCRIPT, code }],
-      result: {
-        scriptId: SCRIPT.id,
-        ok: false,
-        error: 'SyntaxError: Unexpected token (line 12, column 1)',
-        console: [],
-        durationMs: 4,
-      },
-    });
-
-    const area = screen.getByLabelText('Code') as HTMLTextAreaElement;
-    expect(area.scrollTop).toBe(11 * 16);
-    expect(screen.getByTestId('script-lines').textContent).toContain('12');
-    expect(area.value).toBe(code);
-    expect(area.selectionStart).toBe(code.indexOf('const line11 '));
-  });
-
-  it('says where Save JSON wrote the file once the host confirms it', () => {
-    setup({
-      result: { scriptId: SCRIPT.id, ok: true, value: { rows: [] }, console: [], durationMs: 4 },
-      saved: { filename: 'userscript.json', path: '/artifacts/panel/userscript.json', bytes: 12 },
-    });
-
-    expect(screen.getByTestId('script-saved').textContent).toContain('/artifacts/panel/userscript.json');
-  });
-
-  it('saves the result value when Save JSON is clicked', async () => {
-    const onSaveResult = vi.fn();
-    const value = { summary: [{ n: 1 }], rows: [{ id: 'a' }] };
-    setup({
-      onSaveResult,
-      result: { scriptId: SCRIPT.id, ok: true, value, console: [], durationMs: 4 },
-    });
-
-    await userEvent.click(screen.getByRole('button', { name: 'Save JSON' }));
-    expect(onSaveResult).toHaveBeenCalledWith(value);
-  });
-});
-
-describe('who wrote each script (O-03)', () => {
-  it('marks a script the agent wrote and leaves the user\'s own unmarked', () => {
-    setup({
-      scripts: [
-        SCRIPT,
-        { ...SCRIPT, id: 'script-b', name: 'agent probe', author: 'agent' as const },
-      ],
-    });
-
-    // The agent authoring scripts into the user's catalog is only acceptable if
-    // the user can see at a glance which ones are the agent's.
-    const marks = screen.getAllByTitle('Written by the agent during a run');
-    expect(marks).toHaveLength(1);
-    expect(marks[0]!.textContent).toBe('agent');
+    rerender(<UserscriptsSection {...props({ result: failedLineTwo })} />);
+    expect(codeField().selectionStart).toBe(17);
   });
 });

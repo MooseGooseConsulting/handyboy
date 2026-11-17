@@ -51,6 +51,28 @@ export function findModel(models: ModelInfo[], id: string, source?: ModelSource)
   return models.find((model) => model.id === id);
 }
 
+/** Whether picking a model may send page content to an endpoint that trains on prompts. */
+export type TrainingRisk = 'trains' | 'no' | 'unknown';
+
+/**
+ * Only Kilo's catalog reports training, so an OpenRouter entry borrows it: a `:free` id
+ * is served only under OpenRouter's training policy, and the same id on Kilo is the same
+ * upstream model (e.g. the Muse Spark "Contributor" models). Only a positive flag is
+ * borrowed: the gateways route independently, so a Kilo endpoint that does not train says
+ * nothing about the one OpenRouter picks. Anything unproven -- no Kilo twin, a non-training
+ * twin, or Kilo's catalog failed to load and the panel got OpenRouter's alone -- is
+ * `unknown`, never a silent `no`. A warning only: Handyboy sends no data-collection
+ * filter, so nothing here stops the run.
+ */
+export function trainingRisk(model: ModelInfo, catalog: ModelInfo[]): TrainingRisk {
+  if (model.mayTrainOnYourPrompts !== undefined) return model.mayTrainOnYourPrompts ? 'trains' : 'no';
+  if (sourceOf(model) === 'openrouter' && model.id.endsWith(':free')) return 'trains';
+  const kiloTwinTrains = catalog.some(
+    (other) => sourceOf(other) === 'kilo' && other.id === model.id && other.mayTrainOnYourPrompts === true,
+  );
+  return kiloTwinTrains ? 'trains' : 'unknown';
+}
+
 /** The Setup tab's "filter by source" control. `'all'` (the default) passes every model through. */
 export function filterSource(models: ModelInfo[], source: ModelSource | 'all'): ModelInfo[] {
   return source === 'all' ? models : models.filter((model) => sourceOf(model) === source);

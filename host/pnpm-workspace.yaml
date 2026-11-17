@@ -1,0 +1,4 @@
+# Fleet release-age soak (MooseGooseConsulting/renovate-config ADR 0001): resolve only
+# releases at least 4 days old (5760 minutes), in Renovate lock updates and in a local
+# `pnpm install`. Needs pnpm 10.16 or later.
+minimumReleaseAge: 5760

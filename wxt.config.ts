@@ -2,7 +2,7 @@ import { defineConfig } from 'wxt';
 import tailwindcss from '@tailwindcss/vite';
 
 // Public half of the RSA-2048 keypair whose private half lives OUTSIDE this repo at
-// ~/.config/nanobrowser/extension-key.pem. Pins the extension ID across unpacked reloads
+// ~/.config/handyboy/extension-key.pem. Pins the extension ID across unpacked reloads
 // so the native-messaging host registration survives rebuilds.
 const EXTENSION_KEY =
   'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsTmqp12xu1sNiMj6L3sRHJdr3af02Zg9iY57qy8EKESPkB5a/iPb+Gw6PHp4Ig9qHfG6C7fbVQuoavkhS5oi17mttZqobteRvyx8Oxv5b312up8X8fbwOhzocRinHop08a7rNcK4q9oacBcJYjWt84HWAOLM4pq+RMMm3zrXcDN/EeoUFqCXDo2h9ibzO6ec4EfcvkkPIfdTp/yZpvl5jiMfkXMuMNH4454z23BerfTKSo8hCqR4sschuIa07mvX+AhtT+zdgNL8Zy/H+a+hSMfbAoss7a6cxcpwYQppjeGSrlx8VoFmX9viPOVDUa96ISKIIwkc62FajvMGEX/BjwIDAQAB';

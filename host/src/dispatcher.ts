@@ -3,11 +3,13 @@ import { appendExtLog, ExtLogError, mirrorToHostLog, toEntry } from './extlog.ts
 import { getInjector, type InputInjector } from './input/index.ts';
 import type { LlmProxy } from './llm.ts';
 import { log } from './log.ts';
+import { failureReply } from './outbound.ts';
 import type {
   ArtifactSaveMsg,
   ErrorCode,
   InboundMsg,
   InputMsg,
+  KeyStatusMsg,
   LlmRequestMsg,
   LogAppendMsg,
   OutboundMsg,
@@ -50,7 +52,25 @@ export class Dispatcher {
     this.#deps.send({ type: 'error', id, code, message });
   }
 
+  /**
+   * Every request with an id gets a terminal reply. A handler that throws used to
+   * surface only as a host.log line in main.ts, leaving the extension's promise
+   * (or llm stream) for that id pending forever.
+   */
   async handle(raw: unknown): Promise<void> {
+    try {
+      await this.#handle(raw);
+    } catch (err) {
+      const message = (err as Error).message;
+      log('error', 'dispatcher threw', { error: message });
+      const { type, id } = (raw ?? {}) as { type?: unknown; id?: unknown };
+      if (typeof type === 'string' && typeof id === 'string') {
+        this.#deps.send(failureReply(type, id, 'internal', message));
+      }
+    }
+  }
+
+  async #handle(raw: unknown): Promise<void> {
     if (typeof raw !== 'object' || raw === null || typeof (raw as { type?: unknown }).type !== 'string') {
       return this.#fail(undefined, 'bad_request', 'message must be an object with a string "type"');
     }
@@ -62,8 +82,18 @@ export class Dispatcher {
 
     switch (msg.type) {
       case 'key.status': {
-        const { ready, reason } = await this.#deps.llm.keyStatus();
-        return this.#deps.send({ type: 'key.status.result', id: msg.id, ready, ...(reason ? { reason } : {}) });
+        const source = (msg as KeyStatusMsg).source;
+        if (source !== undefined && source !== 'openrouter' && source !== 'kilo') {
+          return this.#fail(msg.id, 'bad_request', 'key.status "source" must be "openrouter" or "kilo"');
+        }
+        const { ready, reason, sources } = await this.#deps.llm.keyStatus(source);
+        return this.#deps.send({
+          type: 'key.status.result',
+          id: msg.id,
+          ready,
+          ...(reason ? { reason } : {}),
+          ...(sources ? { sources } : {}),
+        });
       }
 
       case 'models.list': {
@@ -97,12 +127,13 @@ export class Dispatcher {
           return this.#fail(m.id, 'bad_request', (err as RunLogError).message);
         }
         const append = async (): Promise<void> => {
+          let written: unknown;
           try {
-            await appendRunLog(m.runId, m.event, this.#deps.runsDir);
+            written = await appendRunLog(m.runId, m.event, this.#deps.runsDir);
           } catch (err) {
             return this.#fail(m.id, 'io', (err as Error).message);
           }
-          this.#deps.onRunEvent?.(m.runId, m.event);
+          this.#deps.onRunEvent?.(m.runId, written);
           this.#deps.send({ type: 'runlog.ack', ...(m.id ? { id: m.id } : {}), runId: m.runId, ok: true });
         };
         // The stored tail is guarded: if this append throws (a subscriber or a dead

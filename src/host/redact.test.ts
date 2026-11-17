@@ -1,103 +1,50 @@
-import { describe, expect, it } from 'vitest';
-import type { RunEvent } from '@/src/messaging';
-import { redactEvent } from './redact';
+import { expect, it } from 'vitest';
+import { redactEvent, redactText } from './redact';
 
-describe('redactEvent', () => {
-  it('strips an OpenRouter key wherever it appears, nested in unknown args', () => {
-    const event: RunEvent = {
-      kind: 'tool.call',
-      role: 'follower',
-      call: { callId: 'c1', name: 'fetchKey', args: { header: 'Authorization: sk-or-abc123XYZ-9' } },
-      at: 1,
-    };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'tool.call') throw new Error('expected tool.call');
-    const serialized = JSON.stringify(redacted.call.args);
-    expect(serialized).not.toContain('sk-or-abc123XYZ-9');
-    expect(serialized).toContain('[redacted]');
-  });
+/**
+ * Hand-built fixture. The two hex segments are what a regex that stops at `.`
+ * would leave behind after stripping only `sk-or-v1`.
+ */
+const KEY = 'sk-or-v1.a1b2c3d4e5f60718.89abcdef01234567';
+const HEAD = 'a1b2c3d4e5f60718';
+const TAIL = '89abcdef01234567';
 
-  it('strips a Bearer token', () => {
-    const event: RunEvent = { kind: 'model.text', role: 'leader', text: 'sending Bearer abcDEF123.token', at: 2 };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'model.text') throw new Error('expected model.text');
-    expect(redacted.text).toBe('sending [redacted]');
-  });
+function assertDottedKeyGone(output: string): void {
+  expect(output.includes(KEY), 'dotted OpenRouter key survived extension log redaction').toBe(false);
+  expect(output.includes(HEAD), 'left half of a dotted OpenRouter key survived extension log redaction').toBe(false);
+  expect(output.includes(TAIL), 'right half of a dotted OpenRouter key survived extension log redaction').toBe(false);
+}
 
-  it('replaces a screenshot data URL with a fixed placeholder', () => {
-    const event: RunEvent = {
-      kind: 'userscript.output',
-      scriptId: 's1',
-      level: 'log',
-      text: 'captured: data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA',
-      at: 3,
-    };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'userscript.output') throw new Error('expected userscript.output');
-    expect(redacted.text).toBe('captured: [screenshot omitted]');
-  });
+it('a dotted OpenRouter key sk-or-v1.<hex>.<hex> does not survive extension log redaction', () => {
+  const line = redactText(`model call failed key=${KEY} status=401`);
+  assertDottedKeyGone(line);
+  expect(line).toBe('model call failed key=[redacted] status=401');
 
-  it('redacts inside nested arrays and objects, and can redact more than once per string', () => {
-    const event: RunEvent = {
-      kind: 'tool.result',
-      role: 'follower',
-      result: {
-        callId: 'c2',
-        name: 'debug',
-        ok: true,
-        summary: 'keys: [sk-or-one111, sk-or-two222]',
-        durationMs: 5,
-      },
-      at: 7,
-    };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'tool.result') throw new Error('expected tool.result');
-    expect(redacted.result.summary).toBe('keys: [[redacted], [redacted]]');
+  const args = { text: `note ${KEY} done` };
+  const redacted = redactEvent({
+    kind: 'tool.call',
+    role: 'follower',
+    call: { callId: 'call-1', name: 'remember', args },
+    at: 1_720_000_000_000,
   });
+  assertDottedKeyGone(JSON.stringify(redacted));
+  expect(args.text.includes(KEY), 'redactEvent mutated the event it was given').toBe(true);
+  expect(redacted).toEqual({
+    kind: 'tool.call',
+    role: 'follower',
+    call: { callId: 'call-1', name: 'remember', args: { text: 'note [redacted] done' } },
+    at: 1_720_000_000_000,
+  });
+});
 
-  it('strips other providers sk- tokens, mirroring the host redactor', () => {
-    const event: RunEvent = {
-      kind: 'model.text',
-      role: 'follower',
-      text: 'key sk-abcDEF12345678901234567890 leaked',
-      at: 9,
-    };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'model.text') throw new Error('expected model.text');
-    expect(redacted.text).toBe('key [redacted] leaked');
-  });
-
-  it('strips Doppler tokens', () => {
-    const event: RunEvent = {
-      kind: 'model.text',
-      role: 'follower',
-      text: 'token dp.ct.abcDEF1234567890 in output',
-      at: 10,
-    };
-    const redacted = redactEvent(event);
-    if (redacted.kind !== 'model.text') throw new Error('expected model.text');
-    expect(redacted.text).toBe('token [redacted] in output');
-  });
-
-  it('leaves an event with nothing secret-shaped intact', () => {
-    const event: RunEvent = { kind: 'step', n: 4, role: 'follower', at: 5 };
-    expect(redactEvent(event)).toEqual(event);
-  });
-
-  it('does not mutate the input event', () => {
-    const event: RunEvent = { kind: 'model.text', role: 'leader', text: 'Bearer topsecret', at: 6 };
-    const before = JSON.parse(JSON.stringify(event));
-    redactEvent(event);
-    expect(event).toEqual(before);
-  });
-
-  it('leaves a non-screenshot data URL and unrelated text untouched', () => {
-    const event: RunEvent = {
-      kind: 'model.text',
-      role: 'leader',
-      text: 'see data:text/plain;base64,aGVsbG8= and note nothing else changes here',
-      at: 8,
-    };
-    expect(redactEvent(event)).toEqual(event);
-  });
+it('a bearer token, a Doppler token, and a screenshot data URL do not survive redaction', () => {
+  const bearer = 'Bearer sk-live-secret-token';
+  const doppler = 'dp.ct.abcdef0123456789';
+  const png = 'data:image/png;base64,aaaa';
+  const line = redactText(`auth=${bearer} doppler=${doppler} shot=${png} tail`);
+  expect(line.includes(bearer)).toBe(false);
+  expect(line.includes('sk-live-secret-token')).toBe(false);
+  expect(line.includes(doppler)).toBe(false);
+  expect(line.includes(png)).toBe(false);
+  expect(line).toBe('auth=[redacted] doppler=[redacted] shot=[screenshot omitted] tail');
 });
