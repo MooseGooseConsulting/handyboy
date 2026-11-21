@@ -223,6 +223,12 @@ const render = () => {
 };
 
 let refreshing = false;
+let readAbort = null;
+// A read that never settles would hold the one-at-a-time guard forever and freeze the
+// rail, so reads are cut off after 20 s, and at once when the thread changes or the
+// rail is torn down. Writes are never aborted: a cancelled PATCH may still have landed.
+const READ_TIMEOUT_MS = 20000;
+const cancelRead = () => { if (readAbort) readAbort.abort(); };
 const refresh = async () => {
   // One read at a time: a slow endpoint must not let the 15 s poll stack requests.
   // A path change during a read is picked up by the next tick, because lastPath only
@@ -230,21 +236,28 @@ const refresh = async () => {
   if (refreshing || stopped) return false;
   refreshing = true;
   const id = threadIdFromPath();
+  const abort = new AbortController();
+  readAbort = abort;
+  const read = (path) => api(path, { signal: abort.signal });
+  const deadline = setTimeout(() => abort.abort(), READ_TIMEOUT_MS);
   try {
     if (!id) { current = { id: null, thread: null }; render(); return true; }
     // The selects still show the previous thread until this read lands. Dropping
     // current first means a change made in that gap has no thread to write to.
     if (current.id !== id) { current = { id: null, thread: null }; usageBox.textContent = ''; render(); }
-    const thread = await api('/api/threads/' + id);
+    const thread = await read('/api/threads/' + id);
     if (stopped || threadIdFromPath() !== id) return true;
     current = { id: id, thread: thread };
     if (!busy) render();
-    const usage = await api('/api/threads/' + id + '/usage').catch(() => null);
-    const breakdown = await api('/api/threads/' + id + '/usage-breakdown').catch(() => null);
+    const usage = await read('/api/threads/' + id + '/usage').catch(() => null);
+    const breakdown = await read('/api/threads/' + id + '/usage-breakdown').catch(() => null);
     if (!stopped && threadIdFromPath() === id) renderUsage(usage, breakdown);
   } catch (e) {
-    note.textContent = 'Read failed: ' + e.message;
+    // An abort on navigation is the rail moving on, not a failure worth showing.
+    if (!abort.signal.aborted || threadIdFromPath() === id) note.textContent = 'Read failed: ' + e.message;
   } finally {
+    clearTimeout(deadline);
+    if (readAbort === abort) readAbort = null;
     refreshing = false;
   }
   return true;
@@ -295,10 +308,11 @@ const timer = setInterval(() => {
   if (location.pathname !== lastPath) {
     const path = location.pathname;
     note.textContent = '';
+    cancelRead();
     refresh().then((started) => { if (started) lastPath = path; });
   } else if (ticks % 15 === 0 && current.id && !busy && document.visibilityState === 'visible') refresh();
 }, 1000);
-root.__hbStop = () => { stopped = true; clearInterval(timer); };
+root.__hbStop = () => { stopped = true; clearInterval(timer); cancelRead(); };
 
 await loadKnownModels();
 await refresh();

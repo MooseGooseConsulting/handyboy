@@ -25,12 +25,16 @@ function fakeHyperagent() {
     toolSettings: JSON.stringify({ autoCompactThresholdPercent: '50' }),
   });
   const json = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
-  const fetchImpl = vi.fn(async (path: string, init?: { method?: string; body?: string }) => {
+  const fetchImpl = vi.fn(async (path: string, init?: { method?: string; body?: string; signal?: AbortSignal }) => {
     const method = init?.method ?? 'GET';
     calls.push({ path, method, body: init?.body ? JSON.parse(init.body) : undefined });
     const id = path.match(/^\/api\/threads\/([a-z0-9]+)$/)?.[1];
     if (id && method === 'GET' && held.has(id)) {
-      await new Promise<void>((release) => held.set(id, release));
+      // Like fetch: an aborted request rejects instead of hanging on.
+      await new Promise<void>((release, reject) => {
+        held.set(id, release);
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
     }
     if (id) return json({ ...thread(id), ...(init?.body ? JSON.parse(init.body) : {}) });
     if (path === '/api/threads') return json({ items: [] });
@@ -107,12 +111,24 @@ describe('the hyperagent-controls rail on the page', () => {
     expect(notSet.disabled).toBe(true);
   });
 
-  it('does not start a second read of a thread while the first poll is still waiting on the server', async () => {
+  it('loads the next thread when the previous thread\'s read never comes back, instead of waiting on it forever', async () => {
     api.hold('aaa111');
     await vi.advanceTimersByTimeAsync(15_000);
-    await vi.advanceTimersByTimeAsync(30_000);
+    (window.location as { pathname: string }).pathname = '/thread/bbb222';
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(rail().textContent).toContain('thread bbb222');
+    choose(effort(), 'high');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.writes()).toEqual([{ path: '/api/threads/bbb222', method: 'PATCH', body: { effort: 'high' } }]);
+  });
+
+  it('does not start another read of a thread while a poll is still waiting on the server', async () => {
+    api.hold('aaa111');
+    await vi.advanceTimersByTimeAsync(15_000);
+    // Past the next poll at 30 s, short of the 20 s cut-off on the read begun at 15 s.
+    await vi.advanceTimersByTimeAsync(16_000);
     const reads = api.calls.filter((call) => call.path === '/api/threads/aaa111' && call.method === 'GET');
-    // One from mounting, one from the first poll; the later polls found it still in flight.
+    // One from mounting, one from the poll at 15 s. The poll at 30 s found it in flight.
     expect(reads).toHaveLength(2);
   });
 });
