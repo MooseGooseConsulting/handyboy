@@ -6,6 +6,7 @@ import { FakeChatModel } from '@/src/agent/models';
 import { createPageToolset } from '@/src/agent/tools';
 import { DebuggerInputTier, type DebuggerApi, type DebuggerTarget } from '@/src/input/debugger';
 import type { ObserveMode } from '@/src/storage';
+import { HYPERAGENT_CONTROLS } from '@/src/userscripts/examples';
 import {
   EscalatableInput,
   createInPageTier,
@@ -273,6 +274,19 @@ describe('the agent can clean up its saved userscripts', () => {
     const { tools } = toolsAt('in-page', { readOnly: true, deleteUserscript: remove });
     await expect(tools.deleteUserscript('obsolete')).rejects.toThrow(/read.only/i);
     expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('refuses the unmodified bundled hyperagent-controls seed in a read-only run without executing it, because being bundled does not make a writing script read-only', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('a read-only run must not reach the runner with a writing script');
+    });
+    const { tools } = toolsAt('in-page', {
+      readOnly: true,
+      runUserscript: run,
+      resolveUserscript: async () => ({ ...HYPERAGENT_CONTROLS, updatedAt: 0 }),
+    });
+    await expect(tools.runUserscript(HYPERAGENT_CONTROLS.id)).rejects.toThrow(/^read-only run: bundled-hyperagent-controls script .* which a read-only run must not do$/);
+    expect(run).not.toHaveBeenCalled();
   });
 });
 

@@ -4,12 +4,15 @@
  *
  * The observers read the DOM and return JSON. `ebay-ram-comps` is the exception:
  * it GETs eBay search HTML and returns JSON. It does not write the DOM.
+ * `hyperagent-controls` is the one script here that writes: it mounts a rail on
+ * the page and PATCHes thread settings when the user changes a control in it.
  *
  * The wrapper in `runner.ts` runs a script as the body of an async function, so a
  * script hands its result back with a top-level `return`.
  */
 import type { Userscript } from '@/src/messaging';
 import { EBAY_RAM_COMPS_CODE } from './ebay-ram';
+import { HYPERAGENT_CONTROLS_CODE } from './hyperagent-controls';
 import { DEFAULT_PROBE_GLOBALS, buildProbeCode } from './i03';
 
 /** A bundled example, before the catalog stamps `updatedAt` on it.
@@ -258,9 +261,30 @@ export const I03_PAGE_ACCESS: UserscriptSeed = {
   code: buildProbeCode(DEFAULT_PROBE_GLOBALS, false),
 };
 
+/**
+ * The buried per-thread settings (model, provider, effort, subagent model,
+ * auto-compact) and the thread's usage, on a rail that stays on the page. See
+ * `hyperagent-controls.ts` for what it writes and where the ids came from.
+ */
+export const HYPERAGENT_CONTROLS: UserscriptSeed = {
+  id: 'bundled-hyperagent-controls',
+  name: 'hyperagent-controls',
+  matches: ['*://hyperagent.com/*', '*://www.hyperagent.com/*'],
+  code: HYPERAGENT_CONTROLS_CODE,
+};
+
+/**
+ * Bundled scripts that write. A read-only run lets an unmodified bundled seed skip
+ * the read-only scan because the seeds were all observers; that reasoning does not
+ * cover a seed built to change things, so these ids are scanned like any other
+ * script and a read-only run refuses them.
+ */
+export const WRITING_SEED_IDS: ReadonlySet<string> = new Set([HYPERAGENT_CONTROLS.id]);
+
 /** Everything `seedDefaults()` installs into an empty catalog. */
 export const BUNDLED_USERSCRIPTS: readonly UserscriptSeed[] = [
   HYPERAGENT_OBSERVE,
+  HYPERAGENT_CONTROLS,
   EBAY_SEARCH_EXTRACT,
   EBAY_RAM_COMPS,
   I03_PAGE_ACCESS,
