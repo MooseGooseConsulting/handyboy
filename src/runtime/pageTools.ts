@@ -49,7 +49,7 @@ import { toRunEvents } from '@/src/userscripts/debug';
 import type { AgentWriteResult } from '@/src/userscripts/authoring';
 import type { UserscriptValueStore } from './durability';
 import { isReadOnlyScript } from '@/src/agent/policy';
-import { BUNDLED_USERSCRIPTS } from '@/src/userscripts/examples';
+import { BUNDLED_USERSCRIPTS, WRITING_SEED_IDS } from '@/src/userscripts/examples';
 
 /** The slice of {@link PageDriver} the runtime uses. `PageDriver` satisfies it structurally. */
 export interface RuntimeDriver {
@@ -669,7 +669,8 @@ export function createPageTools(options: CreatePageToolsOptions): RuntimePageToo
     // comments and `.value =`. A seed the user edited in place keeps its bundled id,
     // so the id alone proves nothing: only unmodified seed code skips the scan.
     const seed = BUNDLED_USERSCRIPTS.find((candidate) => candidate.id === script.id);
-    if (seed && seed.code === script.code) return;
+    // A seed that is built to write gets no pass: it goes through the scan below.
+    if (seed && seed.code === script.code && !WRITING_SEED_IDS.has(seed.id)) return;
     const check = isReadOnlyScript(script.code);
     if (!check.ok) throw new Error(`read-only run: ${scriptId} ${check.reason}`);
   }
