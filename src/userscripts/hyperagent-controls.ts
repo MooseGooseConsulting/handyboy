@@ -215,34 +215,54 @@ const render = () => {
   fill(providerSel, PROVIDERS, settings.autoProviderOverride || '');
   providerSel.disabled = String(thread.modelId || '').indexOf('auto:') !== 0;
   fill(effortSel, [['', 'Not set']].concat(EFFORTS), thread.effort || '');
+  // No request is known to clear an effort, so "Not set" only reports a thread that
+  // has none. Leaving it selectable would show a cleared value the server never got.
+  effortSel.options[0].disabled = true;
   fill(subSel, [['', 'Default'], ['inherit', 'Parent model'], { group: 'Pinned', items: modelItems }], thread.defaultSubagentModel || '');
   fill(compactSel, COMPACT, settings.autoCompactThresholdPercent == null ? '' : String(settings.autoCompactThresholdPercent));
 };
 
+let refreshing = false;
 const refresh = async () => {
+  // One read at a time: a slow endpoint must not let the 15 s poll stack requests.
+  // A path change during a read is picked up by the next tick, because lastPath only
+  // advances once a refresh for the new path has actually started.
+  if (refreshing || stopped) return false;
+  refreshing = true;
   const id = threadIdFromPath();
-  if (!id) { current = { id: null, thread: null }; render(); return; }
   try {
+    if (!id) { current = { id: null, thread: null }; render(); return true; }
+    // The selects still show the previous thread until this read lands. Dropping
+    // current first means a change made in that gap has no thread to write to.
+    if (current.id !== id) { current = { id: null, thread: null }; usageBox.textContent = ''; render(); }
     const thread = await api('/api/threads/' + id);
-    if (threadIdFromPath() !== id) return;
+    if (stopped || threadIdFromPath() !== id) return true;
     current = { id: id, thread: thread };
     if (!busy) render();
     const usage = await api('/api/threads/' + id + '/usage').catch(() => null);
     const breakdown = await api('/api/threads/' + id + '/usage-breakdown').catch(() => null);
-    if (threadIdFromPath() === id) renderUsage(usage, breakdown);
+    if (!stopped && threadIdFromPath() === id) renderUsage(usage, breakdown);
   } catch (e) {
     note.textContent = 'Read failed: ' + e.message;
+  } finally {
+    refreshing = false;
   }
+  return true;
 };
 
 const patch = async (bodyObj, label) => {
-  if (!current.id) return;
+  // The id is pinned before the request and checked against the address bar: the
+  // rail must never write to a thread other than the one on screen, and a response
+  // that lands after the user has moved on must not be shown as the new thread's.
+  const targetId = current.id;
+  if (!targetId || targetId !== threadIdFromPath()) { render(); return; }
   busy = true;
   statusDot.textContent = 'saving';
   try {
-    current.thread = await api('/api/threads/' + current.id, {
+    const saved = await api('/api/threads/' + targetId, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj),
     });
+    if (current.id === targetId) current.thread = saved;
     // The app keeps its own cached copy of the thread, so its menus show the old value
     // until the page is reloaded. The rail re-reads the server and is the truth.
     note.textContent = label + ' saved. Hyperagent’s own menus update on reload.';
@@ -272,8 +292,11 @@ const timer = setInterval(() => {
   ticks += 1;
   // The app is a single-page app: moving between threads never reloads, so the path is
   // polled. Usage is re-read every 15 s while a thread is open.
-  if (location.pathname !== lastPath) { lastPath = location.pathname; note.textContent = ''; refresh(); }
-  else if (ticks % 15 === 0 && current.id && !busy && document.visibilityState === 'visible') refresh();
+  if (location.pathname !== lastPath) {
+    const path = location.pathname;
+    note.textContent = '';
+    refresh().then((started) => { if (started) lastPath = path; });
+  } else if (ticks % 15 === 0 && current.id && !busy && document.visibilityState === 'visible') refresh();
 }, 1000);
 root.__hbStop = () => { stopped = true; clearInterval(timer); };
 
